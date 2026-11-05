@@ -52,7 +52,10 @@
     "dsh": ">=0.2.0"
   },
   "scripts": {
-    "test": "node test/run-all.mjs"
+    "test": "node test/run-all.mjs",
+    "dev:mock": "node test/simulator.mjs",
+    "test:mock": "node test/mock-environment.test.mjs",
+    "test:e2e": "node test/e2e.mjs"
   },
   "publishConfig": {
     "access": "public"

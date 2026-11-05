@@ -1,9 +1,11 @@
 # 开发
 
 ```bash
-npm install
+pnpm install --ignore-scripts
 node test/e2e.mjs      # 假 NapCat + 假宿主，跑完整链路（不需要真 QQ）
 ```
+
+不启动 DSH 的网页模拟器：`pnpm dev:mock`；自动化场景：`pnpm test:mock`。覆盖范围和编排方式见 [本地模拟环境](mock-environment.md)。
 
 `test/mock-napcat.mjs` 也能单独当调试工具用：
 
