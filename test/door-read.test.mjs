@@ -66,11 +66,11 @@ test('同一名字被人重写过（mtime 变了）→ 重新算没拆', () => {
 
 test('不是门口的东西不会被记：别人的文件、她自己的回信、草稿', () => {
   const dir = mkDoor()
-  put(dir, '老三-2026-10-27.md', '# 我回的\n')
+  put(dir, '回复-2026-10-27.md', '# 我回的\n')
   put(dir, '_草稿.md', '# 草稿\n')
   const config = { doorDir: dir }
 
-  assert.equal(markDoorRead(config, join(dir, '老三-2026-10-27.md')), false, '她自己回的不算拆信')
+  assert.equal(markDoorRead(config, join(dir, '回复-2026-10-27.md')), false, '她自己回的不算拆信')
   assert.equal(markDoorRead(config, join(dir, '_草稿.md')), false, '草稿不算信')
   assert.equal(markDoorRead(config, 'D:/别的地方/随便.md'), false, '不在门口目录里的文件不该动账本')
   assert.equal(markDoorRead(config, ''), false)

@@ -32,7 +32,9 @@ window.__ModuleLoader__.load({
     //      DSH 那边的路由表会「注册成功但请求 404」，实测绕不过去，
     //      所以插件自己做一块本地工作台（这也是官方教程里说的插件形态）。
     const API = '/api/dsh-qq'
-    const LOCAL_API = 'http://127.0.0.1:34569/api/dsh-qq'
+    let localPort = 34569
+    let localSelected = false
+    const localApi = () => 'http://127.0.0.1:' + localPort + '/api/dsh-qq'
     let apiBase = null
 
     const resolveBase = async () => {
@@ -45,7 +47,8 @@ window.__ModuleLoader__.load({
           return null // 网络错 / 跨域 / 没起来，都算这条不通
         }
       }
-      apiBase = (await probe(API)) || (await probe(LOCAL_API)) || API
+      apiBase = localSelected ? await probe(localApi()) : (await probe(API)) || (await probe(localApi()))
+      if (!apiBase) throw new Error('设置接口不可达；请确认宿主路由或本地设置端口')
       return apiBase
     }
 
@@ -149,6 +152,7 @@ window.__ModuleLoader__.load({
 
     function Panel() {
       const [st, setSt] = useState(null)
+      const [portDraft, setPortDraft] = useState(String(localPort))
       const [val, setVal] = useState(null)
       const [busy, setBusy] = useState('')
       const [msg, setMsg] = useState(null)
@@ -213,9 +217,23 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const localConnection = h('div', { 'data-qq-col': '' },
+        h('label', { htmlFor: 'qq-local-api-port' }, '连接本地设置端口'),
+        h('input', { id: 'qq-local-api-port', 'data-qq-input': '', type: 'number', min: 1, max: 65535,
+          value: portDraft, onChange: e => setPortDraft(e.target.value) }),
+        h('button', { 'data-qq-btn': '', type: 'button', onClick: () => {
+          const port = Number(portDraft)
+          if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            setMsg({ text: '端口必须是 1–65535 的整数', tone: 'warn' }); return
+          }
+          localPort = port; localSelected = true; apiBase = null
+          setSt(null); setVal(null); setDraft({}); load()
+        } }, '连接此端口'),
+        h('div', { 'data-qq-note': '' }, '用于宿主路由不可用或多实例时选择目标服务；须与该实例 localApiPort 一致。'))
+
       if (!val) {
         return h('div', { 'data-qq-page': '' },
-          h('div', { 'data-qq-note': '' }, msg ? msg.text : '读取中…'))
+          h('div', { 'data-qq-note': '' }, msg ? msg.text : '读取中…'), localConnection)
       }
 
       const v = (key) => (draft[key] !== undefined ? draft[key] : val[key])
@@ -226,7 +244,7 @@ window.__ModuleLoader__.load({
       }
 
       /** 文本 / 数字：失焦才存（边打边存会把半截词写进去） */
-      const textField = (key, label, { hint, placeholder, mono, type = 'text', wrap }) => Row({
+      const textField = (key, label, { hint, placeholder, mono, type = 'text', wrap } = {}) => Row({
         label, hint,
         children: wrap
           ? null
@@ -294,6 +312,7 @@ window.__ModuleLoader__.load({
       const connected = Boolean(st && st.connected)
 
       return h('div', { 'data-qq-page': '' },
+        localConnection,
         /* ── 状态 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-row': '' },
@@ -431,6 +450,9 @@ window.__ModuleLoader__.load({
         /* ── 其它 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '其它'),
+          textField('localApiPort', '独立设置服务端口', { type: 'number', hint: '默认 34569；0 关闭。多实例使用不同端口，修改后重启宿主；连接时在页面顶部选择对应端口。' }),
+          textField('doorReplyPrefix', '门口回信前缀', { hint: '默认 回复-；以此前缀命名的文件不计入未读。' }),
+          textField('doorSenderLabel', '门口来信来源名称'),
           textField('voiceName', '语音声音名称', { hint: 'Windows SAPI 声音名称；留空使用系统默认声音。' }),
           boolField('debug', '输出调试日志', '日志落在会话目录根的 dsh-qq-debug.log（带 UTC 时间戳）。'),
           textField('textChunkLimit', '单条消息最大字数', { hint: '超出按段落/句号切成多条发。', type: 'number' }),

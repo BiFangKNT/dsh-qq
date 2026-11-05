@@ -95,7 +95,7 @@ t('第一次写会建头部 + 待确认', () => {
   assert.ok(text.includes('# 群词典'))
   assert.ok(text.includes('## 待确认'))
   assert.ok(text.includes('汽水是老夫（）'))
-  assert.ok(text.includes('↳ 22:27:44 鲸鲸回「认不出」'))
+  assert.ok(text.includes('↳ 22:27:44 机器人回「认不出」'))
 })
 
 t('重复扫不重复加', () => {

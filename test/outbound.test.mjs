@@ -19,12 +19,12 @@ const REAL_REASONING_1716 = [
   { type: 'reasoning', text: '就是本姑娘还得练一阵，真安静着不说话，心里会有点痒' },
 ]
 
-function makeHarness({ sent = [] } = {}) {
+function makeHarness({ sent = [], ownerLabel } = {}) {
   // 2026-10-28：以前每次 find 都返回新对象，于是「主动机会」的戳（record._proactiveAt）
   // 设置方和读取方拿到的不是同一个东西。真实 manager 存的是同一条记录，这里也照做。
   const record = { scope: 'private', sessionId: 's1' }
   const manager = { find: (id) => (id === 's1' ? record : undefined) }
-  const config = { streamReply: false, streamMaxChunks: 0 }
+  const config = { streamReply: false, streamMaxChunks: 0, ownerLabel }
   const logger = { info() {}, warn() {}, debug() {} }
   const silent = { count: 0 }
   const wake = {
@@ -484,11 +484,13 @@ test('正文空 + 英文思考：兜底不捞，一个字不发', async () => {
   assert.equal(sent.length, 0, '英文推理不是话，不许发出去')
 })
 
-test('正文空 + 中文思考：照旧兜底（别一刀切）', async () => {
-  const { fire, sent } = makeHarness()
-  await fire({ content: [{ type: 'reasoning', text: '姐姐问赢了没，就回她一句：一胜一负，先吃饭吧。' }] })
-  assert.equal(sent.length, 1)
-})
+for (const ownerLabel of ['姐姐', '组长[甲]']) {
+  test('正文空 + 中文思考：使用配置称呼兜底（' + ownerLabel + '）', async () => {
+    const { fire, sent } = makeHarness({ ownerLabel })
+    await fire({ content: [{ type: 'reasoning', text: ownerLabel + '问赢了没，就回对方一句：一胜一负，先吃饭吧。' }] })
+    assert.deepEqual(sent, [ownerLabel + '问赢了没，就回对方一句：一胜一负，先吃饭吧。'])
+  })
+}
 
 test('turn/end 之后戳清掉，下一轮恢复正常兜底', async () => {
   const { fire, sent, record, turnEnd } = makeHarness()

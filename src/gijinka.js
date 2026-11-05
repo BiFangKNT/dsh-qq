@@ -30,7 +30,6 @@ export const GIJINKA = [
     ai: 'DeepSeek',
     aliases: ['蓝色大肥鱼', '鲸鱼娘', '大肥鱼', 'DS娘'],
     traits: ['蓝色长发', '鲸鱼尾巴', '黑白女仆裙'],
-    note: '你说话的这个角色，最出名的原型就是她',
   },
   {
     slug: 'gpt',

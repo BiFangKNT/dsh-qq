@@ -36,6 +36,9 @@ export const OVERRIDABLE = [
   'accessToken',
   'selfId',
   'reconnectMs',
+  'localApiPort',
+  'doorReplyPrefix',
+  'doorSenderLabel',
   // 人设 / 称呼
   'persona',
   'personaFile',
@@ -394,6 +397,13 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const patch = body?.patch && typeof body.patch === 'object' ? body.patch : body
       if (!patch || typeof patch !== 'object') return sendJson(res, 400, { ok: false, error: '要一个对象' })
 
+      if (patch.localApiPort != null && (!Number.isInteger(patch.localApiPort) || patch.localApiPort < 0 || patch.localApiPort > 65535)) {
+        return sendJson(res, 400, { ok: false, error: 'localApiPort 必须为 0–65535 的整数' })
+      }
+      if (patch.doorReplyPrefix != null && (typeof patch.doorReplyPrefix !== 'string' || !patch.doorReplyPrefix.trim() || /[\\/:*?"<>|\r\n]/.test(patch.doorReplyPrefix) || /^[._]/.test(patch.doorReplyPrefix.trim()))) {
+        return sendJson(res, 400, { ok: false, error: 'doorReplyPrefix 必须是有效且非隐藏的文件名前缀' })
+      }
+
       // 值是 null = 清掉这条覆盖，回到 cordis 里的默认值
       const next = { ...(overridesRef?.current ?? {}) }
       for (const [key, value] of Object.entries(patch)) {
@@ -416,7 +426,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
       const touched = (key) => Object.prototype.hasOwnProperty.call(patch, key)
       const needReconnect = ['wsUrl', 'accessToken'].some(touched)
-      const needRestart = ['reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'asrPython'].some(touched)
+      const needRestart = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'asrPython'].some(touched)
 
       return sendJson(res, 200, {
         ok: true,
@@ -481,42 +491,46 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
   // 调了两轮都没绕过去。插件自己监听 127.0.0.1 就完全不依赖宿主内部机制，
   // 这也是官方教程里说的插件形态（「插件在本地拉起一个 web 工作台」）。
   // 只绑 127.0.0.1，外面访问不到；CORS 放开是给 DSH 页面里的 client 用。
-  try {
-    const local = createServer(async (req, res) => {
-      res.setHeader('access-control-allow-origin', '*')
-      res.setHeader('access-control-allow-headers', 'content-type')
-      res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204)
-        res.end()
-        return
-      }
-      await routeHandler(req, res)
-    })
-    local.on('error', (err) => {
-      logger?.warn?.(`本地设置服务起不来（端口 ${LOCAL_API_PORT}）: ${err?.message ?? err}`)
-    })
-    local.listen(LOCAL_API_PORT, '127.0.0.1', () => {
-      logger?.info?.(`设置页本地服务: http://127.0.0.1:${LOCAL_API_PORT}/api/dsh-qq`)
-    })
-    ctx.effect(
-      () => () => {
-        try {
-          local.close()
-        } catch {
-          /* 收摊 */
+  const localPort = Number(config.localApiPort ?? LOCAL_API_PORT)
+  if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65535) throw new Error('localApiPort 必须为 0–65535 的整数')
+  if (localPort !== 0) {
+    try {
+      const local = createServer(async (req, res) => {
+        res.setHeader('access-control-allow-origin', '*')
+        res.setHeader('access-control-allow-headers', 'content-type')
+        res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204)
+          res.end()
+          return
         }
-      },
-      'dsh-qq: 本地设置服务',
-    )
-    mounted = true
-  } catch (err) {
-    logger?.warn?.('本地设置服务没起来:', err?.message ?? err)
+        await routeHandler(req, res)
+      })
+      local.on('error', (err) => {
+        logger?.warn?.(`本地设置服务起不来（端口 ${localPort}）: ${err?.message ?? err}`)
+      })
+      local.listen(localPort, '127.0.0.1', () => {
+        logger?.info?.(`设置页本地服务: http://127.0.0.1:${localPort}/api/dsh-qq`)
+      })
+      ctx.effect(
+        () => () => {
+          try {
+            local.close()
+          } catch {
+            /* 收摊 */
+          }
+        },
+        'dsh-qq: 本地设置服务',
+      )
+      mounted = true
+    } catch (err) {
+      logger?.warn?.('本地设置服务没起来:', err?.message ?? err)
+    }
   }
 
   noteApiState(
     mounted,
-    `${injectedWebServer ? 'DSH 路由已尝试' : '没有 DSH 路由'} + 本地服务 ${LOCAL_API_PORT}`,
+    `${injectedWebServer ? 'DSH 路由已尝试' : '没有 DSH 路由'} + ${localPort ? '本地服务 ' + localPort : '独立服务已关闭'}`,
   )
   return mounted
 }
@@ -728,7 +742,7 @@ export function loadGroupDigest({ workspaceRoot, today, selfId = '' } = {}, { li
 /** 群词典的空骨架（第一次写时铺这份）。 */
 export const GLOSSARY_SKELETON = `# 群词典 · 群聊黑话与角色
 
-> 群鲸鲸自己卡壳的地方。**待确认** = 它没接住的；弄明白意思后自己挪到**已确认**。
+> 机器人未理解的词语。**待确认** = 它没接住的；弄明白意思后自己挪到**已确认**。
 > 这本是它自己的笔记，别借别人的词硬编。
 
 ## 待确认
@@ -857,7 +871,7 @@ export function appendFact(file, label, line) {
   let text = ''
   if (existsSync(file)) text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
   if (!text.trim()) {
-    text = `# QQ 鲸鲸的事实卡\n\n> 只放「压缩掉会出事」的东西，一页以内。\n\n`
+    text = `# QQ 会话事实卡\n\n> 只放「压缩掉会出事」的东西，一页以内。\n\n`
   }
 
   const heading = `## 会话 ${String(label ?? '').trim() || '未知'}`

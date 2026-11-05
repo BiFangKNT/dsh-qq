@@ -44,7 +44,7 @@ test('正文带 [SILENT] 的三种写法都能被认出来', () => {
 test('接线检查：沉默拦截必须排在 stripLeakedThinking 之前', () => {
   const src = readFileSync(new URL('../src/outbound.js', import.meta.url), 'utf8')
   const idxSilent = src.indexOf('rawText.includes(SILENT_MARKER)')
-  const idxStrip = src.indexOf('let text = stripLeakedThinking(rawText)')
+  const idxStrip = src.indexOf('let text = stripLeakedThinking(rawText, config)')
   assert.ok(idxSilent > 0, '「正文带 [SILENT] 就整条沉默」那道闸不见了')
   assert.ok(idxStrip > idxSilent, '闸必须在 stripLeakedThinking 前面，否则标记先被剥丢了')
   const block = src.slice(idxSilent, idxStrip)

@@ -833,7 +833,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       // ⭐ 2026-10-25 P2：/reset 也带上交接，别让「重新来过」真把刚才聊的忘干净。
       const handoff = loadHandoffFor(record)
       const seed = handoff
-        ? ['[这是你刚才自己留的便签（不是姐姐说的话）——接着聊就行，不用从头解释]', handoff]
+        ? ['[这是你刚才自己留的便签（不是对方说的话）——接着聊就行，不用从头解释]', handoff]
         : null
       const ok = manager.reset(record, seed)
       logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}，交接=${handoff ? '有' : '无'}`)

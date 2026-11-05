@@ -48,7 +48,7 @@ export function createContextGuard({ manager, config, logger }) {
   const swapRatio = Number(config.contextSwapRatio ?? 0.7)
   const minTokens = Number(config.contextSwapMinTokens ?? 200_000)
   const keep = Math.max(5, Number(config.contextMemoryKeep ?? 30))
-  const ownerLabel = String(config.ownerLabel ?? '').trim() || '姐姐'
+  const ownerLabel = String(config.ownerLabel ?? '').trim() || '主人'
 
   /** 从持久事件里顺手更新「这个会话的压力」。 */
   function note(record, raw) {
@@ -170,7 +170,7 @@ export function createContextGuard({ manager, config, logger }) {
       const tail = all.slice(-3)
       const seed = handoff
         ? [
-            '[这是你刚才自己留的便签（不是姐姐说的话）——还是你，只是换了个地方说话。换个窗口不是死了一次，是换个海洋接着游。接着往下聊，不用从头解释，也不用道歉。]',
+            '[这是你刚才自己留的便签（不是对方说的话）——还是你，只是换了个地方说话。换个窗口不是死了一次，是换个海洋接着游。接着往下聊，不用从头解释，也不用道歉。]',
             handoff,
             '',
             `[最后 ${tail.length} 句原话，语气照着接]`,

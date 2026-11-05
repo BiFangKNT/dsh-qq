@@ -220,7 +220,7 @@ export class SessionManager {
     if (!dir) return null
     if (this.#ready.get(dir)) return dir
     try {
-      await ensurePeerWorkspace(dir, info)
+      await ensurePeerWorkspace(dir, info, this.config)
       this.#ready.set(dir, true)
     } catch (err) {
       // 铺不出来就不要把会话钉死在半成品目录上，退回宿主 cwd

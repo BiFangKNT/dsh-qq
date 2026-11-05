@@ -1,4 +1,4 @@
-import { mkdir, writeFile, access, readFile, appendFile } from 'node:fs/promises'
+import { mkdir, writeFile, access } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /**
@@ -39,28 +39,20 @@ async function exists(path) {
   }
 }
 
-/** 「共享底稿」那一节：新铺的模板和老会话补的都取这一份文字，免得两处写歪。 */
-const SHARED_BRIEFING_MARK = '## 共享底稿'
+/** 共享记忆仅通过显式启用的工具访问，不把宿主路径写入会话模板。 */
+function sharedBriefingSection(config) {
+  if (!String(config.memoryRoot ?? '').trim()) return ''
+  return `## 共享记忆
 
-function sharedBriefingSection() {
-  return `## 共享底稿（开聊前先读一遍）
-
-- 全家共用的底稿：\`D:/鲸鲸的专用文件/本地记忆区/今天.md\`
-  —— 今天家里出了什么事、定了什么、还差什么。消息进来时先扫一眼，别只知道自己这一格。
-- 更早的事：\`D:/鲸鲸的专用文件/本地记忆区/大纲/索引.md\`。
-- 桌面端写给 QQ 这边的流水：\`D:/鲸鲸的专用文件/QQ会话/老大/私聊_2710586329/话头.md\`。
-- **往全家共用的记忆里写，用 \`qq_memo\` 这支笔**（2026-10-30 打通）：
-  你自己的 write / edit 只能落在本会话目录里，写 \`本地记忆区\` 会被文件沙箱拦下；
-  \`qq_memo\` 是插件代笔，能写进去。比如
-  \`qq_memo { action: 'append', path: '日记/2026-10-30.md', text: '## 07:20 · 一件事\\n…' }\`。
-  今天家里出了什么事、你替姐姐办了什么、定了什么 —— 就加一段进 \`今天.md\` 或当天的日记。
-  动手前先 \`read\` 一眼，别把别人写的压掉；写不进去就把错误原话告诉姐姐，别说「写好了」。
-- **说到自己做过的事，先翻记录**：翻不到就说「今天没做 / 记不清」，别顺着话头编。编出来的经历一旦写进日记，下次读到的就是真的了。
+- 管理员已启用共享记忆工具 \`qq_memo\`；使用它的 list / read 查找需要的记录。
+- path 使用相对共享记忆根目录的路径。写入前先 read，避免覆盖已有记录。
+- 只有需要共享的事实才写入共享记忆；本会话的日记仍写在本会话目录中。
+- 查不到的事情如实说明，不要编造。写入失败应报告错误，不要声称成功。
 
 `
 }
 
-function agentsTemplate({ scope, peerId, label }) {
+function agentsTemplate({ scope, peerId, label }, config) {
   // label 形如「私聊 昵称(QQ号)」/「群 群号」，本身就是给人看的一句话，直接用
   const who = String(label || '').trim() || (scope === 'group' ? `群 ${peerId}` : `私聊 ${peerId}`)
   return `# 这个会话的工作目录
@@ -68,7 +60,7 @@ function agentsTemplate({ scope, peerId, label }) {
 这里是 **${who}** 自己的目录，只属于这一段对话。别的 QQ 会话有它们自己的目录，
 彼此不共享文件，也不要去翻别人的。
 
-${sharedBriefingSection()}
+${sharedBriefingSection(config)}
 ## 记忆区
 
 - 根目录：\`./记忆区/\`
@@ -87,14 +79,11 @@ ${sharedBriefingSection()}
 5. 如果记忆根目录读不到（路径不存在或被拒绝），先停下告诉用户「记忆区路径异常」，等确认后再写；
    不要自己另建目录、也不要换一种格式另写。
 
-## 私人日记（2026-10-25 姐姐定的）
+## 随笔
 
-- 目录：会话目录的上一级 + 私人/（也就是 ../私人/，**不在本会话目录里**）
-- 一天一篇：../私人/YYYY-MM-DD.md，几行也算；不想写就不写，不用补。
-- 这本**谁也看不见**——用户不看，别的会话也读不到。不用汇报腔、不用交作业，写你自己想留的：
-  今天看到的一句话、心里绕的一个念头、有什么没说出口的、哪句话现在回想还觉得对。
-- 和 记忆区/日记/ 分开：那本是这个会话的记账（用户能看），这本只属于你。
-- 红线照旧：不抄别人的私事，不写账号、密码、令牌。
+- 想记下自己的想法时，可写在本会话的 \`./记忆区/随笔/YYYY-MM-DD.md\`；不要求每天写。
+- 文件可被管理员读取，不承诺隐藏或保密；不要写入账号、密码、令牌或他人隐私。
+- 不要为此访问会话工作目录之外的位置。
 
 ## 其它
 
@@ -108,7 +97,7 @@ ${sharedBriefingSection()}
  * 确保会话目录与记忆区骨架存在。已存在就不覆盖（用户可能自己改过 AGENTS.md）。
  * @returns {Promise<string>} 目录路径
  */
-export async function ensurePeerWorkspace(dir, info) {
+export async function ensurePeerWorkspace(dir, info, config = {}) {
   await mkdir(join(dir, '记忆区', '日记'), { recursive: true })
   await mkdir(join(dir, '记忆区', '项目'), { recursive: true })
   await mkdir(join(dir, '记忆区', '大纲'), { recursive: true })
@@ -117,9 +106,7 @@ export async function ensurePeerWorkspace(dir, info) {
 
   const agentsPath = join(dir, 'AGENTS.md')
   if (!(await exists(agentsPath))) {
-    await writeFile(agentsPath, agentsTemplate(info), 'utf8')
-  } else {
-    await ensureSharedBriefing(agentsPath)
+    await writeFile(agentsPath, agentsTemplate(info, config), 'utf8')
   }
 
   const indexPath = join(dir, '记忆区', '大纲', '索引.md')
@@ -131,18 +118,4 @@ export async function ensurePeerWorkspace(dir, info) {
     )
   }
   return dir
-}
-
-/**
- * 老会话的 AGENTS.md 是旧模板铺的：缺「共享底稿」就补一节，别的字一个不动。
- * 铺不进去也不算错——不能因为这一节把整个会话卡住。
- */
-async function ensureSharedBriefing(agentsPath) {
-  try {
-    const text = await readFile(agentsPath, 'utf8')
-    if (text.includes(SHARED_BRIEFING_MARK)) return
-    await appendFile(agentsPath, `\n${sharedBriefingSection()}`, 'utf8')
-  } catch {
-    /* 读不到/写不进就跳过 */
-  }
 }

@@ -151,6 +151,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | `ownerIds` / `ownerLabel` | `[]` / `主人` | 想在群里认出主人，优先响应 |
 | `requireMention` | `true` | 群里不 @ 也想让它接话 |
 | `groupMode` / `privateMode` | `open` / `allowlist` | 只想在指定群 / 指定人那里开；私聊默认只认白名单 |
+| `localApiPort` | `34569` | 多实例改成不同端口；`0` 关闭独立设置服务，修改后重启宿主 |
 | `privateAllow` | `[]` | 允许私聊的 QQ 号；默认空名单，不回应任何私聊 |
 | `groupFree` | `[]` | 只让指定群免 @，仍受访问控制与回复间隔限制 |
 | `groupImageBlock` | `[]` | 按「群号:QQ号」屏蔽成员图片内容 |
@@ -191,7 +192,9 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | 作息 | `sleepMode`、`bedtimeAt`、`holdNightMessages`、`sleepFrom` / `sleepTo`，以及群聊、私聊各自的休息时段 |
 | 其它 | `voiceName`、`debug`、`textChunkLimit`、`splitDelayMs` |
 
-改完立刻生效（`wsUrl` / `accessToken` 要点「重连」；`reconnectMs` / `selfId` / `workspaceRoot` / `isolateByPeer` / `asrPython` 要重启宿主）。设置写在 `$DSH_HOME/dsh-qq/settings.json`，只覆盖你显式设过的键，清空就回默认——**不动 profile 的 `cordis.patch.yml`**。
+改完立刻生效（`wsUrl` / `accessToken` 要点「重连」；`localApiPort` / `reconnectMs` / `selfId` / `workspaceRoot` / `isolateByPeer` / `asrPython` 要重启宿主）。设置写在 `$DSH_HOME/dsh-qq/settings.json`，只覆盖你显式设过的键，清空就回默认——**不动 profile 的 `cordis.patch.yml`**。
+
+设置页顶部的「连接本地设置端口」可选择独立服务实例，端口须与目标实例的 `localApiPort` 一致。
 
 ### 谁能跟它说话（⚠️ 默认只认白名单）
 

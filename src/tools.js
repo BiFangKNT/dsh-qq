@@ -136,8 +136,8 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
   tools.register({
     name: 'qq_facts',
     description:
-      '读写自己的事实卡（跨压缩还记得的关键事实：姐姐怎么称呼、作息、禁忌、正在做的事）。' +
-      '只有姐姐说「记一下」时才用 append 往当前会话那一节加一行；平时不用调 read——事实卡已经在你面前的提示里了。',
+      '读写自己的事实卡（跨压缩还记得的关键事实：对方怎么称呼、作息、禁忌、正在做的事）。' +
+      '只有对方明确要求「记一下」时才用 append 往当前会话那一节加一行；平时不用调 read——事实卡已经在你面前的提示里了。',
     parameters: {
       type: 'object',
       properties: {

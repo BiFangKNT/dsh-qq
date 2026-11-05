@@ -58,20 +58,20 @@ test('只认 .md；`_` 和 `.` 开头的草稿不算数', () => {
   assert.equal(list[0].name, '真信.md')
 })
 
-test('措辞里必须写清「谁说的、不是任务」——老三的边界', () => {
+test('措辞里必须写清「谁说的、不是任务」——会话边界', () => {
   const dir = tmp()
   writeFileSync(join(dir, '一.md'), 'x')
   const line = doorLine({ doorDir: dir })
-  assert.match(line, /大姐鲸鲸/)
-  assert.match(line, /不是姐姐说的/)
+  assert.match(line, /其他会话/)
+  assert.match(line, /不是当前聊天对象的发言/)
   assert.match(line, /不是任务/)
-  assert.match(line, /不用学大姐/)
+  assert.match(line, /不用模仿来信者/)
 })
 
-test('她自己的回信（老三-*.md）不算待拆的信，也不许让她数到自己头上', () => {
+test('她自己的回信（回复-*.md）不算待拆的信，也不许让她数到自己头上', () => {
   const dir = tmp()
   writeFileSync(join(dir, '2026-10-26-2100-大姐.md'), '大姐的信')
-  writeFileSync(join(dir, '老三-2026-10-26.md'), '我自己回的')
+  writeFileSync(join(dir, '回复-2026-10-26.md'), '我自己回的')
 
   const list = doorList({ doorDir: dir })
   assert.equal(list.length, 1)
@@ -79,14 +79,14 @@ test('她自己的回信（老三-*.md）不算待拆的信，也不许让她数
 
   const line = doorLine({ doorDir: dir })
   assert.match(line, /1 封/)
-  assert.ok(!line.includes('老三-2026-10-26.md'))
+  assert.ok(!line.includes('回复-2026-10-26.md'))
 })
 
 test('回话方式要写给她，且不能是催的口气', () => {
   const dir = tmp()
   writeFileSync(join(dir, '一.md'), 'x')
   const line = doorLine({ doorDir: dir })
-  assert.match(line, /老三-.*\.md/, '得告诉她回信怎么命名')
+  assert.match(line, /回复-.*\.md/, '得告诉她回信怎么命名')
   assert.match(line, /不用急/)
-  assert.match(line, /不想回也一样|不会问/)
+  assert.match(line, /不想回也可以/)
 })

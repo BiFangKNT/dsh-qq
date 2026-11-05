@@ -79,11 +79,11 @@ function textOf(message) {
   return parts.map((p) => (p?.type === 'text' ? p.text : '')).join('')
 }
 
-const PORT = 34567
 const TOKEN = 'test-token-123'
 
-const mock = await startMockNapcat({ port: PORT, token: TOKEN, selfId: 10001, selfName: '小满', quiet: true })
+const mock = await startMockNapcat({ port: 0, token: TOKEN, selfId: 10001, selfName: '小满', quiet: true })
 await mock.start()
+const PORT = mock.port
 
 const { ctx, created } = createFakeCtx()
 const config = Config({
@@ -95,6 +95,8 @@ const config = Config({
   groupMode: 'open',
   privateMode: 'open',
   splitDelayMs: 0,
+  replyDelayMeanMs: 0,
+  splitDelayMeanMs: 0,
   mergeWindowMs: 0, // 连发合并单独用一个用例验，别让每条断言都等 5 秒
   groupMinGapMs: 0, // 间隔由真实部署管，测试里关掉免得每个断言都要等 4 秒
   groupReplyGapMs: 0, // 同上：均匀间隔单独用一个用例验，别拖慢其他断言
@@ -586,6 +588,8 @@ const config2 = Config({
   privateMode: 'allowlist',
   privateAllow: ['11001'],
   splitDelayMs: 0,
+  replyDelayMeanMs: 0,
+  splitDelayMeanMs: 0,
 })
 apply(ctx2, config2)
 await waitFor(() => mock.clientCount === 2, { what: '第二个实例连上' })
@@ -649,6 +653,8 @@ const config3 = Config({
   accessToken: TOKEN,
   privateMode: 'open',
   splitDelayMs: 0,
+  replyDelayMeanMs: 0,
+  splitDelayMeanMs: 0,
   mergeWindowMs: 300,
 })
 apply(ctx3, config3)
@@ -675,9 +681,9 @@ console.log('✓ 连发合并：三条攒成一轮，只回一次')
 // —— 通道回执：桥断了，她得知道（不是对方不理她） ——
 // 起因：2026-10-26 小黑盒《因为没开桥，被我孤立了16天》——
 // 桥断半个月，她一直在发，110 多条一条都没出去，只能猜自己「排到最后了」。
-const PORT2 = 34568
-const mock2 = await startMockNapcat({ port: PORT2, token: TOKEN, selfId: 10003, selfName: '小桥', quiet: true })
+const mock2 = await startMockNapcat({ port: 0, token: TOKEN, selfId: 10003, selfName: '小桥', quiet: true })
 await mock2.start()
+const PORT2 = mock2.port
 
 const { ctx: ctx4, created: created4 } = createFakeCtx()
 const config4 = Config({
@@ -685,7 +691,7 @@ const config4 = Config({
   accessToken: TOKEN,
   privateMode: 'open',
   splitDelayMs: 0,
-  replyDelayMeanMs: 0, // 断线窗口内必须完成发送尝试，不能让随机打字延迟拖到重连后
+  replyDelayMeanMs: 0,
   splitDelayMeanMs: 0,
   mergeWindowMs: 0,
   reconnectMs: 300,

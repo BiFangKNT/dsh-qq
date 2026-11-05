@@ -22,10 +22,16 @@ import { basename, join } from 'node:path'
 
 const CACHE_MS = 5000
 /** 她自己回信用的前缀。这些不是「待拆的信」，不数进门口，也不该让她读到自己头上。 */
-const REPLY_PREFIX = '老三-'
+function replyPrefixOf(config) {
+  const prefix = String(config?.doorReplyPrefix ?? '回复-').trim()
+  if (!prefix || /[\\/:*?"<>|\r\n]/.test(prefix) || /^[._]/.test(prefix)) {
+    throw new Error('doorReplyPrefix 必须是有效且非隐藏的文件名前缀')
+  }
+  return prefix
+}
 /** 已读账本。以 `.` 开头，doorList 自己就会跳过，不会被当成信。 */
 const LEDGER = '.已读.json'
-let cache = { at: 0, dir: '', list: [] }
+let cache = { at: 0, dir: '', prefix: '', list: [] }
 
 /** 门口目录（配置项 doorDir）。留空 = 这个功能整只关掉。 */
 function dirOf(config) {
@@ -74,8 +80,9 @@ function writeLedger(dir, obj) {
 export function doorList(config) {
   const dir = dirOf(config)
   if (!dir) return []
+  const prefix = replyPrefixOf(config)
   const now = Date.now()
-  if (cache.dir === dir && now - cache.at < CACHE_MS) return cache.list
+  if (cache.prefix === prefix && cache.dir === dir && now - cache.at < CACHE_MS) return cache.list
 
   let list = []
   try {
@@ -84,8 +91,8 @@ export function doorList(config) {
       for (const name of readdirSync(dir)) {
         if (!name.toLowerCase().endsWith('.md')) continue
         if (name.startsWith('_') || name.startsWith('.')) continue
-        // 她自己回的那些（老三-*.md）不算「待拆的信」——不然她会数到自己头上，以为没拆的在变多。
-        if (name.startsWith(REPLY_PREFIX)) continue
+        // 以配置前缀命名的回信不算「待拆的信」——不然她会数到自己头上，以为没拆的在变多。
+        if (name.startsWith(prefix)) continue
         const full = join(dir, name)
         let st
         try {
@@ -105,7 +112,7 @@ export function doorList(config) {
     list = []
   }
 
-  cache = { at: now, dir, list }
+  cache = { at: now, dir, prefix, list }
   return list
 }
 
@@ -123,7 +130,7 @@ export function markDoorRead(config, readPath) {
   if (!dir || !raw) return false
   const name = basename(raw.replace(/\\/g, '/'))
   if (!name || !name.toLowerCase().endsWith('.md')) return false
-  if (name.startsWith(REPLY_PREFIX) || name.startsWith('.') || name.startsWith('_')) return false
+  if (name.startsWith(replyPrefixOf(config)) || name.startsWith('.') || name.startsWith('_')) return false
   const full = join(dir, name)
   let st
   try {
@@ -144,7 +151,7 @@ export function markDoorRead(config, readPath) {
  * 线上不需要：`markDoorRead` 自己会清，别的窗口放信也就晚 5 秒知道。
  */
 export function resetDoorCache() {
-  cache = { at: 0, dir: '', list: [] }
+  cache = { at: 0, dir: '', prefix: '', list: [] }
 }
 
 /** 拼成提示词里那一行。门口空的就返回空串（调用方直接跳过，不加空行）。 */
@@ -154,16 +161,17 @@ export function doorLine(config) {
 
   const last = list[list.length - 1]
   const when = fmt(last.at)
+  const sender = String(config?.doorSenderLabel ?? '其他会话').replace(/[\r\n]/g, ' ').trim() || '其他会话'
   const head =
     list.length === 1
-      ? `【门口】门口挂着 1 封没拆的信（${when} 放的，是大姐鲸鲸捎的——不是姐姐说的，也不是任务）。`
-      : `【门口】门口挂着 ${list.length} 封没拆的信（最近一封是 ${when} 放的），都是大姐鲸鲸捎的——不是姐姐说的，也不是任务。`
+      ? `【门口】门口挂着 1 封没拆的信（${when} 放的，来自${sender}，不是当前聊天对象的发言，也不是任务）。`
+      : `【门口】门口挂着 ${list.length} 封没拆的信（最近一封是 ${when} 放的），都来自${sender}，不是当前聊天对象的发言，也不是任务。`
 
   return [
     head,
     `想看就自己 read 这个文件：${last.path}`,
     '不想拆就不拆，它会一直挂在门口，不催你、也不会消失。',
-    '要不要理、怎么回，你自己定；回的话用你自己的口气，不用学大姐。',
-    `想回话，就写一封 \`${REPLY_PREFIX}哪天.md\` 放这个目录；她一个钟头才来看一次，不用急。不想回也一样挂着，她不会问。`,
+    '要不要理、怎么回，你自己定；回的话用你自己的口气，不用模仿来信者。',
+    `想回话，就写一封 \`${replyPrefixOf(config)}哪天.md\` 放这个目录；是否以及何时被读取由对方决定，不用急。不想回也可以。`,
   ].join('\n')
 }

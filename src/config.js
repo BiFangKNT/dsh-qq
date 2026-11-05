@@ -44,6 +44,10 @@ export const ConfigSchema = Schema.object({
     .default(5000)
     .description('断线重连间隔，单位毫秒'),
 
+  localApiPort: Schema.number().min(0).max(65535).step(1)
+    .default(34569)
+    .description('独立设置服务的回环端口；0 = 关闭独立服务，仍可使用宿主设置路由。多实例请用不同端口，修改后重启宿主'),
+
   // ── Agent ──
   provider: Schema.string().description('LLM provider 名称；留空跟随宿主默认'),
   model: Schema.string().description('模型名；留空跟随宿主默认'),
@@ -60,20 +64,24 @@ export const ConfigSchema = Schema.object({
   faceRoot: Schema.string()
     .default('')
     .description(
-      '表情包收藏（`表情包收藏.json` + `表情包/`）放在哪个目录。三只 QQ 鲸鲸填同一个路径就是共用一套收藏；留空则跟 `workspaceRoot` 走（各存各的）',
+      '表情包收藏（`表情包收藏.json` + `表情包/`）放在哪个目录。多个 QQ 会话填同一个路径就是共用一套收藏；留空则跟 `workspaceRoot` 走（各存各的）',
     ),
   doorDir: Schema.string()
     .default('')
     .description(
-      '「门口」信箱目录：别的窗口（比如大姐）给它留的话，每封一个 .md 文件。留空则关闭。填了以后每轮提示词里会多一行「门口有 N 封」，但**不给内容** —— 它自己 read 才看得到，拆不拆随它，不催不推',
+      '「门口」信箱目录：其他会话给它留的话，每封一个 .md 文件。留空则关闭。填了以后每轮提示词里会多一行「门口有 N 封」，但**不给内容** —— 它自己 read 才看得到，拆不拆随它，不催不推',
     ),
+  doorReplyPrefix: Schema.string().default('回复-')
+    .description('门口回信文件前缀；以此前缀命名的文件不计入未读。不可为空或包含路径分隔符'),
+  doorSenderLabel: Schema.string().default('其他会话')
+    .description('门口来信来源的显示名称；不代表已验证的发件人身份'),
   isolateByPeer: Schema.boolean()
     .default(true)
     .description('每个私聊/每个群各自一个工作目录与记忆区（互不可见，也不碰宿主的私人记忆区）'),
   memoryRoot: Schema.string()
     .default('')
     .description(
-      '全家共用的记忆区根目录（比如 D:/鲸鲸的专用文件/本地记忆区）。填了才注册 `qq_memo` 这支笔：' +
+      '全家共用的记忆区根目录（比如 D:/agent-memory）。填了才注册 `qq_memo` 这支笔：' +
         '会话的工作目录在 peer 目录里，agent 自己的写工具出不去（文件沙箱按会话工作目录算）；' +
         '要往全家的日记、今天.md、项目文档里写，就靠它代笔——插件跑在宿主进程里，直接写文件，不受 agent 沙箱限制。留空 = 关掉这支笔',
     ),
@@ -155,7 +163,7 @@ export const ConfigSchema = Schema.object({
   // 想让它在群里活络一点，把 groupWakeKeywords 填上、groupWakeProbability 开成 0.05 就行。
   groupWakeNameMention: Schema.boolean()
     .default(true)
-    .description('群里叫鲸鲸的名字（含 groupWakeNames 里的别名）就算在叫它，不用 @'),
+    .description('群里叫机器人的名字（含 groupWakeNames 里的别名）就算在叫它，不用 @'),
   groupWakeQuestion: Schema.boolean()
     .default(true)
     .description('明显在问它（「你行不行」「在不在」「理我」这类）就算在叫它，不用 @'),
@@ -169,7 +177,7 @@ export const ConfigSchema = Schema.object({
     ),
   groupWakeNames: Schema.array(Schema.string())
     .default([])
-    .description('额外的称呼，除了 QQ 昵称以外还算作叫它（如 大肥鱼、鲸鲸、鲸鱼娘）'),
+    .description('额外的称呼，除了 QQ 昵称以外还算作叫它（如 小助手、助理）'),
   addressedMaySilent: Schema.boolean()
     .default(false)
     .description(

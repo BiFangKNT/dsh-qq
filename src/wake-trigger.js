@@ -18,7 +18,7 @@
 
 /** 提到 AI / 本鲸的说法。命中后还要配一个疑问或挑战才算「在问它」。 */
 const AI_WORDS =
-  /deepseek|claude|chatgpt|gpt|gemini|qwen|llama|大肥鱼|小鲸鱼|鲸鱼娘|鲸鲸|d指导|d老师|d师傅|深度求索|\bds\b|人工智障|机器人|模型/
+  /deepseek|claude|chatgpt|gpt|gemini|qwen|llama|d指导|d老师|d师傅|深度求索|\bds\b|人工智障|机器人|模型/
 
 /** 挑战 / 比试口气：光提 AI 不够，得在较劲。 */
 const CHALLENGE = /强|弱|行不行|能不能|会不会|是不是|一半|水平|垃圾|废物|白嫖|菜|不如|厉害|赢|输|比.*强|比.*弱/
@@ -30,12 +30,12 @@ const QUESTION = /[?？吗呢吧]|怎么|为什么|哪|谁/
  * 这句话是不是在问 AI（而不是群里随便聊聊）。
  * 完全照搬前辈的六条，只把 AI 词表换成咱们这边的叫法。
  */
-export function isDirectedAtAi(input) {
+export function isDirectedAtAi(input, names = []) {
   const lower = String(input ?? '').toLowerCase()
   if (!lower) return false
 
   // ① 提到 AI + 疑问/挑战：「deepseek 行不行」「大肥鱼比 claude 强吗」
-  if (AI_WORDS.test(lower) && (QUESTION.test(lower) || CHALLENGE.test(lower))) return true
+  if ((AI_WORDS.test(lower) || hasAnyName(lower, names)) && (QUESTION.test(lower) || CHALLENGE.test(lower))) return true
 
   // ② 「你/您」十来个字内接疑问/比较：「你觉得呢」「你能不能不这么菜」
   if (
@@ -105,7 +105,7 @@ export function evaluateWakeTrigger({ plainText, atMe, quotedMe, names = [], tri
   const kw = matchKeyword(text, triggers.keywords)
   if (kw) return `keyword:${kw}`
 
-  if (triggers.question !== false && isDirectedAtAi(text)) return 'question'
+  if (triggers.question !== false && isDirectedAtAi(text, names)) return 'question'
 
   return null
 }

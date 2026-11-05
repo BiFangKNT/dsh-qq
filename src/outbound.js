@@ -128,7 +128,7 @@ function looksSelfReview(line) {
 const CONTEXT_ECHO_RE = new RegExp(
   '^(?:' +
     '\\[现在是[^\\]]{2,40}\\]' + // 时间信封
-    '|\\[(?:姐姐|主人)\\]' + // 私聊里主人/姐姐的信封标签
+    '|\\[主人\\]' + // 私聊里主人/姐姐的信封标签
     '|\\[(?:群友|群友\\d+)\\s[^\\]]{0,20}\\]' + // 群聊 historyLine 的信封标签
     ')\\s*[^\\n]{0,80}$',
 )
@@ -455,7 +455,7 @@ export function looksPlanning(line) {
   return false
 }
 
-export function stripLeakedThinking(text) {
+export function stripLeakedThinking(text, config = {}) {
   if (!text) return text
   const kept = repairShape(text).split('\n').map((line) => {
     let t = line.trim()
@@ -466,7 +466,8 @@ export function stripLeakedThinking(text) {
       if (!t) return null
     }
     // 整行是插件自己的上下文信封（`[现在是 …]` / `[姐姐] …`）→ 不是话，丢掉
-    if (CONTEXT_ECHO_RE.test(t)) return null
+    const label = String(config.ownerLabel ?? '').trim()
+    if (CONTEXT_ECHO_RE.test(t) || (label && t.startsWith('[' + label + ']') && t.length <= label.length + 83)) return null
     // 整行是「点评自己上一句」的元话（`破折号? fine.`）→ 丢掉
     if (looksSelfReview(t)) return null
     // 整行是英文改稿标签（`— better: 打爽了没` / `Reply: 平手，还行`）→ 丢掉
@@ -561,7 +562,7 @@ export function hasToolUse(message) {
   return content.some((part) => /tool|function/i.test(String(part?.type ?? '')))
 }
 
-export function reasoningTail(message) {
+export function reasoningTail(message, config = {}) {
   const content = message?.content
   if (!Array.isArray(content)) return ''
   const parts = []
@@ -575,7 +576,7 @@ export function reasoningTail(message) {
     .map((p) => p.trim())
     .filter(Boolean)
   const cleaned = segments.map((seg) => ({
-    text: stripLeakedThinking(seg) || '',
+    text: stripLeakedThinking(seg, config) || '',
     marked: DRAFT_MARK.test(seg),
   }))
 
@@ -624,7 +625,11 @@ export function reasoningTail(message) {
  * 白名单比黑名单稳——元词列不全，而"她在跟谁说话"这件事漏不掉。
  * 只在这条兜底路径上生效，正常正文不经过它。
  */
-const SPEECH_MARK = /你|您|姐姐|主人|本姑娘|咱/
+const SPEECH_MARK = /你|您|主人|本姑娘|咱/
+function hasSpeechMark(text, config) {
+  const label = String(config?.ownerLabel ?? '').trim()
+  return SPEECH_MARK.test(text) || Boolean(label && text.includes(label))
+}
 const META_WORD =
   /再加|加一点|减一点|改一下|改一改|换个说法|说得|写得|语气|口吻|温度|太长|太短|短一点|长一点|字数|句子|一句/g
 /** 自问自答的样子：「嗯，但会不会显得太冷淡？不，规矩说不发也可以。」 */
@@ -644,7 +649,7 @@ function mostlyChinese(s) {
   return cjk >= 4 && cjk * 2 >= latin
 }
 
-export function stripMetaTalk(text) {
+export function stripMetaTalk(text, config = {}) {
   const src = String(text ?? '').trim()
   if (!src) return ''
   const segs = src
@@ -656,7 +661,7 @@ export function stripMetaTalk(text) {
     const meta = (seg.match(META_WORD) ?? []).length
     if (meta >= 2) continue // 一句话里两处元词：铁定是在改稿，不是在说话
     if (SELF_TALK.test(seg)) continue // 在问自己，不是在跟姐姐说话
-    if (SPEECH_MARK.test(seg)) {
+    if (hasSpeechMark(seg, config)) {
       kept.push(seg)
       continue
     }
@@ -682,14 +687,14 @@ export function stripMetaTalk(text) {
  * 「姐姐晚安，我先睡了」有称呼，照发；「结束这轮，不再说话。」没有，丢。
  */
 const CLOSING_HEAD = /^(结束|这轮|本轮|收工|先这样|到此|就到这里|话说到这)/
-export function stripClosingTalk(text) {
+export function stripClosingTalk(text, config = {}) {
   const src = String(text ?? '').trim()
   if (!src) return ''
   return src
     .split(/\n+/)
     .map((s) => s.trim())
     .filter(Boolean)
-    .filter((seg) => !(CLOSING_HEAD.test(seg) && !SPEECH_MARK.test(seg)))
+    .filter((seg) => !(CLOSING_HEAD.test(seg) && !hasSpeechMark(seg, config)))
     .join('\n')
     .trim()
 }
@@ -795,7 +800,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
         if (!match) break
         const sentence = match[1].trim()
         if (sentence.length < MIN_SENTENCE) break
-        const clean = stripLeakedThinking(sentence)
+        const clean = stripLeakedThinking(sentence, config)
         if (clean) await emit(record, clean)
         buf = buf.slice(match[0].length)
         consumed += match[0].length
@@ -835,11 +840,11 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
         wake?.noteProactiveSilent?.(record)
         return
       }
-      let text = stripLeakedThinking(rawText)
+      let text = stripLeakedThinking(rawText, config)
       // 2026-10-27 21:4x：正常正文也过一遍收尾元话。
       // 以前只有「正文为空、兜底捞 reasoning」那条路才剥，所以
       // 「结束这轮，不再说话。」这种宣告句直接从正文流出去了。
-      text = stripClosingTalk(text)
+      text = stripClosingTalk(text, config)
       // 2026-10-28 13:09 事故：主动机会那一轮，正文整句是
       // 「不过可以想到：她之前说困了眯一会儿。等她自己醒。沉默。」
       // 一个标记都没有，纯心里话写进了正文。主动轮本来就允许「不说」，
@@ -867,7 +872,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
         return
       }
       if (!text && !hasToolUse(data.message)) {
-        const tailed = reasoningTail(data.message)
+        const tailed = reasoningTail(data.message, config)
         if (tailed.includes(SILENT_MARKER)) {
           // 2026-10-27 16:00 事故：她那轮 reasoning 是「嗯，但会不会显得太冷淡？不，规矩说不发也可以。」
           // 加「我选 [SILENT]。」——text 空，兜底把整段捞成正文，连标记一起发到了 QQ 上。
@@ -877,7 +882,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
         } else {
           // 2026-10-27 15:08 事故：兜底捞出「再加一点温度：不用太长。／好，一句。」这种改稿指令。
           // 先剥掉元话语；剥空了就当这轮没话，不发。
-          text = stripMetaTalk(tailed)
+          text = stripMetaTalk(tailed, config)
           // 2026-10-29 19:00：剥完还得是中文话。模型用英文思考时正文容易空，
           // 兜底顺手把英文推理尾巴当成话发出去（老二 18:42 那次就是桌面端只有思考、
           // QQ 却收到一条）。中文尾巴照旧捞——这条闸只拦英文为主的。
@@ -898,7 +903,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
       // 切掉的前缀是实打实的字符，清洗删行也不会让两边错位（见 streamConsumed 的注释）。
       if (already > 0) {
         const rawText = extractText(data.message)
-        const rest = consumed > 0 ? stripLeakedThinking(rawText.slice(consumed)) : text
+        const rest = consumed > 0 ? stripLeakedThinking(rawText.slice(consumed), config) : text
         if (rest) await emit(record, rest)
         lastSent.set(sessionId, text)
         return

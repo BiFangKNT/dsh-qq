@@ -52,7 +52,7 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
   })
   let origin
   const config = Config({
-    wsUrl: '', accessToken: token, selfId: '10001', preset: 'mock',
+    wsUrl: '', accessToken: token, selfId: '10001', preset: 'mock', localApiPort: 0,
     workspaceRoot: join(root, '会话'), memoryRoot: join(root, '共享记忆'), cwd: root,
     privateMode: 'open', ownerIds: ['11001'],
     mergeWindowMs: 0, groupMinGapMs: 0, groupReplyGapMs: 0, replyDelayMeanMs: 0,
@@ -61,7 +61,7 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
     reconnectMs: 100, ...overrides,
   })
   // 连接和落盘位置始终固定为模拟器自身，不接受真实地址覆盖。
-  Object.assign(config, { accessToken: token, selfId: '10001', cwd: root,
+  Object.assign(config, { localApiPort: 0, accessToken: token, selfId: '10001', cwd: root,
     workspaceRoot: join(root, '会话'), memoryRoot: join(root, '共享记忆') })
   async function load() {
     host = createMockDsh({ home: root, webServer, verbose, autoReply })
@@ -94,7 +94,7 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
   try {
     await peer.start()
     config.wsUrl = peer.url
-    for (const key of ['wsUrl', 'accessToken', 'selfId', 'cwd', 'workspaceRoot', 'memoryRoot']) {
+    for (const key of ['localApiPort', 'wsUrl', 'accessToken', 'selfId', 'cwd', 'workspaceRoot', 'memoryRoot']) {
       Object.defineProperty(config, key, { value: config[key], writable: false, configurable: false, enumerable: true })
     }
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve() }) })

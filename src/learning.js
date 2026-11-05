@@ -82,7 +82,7 @@ export function findStuck(rows, stuck = STUCK_WORDS) {
 
 const HEADER = `# 群词典 · 群聊黑话与角色
 
-> 群鲸鲸自己卡壳的地方。**待确认** = 它没接住的；弄明白意思后自己挪到**已确认**。
+> 机器人未理解的词语。**待确认** = 它没接住的；弄明白意思后自己挪到**已确认**。
 > 这本是它自己的笔记，别借别人的词硬编。
 
 ## 待确认
@@ -111,7 +111,7 @@ export function appendPending(file, hits, { limit = 10 } = {}) {
     const stamp = `- [ ] ${h.trigger.name}：${quoted}`
     // 去重键：昵称 + 那句话前 80 字（时间戳会变，不能拿整行比）
     if (text.includes(stamp.slice(2))) continue
-    fresh.push(`${stamp}\n  ↳ ${h.reply.time} 鲸鲸回「${h.word}」`)
+    fresh.push(`${stamp}\n  ↳ ${h.reply.time} 机器人回「${h.word}」`)
     added++
   }
   if (!fresh.length) return 0

@@ -272,7 +272,7 @@ export function createSleep({ config, manager, logger }) {
     logger.info?.(
       holdNight()
         ? `[dsh-qq] 作息已启动：${hmText(bedtimeAt() ?? 0)} 提醒睡觉，${hmText(fromAt())}–${hmText(toAt())} 的消息留到早上`
-        : `[dsh-qq] 作息已启动：${hmText(bedtimeAt() ?? 0)} 提醒睡觉；不按住夜里的消息——姐姐说话就醒`,
+        : `[dsh-qq] 作息已启动：${hmText(bedtimeAt() ?? 0)} 提醒睡觉；不按住夜里的消息——收到消息照常回应`,
     )
   }
 

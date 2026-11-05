@@ -43,7 +43,7 @@ test('16:25:36 事故：单换行隔开的四版草稿只留一版', () => {
 })
 
 test('16:29:54 事故：上下文信封行不许复读进正文', () => {
-  const out = stripLeakedThinking(DRAFT_1629)
+  const out = stripLeakedThinking(DRAFT_1629, { ownerLabel: '姐姐' })
   assert.equal(out, DRAFT_1629_WANT)
   assert.ok(!out.includes('[现在是'), '时间信封漏出去了')
   assert.ok(!out.includes('[姐姐]'), '信封标签漏出去了')
