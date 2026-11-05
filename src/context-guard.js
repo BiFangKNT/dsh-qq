@@ -148,16 +148,17 @@ export function createContextGuard({ manager, config, logger }) {
      * 新消息投递前调一次：压力过大就换新会话。
      * @returns {Promise<null|string[]>} null = 没换；数组 = 换了，把 seed 挂到新会话上
      */
-    async maybeSwap(record) {
-      if (!enabled || swapRatio <= 0) return null
+    async maybeSwap(record, { force = false } = {}) {
+      if (!force && (!enabled || swapRatio <= 0)) return null
       const window = Number(record.contextWindow ?? 0)
       const tokens = Number(record.promptTokens ?? 0)
-      if (!window || !tokens) return null
+      if (!force && !tokens) return null
       // 阈值取「固定下限」和「窗口比例」里更小的那个：
       // 窗口只有 128K 时，固定下限 200K 永远够不着，换会话就永不触发。
-      const threshold = Math.min(minTokens, window * swapRatio)
-      if (tokens < threshold) return null
-      if (record.busy > 0) return null // 正在跑就别动，下一轮再说
+      // 未知窗口时只用已配置的 token 上限，不虚构模型窗口大小。
+      const threshold = window > 0 ? Math.min(minTokens, window * swapRatio) : minTokens
+      if (!force && tokens < threshold) return null
+      if (!force && record.busy > 0) return null // 正在跑就别动，下一轮再说
 
       // ⭐ 2026-10-26 凌晨改：别让接话材料听起来像遗书。
       // 老三照着旧措辞写出「写给下一个会话的自己／这是我从日志里捋出来的」，
@@ -185,9 +186,9 @@ export function createContextGuard({ manager, config, logger }) {
       } catch (err) {
         logger.warn?.(`[dsh-qq] 写聊天记忆失败（不影响换会话）: ${err?.message ?? err}`)
       }
-      manager.reset(record, seed)
+      if (manager.reset(record, seed) === false) return null
       logger.info?.(
-        `[dsh-qq] ${record.label} 上下文压力 ${tokens}/${window}（${Math.round((tokens / window) * 100)}%）已达阈值，换新会话${handoff ? `（便签 + 最后 ${tail.length} 句原话）` : `（没有便签，退回最后 ${seed.length} 条原文）`}${memoryPath ? `（旧聊天记在 ${memoryPath}）` : ''}`,
+        `[dsh-qq] ${record.label} 上下文压力 ${tokens}/${window || '未知'}已达阈值，换新会话${handoff ? `（便签 + 最后 ${tail.length} 句原话）` : `（没有便签，退回最后 ${seed.length} 条原文）`}${memoryPath ? `（旧聊天记在 ${memoryPath}）` : ''}`,
       )
       return seed
     },

@@ -127,11 +127,6 @@ const PEER_CHAT_TURN_WINDOW_MS = 30 * 60_000
  *  也不会跟「窗口内说话续期」打架（用户 2026-10-24 发现的冲突）。 */
 const groupLastReplyAt = new Map()
 
-/** 被 groupReplyGapMs 压住的消息：到点自己醒一次。
- *  没有它，「攒着」就是永久沉默 —— 2026-10-25 群 123456789 实况：
- *  @ 回过一句、下一句在 20 秒内被压进 backlog，姐姐不再开口，就再没动静。 */
-const gapReplayTimers = new Map()
-
 /** 距上次回复够不够久。0/负数 = 不限，永远够。 */
 function gapReady(config, groupId, userId) {
   const gap = Number(config.groupReplyGapMs) || 0
@@ -492,6 +487,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
   // 连发合并：同一个 peer 的几条消息攒在一起回。
   // 键是「谁发的」，值是正在等的这一批（bodies 是各自已经拼好的正文）。
   const mergeBatches = new Map()
+  // 被回复间隔压住的消息，到点重放；卸载时与合并定时器一起取消。
+  const gapReplayTimers = new Map()
+  let disposed = false
 
   /**
    * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
@@ -540,7 +538,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
     })
   }
 
-  return async function onEvent(event) {
+  const seenMessages = new Map()
+
+  const onEvent = async (event) => {
+    if (disposed) return
     if (event?.post_type !== 'message') return
     // 补回：这条是「被间隔压住、到点自己醒过来」的重放，不是新消息。
     // 重放要跳过所有前置闸（@/保活/间隔/额度），否则又会被压一轮，永远出不来。
@@ -582,7 +583,21 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (peerBot) ownerInfo.isBot = true
 
     const allowed = isGroup ? allowGroup(config, peerId) : allowPrivate(config, peerId)
-    const info = readMessage(event.message, { selfId, selfName: event.self_name ?? '机器人' })
+    if (!isReplay && event.message_id !== undefined && event.message_id !== null) {
+      const now = Date.now()
+      for (const [key, expires] of seenMessages) {
+        if (expires <= now) seenMessages.delete(key)
+        else break
+      }
+      const key = JSON.stringify([selfId, scope, peerId, String(event.message_id)])
+      if (seenMessages.has(key)) return
+      seenMessages.set(key, now + 10 * 60_000)
+      if (seenMessages.size > 4096) seenMessages.delete(seenMessages.keys().next().value)
+    }
+    const blockImages = isGroup && listOf(config.groupImageBlock).includes(`${peerId}:${event.user_id}`)
+    const info = readMessage(event.message, {
+      selfId, selfName: event.self_name ?? '机器人', blockImages,
+    })
 
     // 合并转发：卡片里的内容真的取出来，摆进正文，别只留一个「[合并转发]」。
     // 取不到就保留占位——至少让人知道这里本来有东西。
@@ -591,10 +606,21 @@ export function createInbound({ config, manager, logger, client, send, approval,
       if (expanded) info.text = info.text ? `${info.text}\n${expanded}` : expanded
     }
 
+    // 纯图 / 纯语音 / 纯文件 / 纯表情包（没有文字）也要处理
+    if (
+      !info.text &&
+      info.images.length === 0 &&
+      info.records.length === 0 &&
+      info.files.length === 0 &&
+      info.mfaces.length === 0
+    ) {
+      return
+    }
+
     // 聊天流水：跳过的消息也先记下来——「它怎么突然接不上话」全靠这段回查。
     // 只落盘、不参与投递，写失败也不影响聊天。
     // 白名单外的落到 `聊天记录/_未开通/`（2026-10-26 姐姐定的）：留痕，不投递。
-    if (config.chatLog !== false) {
+    if (config.chatLog !== false && !isReplay) {
       const logDir = resolvePeerWorkspace(config, scope, peerId)
       const who = `${senderName}(${event.user_id})`
       appendChatLog(
@@ -607,17 +633,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     if (!allowed) {
       logger.debug?.(`[dsh-qq] 忽略未授权 ${label}`)
-      return
-    }
-
-    // 纯图 / 纯语音 / 纯文件 / 纯表情包（没有文字）也要处理
-    if (
-      !info.text &&
-      info.images.length === 0 &&
-      info.records.length === 0 &&
-      info.files.length === 0 &&
-      info.mfaces.length === 0
-    ) {
       return
     }
 
@@ -703,8 +718,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 群聊：默认要 @ 才理；@ 过一次之后有一小段「保活期」，不用再 @
     // addressedBy：没 @ 但被「叫名字 / 点名提问 / 关键词」叫住的理由（2026-10-25）。
     // 这种算「有人冲它来了」，必须回，不给 [SILENT] 出口。
+    const freeGroup = isGroup && listOf(config.groupFree).includes(peerId)
     let addressedBy = null
-    if (isGroup && config.requireMention && !info.atMe && !isReplay) {
+    if (isGroup && config.requireMention && !freeGroup && !info.atMe && !isReplay) {
       // 没 @ 我、却 @ 了别人（包括群里另一个机器人）：那明显不是跟我说话，
       // 保活期也不算 —— 否则别人一句「@ 那个谁 来帮我测一下」它也会冲上去接。
       if (info.atNames.length > 0) {
@@ -762,12 +778,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
       }
       if (quotedMe) logger.debug?.(`[dsh-qq] 群 ${peerId} 引用了我，按叫我处理`)
     }
-    // 窗口续期（QLark 的 touch()）：@ 我、引用我、或者本来就在窗口里接着说话，都续上。
-    // 但只有窗口的「正主」能续 —— 别人说话不续期也不蹭用，这条一松就变成群里谁说话都接。
-    if (isGroup && (info.atMe || quotedMe || addressedBy || wakeAlive(peerId, senderId))) {
-      refreshWake(config, peerId, senderId)
-    }
-
     // 均匀回应：距上次回复太近就先攒着（消息进 backlog，下次一起看见），别连珠炮。
     // 但「攒着」得有兜底：间隔一过就自己醒一次，不然这句就永远躺在 backlog 里。
     if (isGroup && !isReplay && !gapReady(config, peerId, senderId)) {
@@ -780,7 +790,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     // 窗口内回复额度（可选，默认 0 = 不限；和「续期」一起用要注意，别设太小）
-    if (isGroup && !isReplay && repliesLeft(config, peerId, senderId) <= 0) {
+    if (isGroup && !isReplay && !freeGroup && repliesLeft(config, peerId, senderId) <= 0) {
       logger.debug?.(
         `[dsh-qq] 群 ${peerId} 这个保活窗口已经回过 ${config.groupRepliesPerWindow} 次，先歇着`,
       )
@@ -788,9 +798,18 @@ export function createInbound({ config, manager, logger, client, send, approval,
       return
     }
 
+    // 通过额度检查后才续期，耗尽额度的消息不能无限延长旧窗口。
+    // 窗口续期（QLark 的 touch()）：@ 我、引用我、或者本来就在窗口里接着说话，都续上。
+    // 但只有窗口的「正主」能续 —— 别人说话不续期也不蹭用，这条一松就变成群里谁说话都接。
+    if (isGroup && (info.atMe || quotedMe || addressedBy || wakeAlive(peerId, senderId))) {
+      refreshWake(config, peerId, senderId)
+    }
+
     let record = await manager.obtain({ scope, peerId, label })
     // 有人说话了：冷场计时要清零，主动说话那层也知道「这会儿不缺人」
     wake?.noteInbound?.(record)
+
+    if (isGroup && sleep?.shouldHold?.(record)) return
 
     // 这个会话自己的缓存目录（隔离模式下一会话一目录；关掉隔离就共用 baseCacheDir）
     const cacheDir = record.dir ? join(record.dir, '图片缓存') : baseCacheDir
@@ -1144,4 +1163,13 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs })
   }
+  onEvent.dispose = () => {
+    disposed = true
+    for (const batch of mergeBatches.values()) clearTimeout(batch.timer)
+    for (const timer of gapReplayTimers.values()) clearTimeout(timer)
+    mergeBatches.clear()
+    gapReplayTimers.clear()
+    seenMessages.clear()
+  }
+  return onEvent
 }

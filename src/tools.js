@@ -20,10 +20,12 @@ import { mkdir } from 'node:fs/promises'
 import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
 
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
-import { appendFact, upsertGlossaryTerm } from './settings.js'
+import { appendFact, upsertGlossaryTerm, homeDirOf } from './settings.js'
 import { auditOutbound } from './audit.js'
 import { lookupMeme } from './meme.js'
 import { downloadImage } from './inbound.js'
+import { cleanOutboundText } from './shared/outbound-text.js'
+import { registerExtraTools } from './tools-extra.js'
 
 /**
  * 工具直接发出去的文字也要过审计。
@@ -107,7 +109,7 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid }) {
+export function registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid, home }) {
   const tools = ctx.get?.('tools')
   if (!tools?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
@@ -173,7 +175,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
         return { ok: true, file, text: String(args?.text ?? '') }
       } catch (err) {
         logger.warn?.(`qq_facts 写入失败: ${err?.message ?? err}`)
-        return { ok: false, file, text: String(args?.text ?? '') }
+        throw err
       }
     },
   })
@@ -863,7 +865,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     async execute(args, exec) {
       const record = needRecord(manager, exec)
       assertQuiet(record)
-      const text = String(args?.text ?? '')
+      const text = cleanOutboundText(args?.text)
       if (!text) throw new Error('qq_reply: text 不能为空')
       assertOutboundText(config, logger, text)
       const quoted = Number(args?.message_id ?? record.lastMessageId ?? 0) || 0
@@ -923,7 +925,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     async execute(args, exec) {
       const record = needRecord(manager, exec)
       assertQuiet(record)
-      const text = String(args?.text ?? '')
+      const text = cleanOutboundText(args?.text)
       if (!text) throw new Error('qq_send: text 不能为空')
       assertOutboundText(config, logger, text)
 
@@ -1315,8 +1317,13 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     },
   })
 
+  registerExtraTools(tools, {
+    client, manager, config, home: home ?? homeDirOf(ctx, logger),
+    needRecord, assertQuiet, assertText: text => assertOutboundText(config, logger, text), noteToolSent,
+  })
+
   logger.info?.(
-    `QQ 互动工具已注册：qq_facts / qq_pin / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history（表情包收藏 ${facesCount(config)} 个）`,
+    `QQ 互动工具已注册：qq_facts / qq_pin / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history / qq_send_voice / qq_private_history / qq_qzone_send（表情包收藏 ${facesCount(config)} 个）`,
   )
   // 2026-10-30：qq_memo 是可选注册的（要配 memoryRoot），单独报一行，方便下次一眼看出这支笔通没通
   logger.info?.(

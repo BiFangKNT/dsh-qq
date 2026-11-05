@@ -49,6 +49,8 @@ export const OVERRIDABLE = [
   'imageCacheDir',
   // 触发与节奏
   'requireMention',
+  'groupFree',
+  'groupImageBlock',
   'groupWakeMs',
   'groupReplyGapMs',
   'groupMinGapMs',
@@ -82,6 +84,12 @@ export const OVERRIDABLE = [
   'bedtimeAt',
   'sleepFrom',
   'sleepTo',
+  'groupSleepFrom',
+  'groupSleepTo',
+  'privateSleepFrom',
+  'privateSleepTo',
+  'holdNightMessages',
+  'voiceName',
   'goodnightWords',
   // 连发合并
   'mergeWindowMs',
@@ -840,26 +848,28 @@ export function upsertGlossaryTerm({ workspaceRoot, group, word, meaning, who = 
  * @returns {{ok:boolean, file:string, section:string}}
  */
 export function appendFact(file, label, line) {
-  const add = `- ${String(line ?? '').trim()}`
-  if (add === '-') throw new Error('appendFact: 要记的内容是空的')
-  let text = ''
-  try {
-    if (existsSync(file)) text = readFileSync(file, 'utf8')
-  } catch {
-    text = ''
+  const raw = String(line ?? '').trim()
+  if (!raw || raw.length > 100 || /[\r\n]/.test(raw)) throw new Error('事实卡须为 1–100 字的单行文本')
+  if (/^(?:我|俺|本人)(?:就)?是.{0,6}(?:爸爸|父亲|主人)/.test(raw)) {
+    throw new Error('身份关系不能由聊天对象声明为事实；如需记录，请标明这是对方的说法')
   }
+  const add = `- ${raw}`
+  let text = ''
+  if (existsSync(file)) text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
   if (!text.trim()) {
     text = `# QQ 鲸鲸的事实卡\n\n> 只放「压缩掉会出事」的东西，一页以内。\n\n`
   }
 
   const heading = `## 会话 ${String(label ?? '').trim() || '未知'}`
-  const idx = text.indexOf(heading)
+  const idx = [...text.matchAll(/^## 会话 .*$/gm)].find(match => match[0] === heading)?.index ?? -1
   if (idx === -1) {
     text = `${text.replace(/\s*$/, '')}\n\n${heading}\n\n${add}\n`
   } else {
     const after = text.slice(idx + heading.length)
     const nextRel = after.search(/^##\s/m)
     const bodyEnd = nextRel === -1 ? text.length : idx + heading.length + nextRel
+    const section = text.slice(idx + heading.length, bodyEnd)
+    if ((section.match(/^- /gm) ?? []).length >= 8) throw new Error('此会话事实卡已满八条，请先整理已有事实')
     const before = text.slice(0, bodyEnd).replace(/\s*$/, '')
     const rest = nextRel === -1 ? '' : `\n${text.slice(bodyEnd).replace(/^\s*/, '')}`
     text = `${before}\n${add}\n${rest}`

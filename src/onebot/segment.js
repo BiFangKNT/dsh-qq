@@ -107,7 +107,7 @@ export function forwardIdFromData(data) {
  * @param {unknown} message   OneBot 原始 message 字段
  * @param {{selfId: string, selfName?: string}} options
  */
-export function readMessage(message, { selfId, selfName = '' } = {}) {
+export function readMessage(message, { selfId, selfName = '', blockImages = false } = {}) {
   const segments = toSegments(message)
   const self = String(selfId ?? '')
 
@@ -147,7 +147,7 @@ export function readMessage(message, { selfId, selfName = '' } = {}) {
         break
       }
       case 'image':
-        images.push(data.url || data.file || '')
+        if (!blockImages) images.push(data.url || data.file || '')
         text += '[图片]'
         break
       case 'face':

@@ -24,7 +24,8 @@ export class SessionManager {
   #ready = new Map() // 已铺好的会话目录（避免每次 attach 都 mkdir）
   #sweeper = null
 
-  constructor({ agents, selfId, config, logger, home = '' }) {
+  constructor({ ctx, agents, selfId, config, logger, home = '' }) {
+    this.ctx = ctx
     this.agents = agents
     this.selfId = selfId
     this.config = config
@@ -234,7 +235,17 @@ export class SessionManager {
     if (this.config.provider) agentOptions.provider = this.config.provider
     if (this.config.model) agentOptions.model = this.config.model
 
-    const hasAgentOptions = Object.keys(agentOptions).length > 0
+    const preset = String(this.config.preset ?? '').trim()
+    let setup
+    if (preset) {
+      const presets = this.ctx?.get?.('agentPresets')
+      if (typeof presets?.mount !== 'function') throw new Error(`无法加载 preset '${preset}'：宿主未提供 agentPresets`)
+      setup = async (agentCtx) => { await presets.mount(agentCtx, preset) }
+    }
+    const options = {
+      ...(Object.keys(agentOptions).length ? { agentOptions } : {}),
+      ...(setup ? { setup } : {}),
+    }
     const cwd = await this.#peerDir(info)
     this.logger.debug?.(
       `[dsh-qq] attach ${sessionId.slice(0, 8)} scope=${info.scope} peer=${info.peerId} cwd=${cwd ?? '(null)'}`,
@@ -254,7 +265,7 @@ export class SessionManager {
     try {
       const handle = await this.agents.resume({
         resumeSessionId: sessionId,
-        ...(hasAgentOptions ? { agentOptions } : {}),
+        ...options,
         ...(cwd ? { meta: { cwd } } : {}),
       })
       if (handle?.agent) {
@@ -271,7 +282,7 @@ export class SessionManager {
         try {
           const handle = await this.agents.resume({
             resumeSessionId: sessionId,
-            ...(hasAgentOptions ? { agentOptions } : {}),
+            ...options,
           })
           if (handle?.agent) {
             this.logger.warn?.(
@@ -289,9 +300,10 @@ export class SessionManager {
     const meta = {}
     const workdir = cwd || this.config.cwd
     if (workdir) meta.cwd = workdir
+    if (preset) meta.agentPreset = preset
     const createOptions = {
       ...(Object.keys(meta).length > 0 ? { meta } : {}),
-      ...(hasAgentOptions ? { agentOptions } : {}),
+      ...options,
     }
     this.logger.debug?.(`[dsh-qq] create ${sessionId.slice(0, 8)} cwd=${workdir ?? '(null)'}`)
     try {
@@ -303,7 +315,7 @@ export class SessionManager {
       // 拿这个 id 去 create 会被拒（already exists），resume 又恢复不出东西来，
       // 用户看到的就是「发消息没人回」。这里兜底：再 resume 一次，还不行就换 id 重开。
       const again = await this.agents
-        .resume({ resumeSessionId: sessionId, ...(hasAgentOptions ? { agentOptions } : {}) })
+        .resume({ resumeSessionId: sessionId, ...options })
         .catch(() => null)
       if (again?.agent) {
         this.logger.warn?.(`[dsh-qq] 会话 ${sessionId.slice(0, 8)} 建不出来，退回 resume 成功`)

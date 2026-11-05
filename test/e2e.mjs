@@ -68,7 +68,7 @@ function createFakeCtx() {
       return () => handlers.get(name)?.delete(fn)
     },
     emit(name, ...args) {
-      for (const fn of handlers.get(name) ?? []) fn(...args)
+      return Promise.all([...handlers.get(name) ?? []].map((fn) => fn(...args)))
     },
   }
   return { ctx, created }
@@ -685,6 +685,8 @@ const config4 = Config({
   accessToken: TOKEN,
   privateMode: 'open',
   splitDelayMs: 0,
+  replyDelayMeanMs: 0, // 断线窗口内必须完成发送尝试，不能让随机打字延迟拖到重连后
+  splitDelayMeanMs: 0,
   mergeWindowMs: 0,
   reconnectMs: 300,
 })
@@ -700,12 +702,10 @@ await mock2.close()
 await sleep(300)
 
 // 断线期间她自己说了一句：outbound 自动转发 → 发不出去 → 该记下来
-ctx4.emit('session/event', bridgeAgent.session, {
+await ctx4.emit('session/event', bridgeAgent.session, {
   type: 'assistant/message',
   data: { turn: 1, step: 1, message: { content: [{ type: 'text', text: '姐姐，我一直在等你' }] }, usage: {} },
 })
-await sleep(300)
-
 // 桥回来了
 const mock2b = await startMockNapcat({ port: PORT2, token: TOKEN, selfId: 10003, selfName: '小桥', quiet: true })
 await mock2b.start()

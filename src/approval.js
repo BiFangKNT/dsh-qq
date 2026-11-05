@@ -152,10 +152,10 @@ export class ApprovalChannel {
   async #park(record, req) {
     if (req?.signal?.aborted) return 'cancelled'
 
-    const command = commandOf(req)
+    const description = describeOf(req)
     const lines = ['🔐 有个操作需要你点头：']
-    if (command) lines.push(`要执行的命令：${command}`)
-    else lines.push('（这条请求没带命令原文）')
+    if (description) lines.push(`工具：${description.tool}`, description.detail || '（没有参数详情）')
+    else lines.push('（这条请求没带操作详情）')
     lines.push('', '回「通过」放行这一回，回「拒绝」挡掉，回「取消」作废。')
 
     try {

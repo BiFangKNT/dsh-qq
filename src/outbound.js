@@ -496,9 +496,9 @@ export function stripLeakedThinking(text) {
     }
     // 行尾挂了个「— good.」（模型在给上一句打分）→ 整行丢掉
     if (SELF_TAIL.test(t)) return null
-    // 一个汉字都没有（`That's factual and short. Two lines is fine.`）→ 不是话，丢掉。
+    // 无汉字的长英文行按思考丢弃，纯符号和颜文字保留。
     // 短行放过：`?` `…` `OK` 这种本来就可能是话的一部分。
-    if (!HAS_CJK.test(t) && t.length >= 4) return null
+    if (!HAS_CJK.test(t) && /[A-Za-z]/.test(t) && t.length >= 4) return null
     // 只是行首粘了个英文小标签（`Good.本姑娘这边显示是发出去了`）→ 剥掉标签，话留下。
     // 2026-10-26 19:40 修：`987654321 空着，123456789 只有几条` 这种**数字开头的正文**
     // 也被当成标签剥了一半（群号没了）。标签里必须至少有一个字母才算标签。
@@ -640,6 +640,7 @@ function mostlyChinese(s) {
   const src = String(s ?? '')
   const cjk = (src.match(/[\u4e00-\u9fff]/g) ?? []).length
   const latin = (src.match(/[A-Za-z]/g) ?? []).length
+  if (latin === 0) return true
   return cjk >= 4 && cjk * 2 >= latin
 }
 
@@ -708,6 +709,7 @@ export function stripClosingTalk(text) {
 const SELF_SENDING_TOOLS = new Set([
   'qq_reply',
   'qq_send',
+  'qq_send_voice',
   'qq_send_image',
   'qq_send_file',
   'qq_face',
@@ -733,7 +735,7 @@ function inProactiveTurn(record) {
   return at > 0 && Date.now() - at < 10 * 60_000
 }
 
-export function createOutbound({ manager, config, logger, send, wake }) {
+export function createOutbound({ manager, config, logger, send, wake, contextGuard }) {
   const lastSent = new Map() // sessionId -> 上一条完整文本（去重用）
   const streamBuf = new Map() // sessionId -> 还没发出去的流式尾巴
   const streamCount = new Map() // sessionId -> 本轮已经流式发了几条
@@ -927,6 +929,13 @@ export function createOutbound({ manager, config, logger, send, wake }) {
         const message =
           reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
         logger.warn?.(`[dsh-qq] ${record.label} 本轮出错: ${message}`)
+        if (/CONTEXT_WINDOW_EXCEEDED|maximum context length/i.test(String(message))) {
+          const seed = await contextGuard?.maybeSwap(record, { force: true })
+          await emit(record, seed
+            ? '这轮上下文已满，已保留话头并重置会话，请再发一次。'
+            : '这轮上下文已满，请用 /reset 重置会话后重发。')
+          return
+        }
         await emit(record, `⚠️ ${message}`)
       }
       return

@@ -125,6 +125,12 @@ export const ConfigSchema = Schema.object({
   requireMention: Schema.boolean()
     .default(true)
     .description('群聊里是否必须 @ 机器人才回复'),
+  groupFree: Schema.array(Schema.string())
+    .default([])
+    .description('免 @ 群号列表；仍受访问控制和回复间隔限制，允许选择不回复'),
+  groupImageBlock: Schema.array(Schema.string())
+    .default([])
+    .description('屏蔽指定群成员的图片，格式「群号:QQ号」，例如 ["123456789:10001"]；不下载图片，保留文字及 [图片] 占位符，让模型知道对方发过图'),
   groupWakeMs: Schema.number()
     .default(60000)
     .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭；2026-10-24 按群友的建议从 5 分钟改成 1 分钟）'),
@@ -254,6 +260,7 @@ export const ConfigSchema = Schema.object({
     ),
 
   // ── 语音转文字（离线 vosk） ──
+  voiceName: Schema.string().default('').description('Windows SAPI 声音名称，留空使用系统默认声音'),
   asrEnabled: Schema.boolean()
     .default(true)
     .description('收到语音时用本地 vosk 离线转成文字（不需要联网）'),
@@ -334,6 +341,10 @@ export const ConfigSchema = Schema.object({
   sleepTo: Schema.string()
     .default('08:00')
     .description('休息时段到几点结束（HH:MM）：这时候把夜里攒的消息一次交出去'),
+  groupSleepFrom: Schema.string().default('').description('群聊休息开始（HH:MM），留空沿用 sleepFrom'),
+  groupSleepTo: Schema.string().default('').description('群聊休息结束（HH:MM），留空沿用 sleepTo'),
+  privateSleepFrom: Schema.string().default('').description('私聊休息开始（HH:MM），留空沿用 sleepFrom'),
+  privateSleepTo: Schema.string().default('').description('私聊休息结束（HH:MM），留空沿用 sleepTo'),
   goodnightWords: Schema.string()
     .default('晚安,睡了,睡觉,去睡,我先睡,困了,睡啦')
     .description('说到这些词就当她说晚安了，之后不再回消息直到睡醒。逗号分隔'),
@@ -342,7 +353,7 @@ export const ConfigSchema = Schema.object({
   holdNightMessages: Schema.boolean()
     .default(false)
     .description(
-      '休息时段（sleepFrom~sleepTo）和说完晚安后，私聊消息先捂着、早上再一起回；关着 = 照常回（姐姐半夜说话说明她醒了）',
+      '启用休息时段静默：私聊攒到醒来后回复，群聊直接略过；关着则照常回应',
     ),
 
   // ── 夜里的读书问询（2026-10-27 加）──
@@ -397,7 +408,7 @@ export const ConfigSchema = Schema.object({
     ),
   contextSwapMinTokens: Schema.number()
     .default(200000)
-    .description('主动换会话的绝对下限：请求 token 没到这个数就不换，免得小窗口模型刚聊两句就换'),
+    .description('主动换会话的 token 上限；已知模型窗口时与窗口比例取较小值，未知窗口时单独使用'),
   contextMemoryKeep: Schema.number()
     .default(30)
     .description('换会话前把最近多少条聊天记进 记忆区/压缩记忆/，给新会话接话用'),

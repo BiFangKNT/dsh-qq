@@ -17,6 +17,7 @@ import { startLearning } from './learning.js'
 import { createContextGuard } from './context-guard.js'
 import { auditOutbound } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
+import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerTools } from './tools.js'
 import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
@@ -292,7 +293,7 @@ export function apply(ctx, config) {
   clientRef.current = client
 
   let selfId = String(config.selfId ?? '')
-  const manager = new SessionManager({ agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
+  const manager = new SessionManager({ ctx, agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
   manager.start()
 
   // 通道回执：断线 / 发送失败要让她知道（见 bridge.js 顶部那段起因）
@@ -352,7 +353,7 @@ const pin = createPin({ config, logger })
     // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
     // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
     // 被 @、被引用、私聊都不会走到这里。
-    const trimmed = String(text ?? '').trim()
+    const trimmed = cleanOutboundText(text)
     // 2026-10-27 21:4x 修：原来只认「整条恰好就是 [SILENT]」，
     // 她要是写成「结束这轮，不再说话。[SILENT]」，标记根本不生效，前半句照发。
     // 现在先把标记剥掉：剥完只剩空白＝她选了潜水；还剩话＝照发剩下的。
@@ -459,7 +460,7 @@ const pin = createPin({ config, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
   const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin })
-  const outbound = createOutbound({ manager, config, logger, send, wake })
+  const outbound = createOutbound({ manager, config, logger, send, wake, contextGuard })
 
   // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方
   // 记进该群 记忆区/群词典.md 的「待确认」节（只追加、去重）。
@@ -472,9 +473,10 @@ const pin = createPin({ config, logger })
   const offSessionEvent = ctx.on('session/event', outbound)
   const offGuardEvent = ctx.on('session/event', contextGuard.onSessionEvent)
 
-  client.on('event', (event) => {
+  const onInboundEvent = (event) => {
     inbound(event).catch((err) => logger.warn('处理入站消息失败:', err?.message ?? err))
-  })
+  }
+  client.on('event', onInboundEvent)
 
   client.on('open', async () => {
     logger.info(`已连接 ${config.wsUrl}`)
@@ -567,7 +569,7 @@ const pin = createPin({ config, logger })
   reading.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid })
+    registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid, home: homeDirOf(ctx, logger) })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
   }
@@ -585,6 +587,8 @@ const pin = createPin({ config, logger })
     } catch {
       /* ignore */
     }
+    inbound.dispose()
+    client.off('event', onInboundEvent)
     client.stop()
     wake.stop()
     bedtime.stop()

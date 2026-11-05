@@ -74,8 +74,10 @@ export function createSleep({ config, manager, logger }) {
   //   原来 00:00–08:00 收到的私聊一律按住、早上再交；现在默认不再按住——
   //   她夜里找人，就是她醒了，得有人应。想要回旧行为就把这个开成 true。
   const holdNight = () => config?.holdNightMessages === true
-  const fromAt = () => parseHm(config?.sleepFrom) ?? 0
-  const toAt = () => parseHm(config?.sleepTo) ?? 480
+  const fromAt = (scope = 'private') =>
+    parseHm(config?.[`${scope}SleepFrom`]) ?? parseHm(config?.sleepFrom) ?? 0
+  const toAt = (scope = 'private') =>
+    parseHm(config?.[`${scope}SleepTo`]) ?? parseHm(config?.sleepTo) ?? 480
   const bedtimeAt = () => parseHm(config?.bedtimeAt)
   const goodWords = () =>
     String(config?.goodnightWords ?? '晚安,睡了,睡觉,去睡,我先睡,困了,睡啦')
@@ -101,15 +103,15 @@ export function createSleep({ config, manager, logger }) {
     return d.getTime()
   }
 
-  function inSleepWindow(now = new Date()) {
-    return inRange(fromAt(), toAt(), minutesOf(now))
+  function inSleepWindow(now = new Date(), scope = 'private') {
+    return inRange(fromAt(scope), toAt(scope), minutesOf(now))
   }
 
   /** inbound 用它判断：这条消息现在该不该装作没看见。 */
   function shouldHold(record, now = new Date()) {
     if (!enabled() || !record?.sessionId) return false
-    if (record.scope === 'group') return false
-    // ⭐ 2026-10-25：默认不按住了——姐姐说话就是姐姐醒了，正常回。
+    if (record.scope === 'group') return holdNight() && inSleepWindow(now, 'group')
+    // 未开启静默时仍然即时回应。
     if (!holdNight()) return false
     const st = stateOf(record)
     if (st.sleeping && now.getTime() < st.wakeAt) return true
@@ -118,7 +120,7 @@ export function createSleep({ config, manager, logger }) {
 
   /** 把消息留在队列里，等早上一起交出去。 */
   function hold(record, text, now = new Date()) {
-    if (!record?.sessionId) return false
+    if (!record?.sessionId || record.scope === 'group') return false
     const st = stateOf(record)
     if (!st.pending.length) st.pendingSince = now.getTime()
     st.pending.push({

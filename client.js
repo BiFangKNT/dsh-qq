@@ -359,6 +359,8 @@ window.__ModuleLoader__.load({
         /* ── 群里怎么说话 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '群里怎么说话'),
+          listField('groupFree', '免 @ 群', { hint: '群号，用逗号分隔；仍受访问控制和回复间隔限制。' }),
+          listField('groupImageBlock', '屏蔽成员图片', { hint: '格式「群号:QQ号」，多条用逗号分隔，例如 123456789:10001。不下载图片，保留文字及 [图片] 占位符。' }),
           boolField('requireMention', '必须 @ 才接话', '关掉的话，群里每句话它都想接——除非你就是要这个效果。'),
           textField('groupWakeMs', '被 @ 之后多久内不用再 @（毫秒）', {
             hint: '默认 60000（1 分钟）。窗口按「群 + 人」算：只有当初 @ 它的那个人能续，别人说话不蹭。',
@@ -415,15 +417,21 @@ window.__ModuleLoader__.load({
           h('div', { 'data-qq-h': '' }, '作息（几点犯困、几点睡）'),
           boolField('sleepMode', '启用作息', '关掉 = 它不分白天黑夜，什么时候都正常回。'),
           textField('bedtimeAt', '几点提醒它去睡', { hint: '默认 23:30。每个会话每天只提醒一次。', mono: true }),
-          textField('sleepFrom', '夜里从几点开始不按住消息', {
+          boolField('holdNightMessages', '休息时段静默', '私聊攒到醒来后回复，群聊直接略过；默认关闭。'),
+          textField('sleepFrom', '默认休息开始', {
             hint: '默认 00:00。这段里收到的私聊先攒着，出时段时一次性交出去（附「昨晚你发来这几条」）。',
             mono: true,
           }),
-          textField('sleepTo', '攒到几点交出去', { hint: '默认 08:00。', mono: true })),
+          textField('sleepTo', '默认休息结束', { hint: '默认 08:00。', mono: true }),
+          textField('groupSleepFrom', '群聊休息开始', { hint: 'HH:MM，留空沿用默认。', mono: true }),
+          textField('groupSleepTo', '群聊休息结束', { hint: 'HH:MM，留空沿用默认。', mono: true }),
+          textField('privateSleepFrom', '私聊休息开始', { hint: 'HH:MM，留空沿用默认。', mono: true }),
+          textField('privateSleepTo', '私聊休息结束', { hint: 'HH:MM，留空沿用默认。', mono: true })),
 
         /* ── 其它 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '其它'),
+          textField('voiceName', '语音声音名称', { hint: 'Windows SAPI 声音名称；留空使用系统默认声音。' }),
           boolField('debug', '输出调试日志', '日志落在会话目录根的 dsh-qq-debug.log（带 UTC 时间戳）。'),
           textField('textChunkLimit', '单条消息最大字数', { hint: '超出按段落/句号切成多条发。', type: 'number' }),
           textField('splitDelayMs', '分条之间的间隔（毫秒）', { type: 'number' })),

@@ -87,7 +87,7 @@ function makeConfig(over = {}) {
 
 const textOf = (message) => message?.content?.[0]?.text ?? ''
 
-// 1) 休息时段内该捂住；白天不捂；群聊不捂
+// 1) 开启静默时，群聊和私聊都遵循休息时段
 {
   const r = fakeRecord('私聊甲')
   const m = fakeManager([r])
@@ -95,7 +95,7 @@ const textOf = (message) => message?.content?.[0]?.text ?? ''
   check('凌晨 01:30 要捂住', s.shouldHold(r, new Date(2026, 9, 25, 1, 30)), true)
   check('早上 09:00 不捂', s.shouldHold(r, new Date(2026, 9, 25, 9, 0)), false)
   const g = fakeRecord('群甲', 'group')
-  check('群聊不捂', s.shouldHold(g, new Date(2026, 9, 25, 1, 30)), false)
+  check('群聊休息时静默', s.shouldHold(g, new Date(2026, 9, 25, 1, 30)), true)
 }
 
 // 2) 白天说晚安 → 之后捂住，直到明早
