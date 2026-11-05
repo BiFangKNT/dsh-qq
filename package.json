@@ -48,7 +48,7 @@
     "url": "https://github.com/2710586329/dsh-qq/issues"
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=26.0.0",
     "dsh": ">=0.2.0"
   },
   "scripts": {

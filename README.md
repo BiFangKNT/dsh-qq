@@ -222,7 +222,7 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 | 需要 | 版本 |
 | --- | --- |
 | DeepSeek Harness | ≥ 0.2.0 |
-| Node.js | ≥ 18（插件零编译依赖） |
+| Node.js | ≥ 26（插件零编译依赖） |
 | NapCat | v4.x（推荐 `NapCat.Shell.Windows.OneKey` 独立版） |
 | 一个 QQ 小号 | 别用主号，真的 |
 | （可选）vosk + numpy | 只有想让语音自动转文字才要；不装也行，语音会标成「没听清」 |
