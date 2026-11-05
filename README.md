@@ -9,7 +9,7 @@
 > 📢 **这是个公开仓库**：MIT，随便取用、改、再发。作者是个人不是公司，没有客服、没有 SLA，能回 issue 但不保证秒回。
 > 提 issue 或贴日志之前，请先把 **token、真实 QQ 号、本机路径** 抹掉——发出去就收不回来了。
 
-> 🔌 **一台 NapCat 的 WS 只该被一个 Agent 连着**：再装一个 `dsh-onebot-hub` 之类的插件会抢同一条消息，两边都只收到一半（日志里每行出现两次就是证据）。细节见 [和别的 OneBot 插件共存](#和别的-onebot-插件共存)。
+> 🔌 **一台 NapCat 的 WS 只该被一个 Agent 连着**：再装一个 `dsh-onebot-hub` 之类的插件会各自处理同一条消息，可能重复回复。细节见 [和别的 OneBot 插件共存](#和别的-onebot-插件共存)。
 
 ```
 你的 QQ 客户端  ←→  NapCat（协议端，注入 QQ）
@@ -29,10 +29,34 @@
 | 群里默认 @ 才理 | 被某人 @ 过一次后 60 秒内不用再 @ 也能接（窗口按「群 + 人」算，别人蹭不到） |
 | 分得清谁在跟自己说话 | 引用算叫我、`[SILENT]` 可以不接、同类机器人单独开关、跳过的群消息也进上下文 |
 | 不会把自己聊丢 | 窗口快满时补回聊天规矩；再撑满就换新会话，旧的最近聊天先落盘再接上 |
-| 十个互动工具 | `qq_poke` / `qq_react` / `qq_like` / `qq_send_image` / `qq_send_file` / `qq_face` / `qq_mface` / `qq_reply` / `qq_send` / `qq_recall` |
-| 问答能转回 QQ | `ask_user_question` 抛的问题会变成一条 QQ 消息，回个数字就行 |
+| QQ 互动工具 | `qq_poke` / `qq_react` / `qq_like` / `qq_send_image` / `qq_send_file` / `qq_face` / `qq_mface` / `qq_reply` / `qq_send` / `qq_recall` |
+| 语音发送 | `qq_send_voice` 使用 Windows SAPI 合成并发送语音，可用 `voiceName` 选择声音 |
+| 私聊流水查询 | `qq_private_history` 查询落盘记录；主人可读正文，其他人达到好感度门槛后仅可查时间线 |
+| 空间发布 | `qq_qzone_send` 仅主人私聊可用；确认内容与可见范围后发布，每天最多两次尝试 |
+| 群聊细分控制 | `groupFree` 指定免 @ 群；`groupImageBlock` 按成员屏蔽图片内容，保留文字和图片占位符 |
+| 问答与审批能转回 QQ | `ask_user_question` 的问题可回数字选择；审批请求展示操作详情，可回「通过 / 拒绝 / 取消」 |
+| 本地网页模拟器 | 运行真实插件，模拟 DSH 宿主和 NapCat；支持消息收发、工具编排、故障注入和重载验证 |
 
-## 三步跑通
+## 先用本地模拟器试跑
+
+在源码仓库目录使用 Node.js 26 及以上版本和 pnpm：
+
+```powershell
+pnpm install --ignore-scripts
+pnpm dev:mock
+```
+
+打开终端打印的本地网址，即可模拟私聊、群聊、@ 和发图，查看回复、入站提示词、工具结果与日志。无需启动真实 DSH / NapCat，无需登录 QQ 或配置模型 API key；回复由固定文本或编排步骤生成。
+
+```powershell
+pnpm test:mock   # mock 端到端场景
+pnpm test:e2e    # 原有完整链路测试
+pnpm test        # 所有 *.test.mjs
+```
+
+编排方法、故障注入及模拟边界见 [本地模拟环境](docs/mock-environment.md)。mock 不能验证真实模型效果、QQ 风控或真实宿主兼容性。
+
+## 三步跑通真实 QQ
 
 ### 1. 装 NapCat，登录小号
 
@@ -55,21 +79,21 @@
 # 从 npm 装（推荐）
 dsh plugin --profile desktop add dsh-qq-onebot
 
-# 或从 Releases 下载 dsh-qq-onebot-1.0.0.tgz
-dsh plugin --profile desktop add "D:\下载\dsh-qq-onebot-1.0.0.tgz"
+# 或从 Releases 下载 dsh-qq-onebot-1.2.8.tgz
+dsh plugin --profile desktop add "D:\下载\dsh-qq-onebot-1.2.8.tgz"
 ```
 
 不想用打好的包，也可以直接装源码目录（`git clone`，或下 `Source code (zip)` 解压）：
 
 ```powershell
-dsh plugin --profile desktop add "D:\dsh-qq-onebot-1.0.0"
+dsh plugin --profile desktop add "D:\dsh-qq-onebot"
 ```
 
 三个容易踩的坑：
 
 - **必须用 DSH 自带的 `dsh`，不能 `npx @deepseek-ai/dsh`。** `desktop` 这份 profile 由桌面端独占管理，npx 会直接报 `profile "desktop" is managed exclusively by the Electron application`。PATH 里找不到 `dsh` 就用完整路径：
   ```powershell
-  & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "D:\dsh-qq-onebot-1.0.0"
+  & "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "D:\dsh-qq-onebot-1.2.8"
   ```
 - **`--profile` 不能省**，省了直接报 `error: --profile <name> is required`。
 - **写绝对路径**，相对路径是按你敲命令那一刻的当前目录算的。
@@ -80,9 +104,9 @@ dsh plugin --profile desktop add "D:\dsh-qq-onebot-1.0.0"
 dsh plugin --profile desktop why dsh-qq-onebot
 ```
 
-### 3. 重启 DSH，填连接信息
+### 3. 重启 DSH，填连接信息和私聊白名单
 
-重新打开 DSH → **设置 → QQ**，把 `wsUrl` 和 `accessToken` 填进去就行（34 项都在那个面板上，改完即时生效）。
+重新打开 DSH → **设置 → QQ**，填写 `wsUrl`、`accessToken`，并把你用于发消息的 QQ 号加入 `privateAllow`。私聊默认只认白名单，名单为空时谁都不会收到回复；`ownerIds` 用于认主人，不能代替 `privateAllow`。连接设置保存后点「重连」。
 
 > **设置里没看到 QQ 这一项？** 别慌，不用等修——两条路都能救。
 >
@@ -91,7 +115,8 @@ dsh plugin --profile desktop why dsh-qq-onebot
 > ```json
 > {
 >   "wsUrl": "ws://127.0.0.1:3001",
->   "accessToken": "my-token-2026"
+>   "accessToken": "my-token-2026",
+>   "privateAllow": ["你的QQ号"]
 > }
 > ```
 >
@@ -107,6 +132,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
   config:
     wsUrl: ws://127.0.0.1:3001
     accessToken: my-token-2026
+    privateAllow: ['你的QQ号']           # 允许这个 QQ 号私聊
     cwd: D:/my-agent                     # Agent 工作目录，不填用进程 cwd
     workspaceRoot: D:/my-agent/QQ会话    # 每个会话的独立目录（不填用 <cwd>/会话）
     persona: |                           # 它是谁、什么脾气（不填就是个普通助手）
@@ -115,7 +141,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
     model: deepseek-flash
 ```
 
-日志里看到 `已连接 ws://127.0.0.1:3001` 就成了，给小号发条私聊试试。
+日志里看到 `已连接 ws://127.0.0.1:3001` 后，用已加入 `privateAllow` 的 QQ 号给小号发条私聊试试。
 
 ## 最常改的几个配置
 
@@ -125,12 +151,16 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | `ownerIds` / `ownerLabel` | `[]` / `主人` | 想在群里认出主人，优先响应 |
 | `requireMention` | `true` | 群里不 @ 也想让它接话 |
 | `groupMode` / `privateMode` | `open` / `allowlist` | 只想在指定群 / 指定人那里开；私聊默认只认白名单 |
+| `privateAllow` | `[]` | 允许私聊的 QQ 号；默认空名单，不回应任何私聊 |
+| `groupFree` | `[]` | 只让指定群免 @，仍受访问控制与回复间隔限制 |
+| `groupImageBlock` | `[]` | 按「群号:QQ号」屏蔽成员图片内容 |
+| `holdNightMessages` | `false` | 开启休息时段静默；私聊攒到醒来，群聊略过 |
 | `groupReplyGapMs` | `20000` | 觉得回得太密（防刷屏、防风控） |
 | `rateLimitPerMin` | `12` | 每个会话每分钟最多发几条 |
 | `contextGuard` | `true` | 不想要自动换会话就关掉 |
 | `chatLog` | `true` | 不想记原始流水就关掉 |
 
-**全部 50+ 项见 [docs/configuration.md](docs/configuration.md)。**
+**全部配置项见 [docs/configuration.md](docs/configuration.md)。**
 
 ## 想深入看哪块
 
@@ -139,12 +169,13 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | 它是谁、群里怎么认主人、上下文守卫、认时间、引用与沉默判断 | [docs/persona.md](docs/persona.md) |
 | 所有配置项的默认值和含义 | [docs/configuration.md](docs/configuration.md) |
 | 长期跑、看门狗、定时写日记、开机自启 | [docs/deployment.md](docs/deployment.md) |
+| 不启动真实 DSH / NapCat，使用网页模拟器 | [docs/mock-environment.md](docs/mock-environment.md) |
 | 改代码、跑测试、目录结构 | [docs/development.md](docs/development.md) |
 | 测试怎么做、踩坑记录、排障 | [TESTING.md](TESTING.md) · [tools/README.md](tools/README.md) |
 
 ## 在 DSH 设置里调它
 
-不想手改 YAML 的话，**设置 → QQ** 那一节就是个面板，34 项都能点着改：
+不想手改 YAML 的话，可以在 **设置 → QQ** 面板调整以下配置：
 
 | 分组 | 能改什么 |
 | --- | --- |
@@ -153,10 +184,12 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | 它人设 | `persona`、`personaFile`、`ownerLabel` |
 | 补充提示 | `directPrompt`、`groupPrompt` |
 | 记忆区与工作区 | `workspaceRoot`、`isolateByPeer` |
-| 群里怎么说话 | `requireMention`、`groupWakeMs`、`groupReplyGapMs`、`groupMinGapMs`、`rateLimitPerMin`、`historyLimit` |
+| 群里怎么说话 | `groupFree`、`groupImageBlock`、`requireMention`、`groupWakeMs`、`groupReplyGapMs`、`groupMinGapMs`、`rateLimitPerMin`、`historyLimit` |
 | 谁能跟它说话 | `privateMode`、`privateAllow`、`ownerIds`、`groupMode`、`groupAllow` |
 | 同类机器人 | `botChatEnabled`、`peerBots` |
-| 其它 | `debug`、`textChunkLimit`、`splitDelayMs` |
+| 主动说话与连发合并 | `proactiveEnabled`、`proactiveSilentMs`、`proactiveMaxPerDay`、`proactiveQuietHours`、`mergeWindowMs` |
+| 作息 | `sleepMode`、`bedtimeAt`、`holdNightMessages`、`sleepFrom` / `sleepTo`，以及群聊、私聊各自的休息时段 |
+| 其它 | `voiceName`、`debug`、`textChunkLimit`、`splitDelayMs` |
 
 改完立刻生效（`wsUrl` / `accessToken` 要点「重连」；`reconnectMs` / `selfId` / `workspaceRoot` / `isolateByPeer` / `asrPython` 要重启宿主）。设置写在 `$DSH_HOME/dsh-qq/settings.json`，只覆盖你显式设过的键，清空就回默认——**不动 profile 的 `cordis.patch.yml`**。
 
@@ -212,7 +245,7 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 先确认 `asrPython -c "import vosk"` 能过，再手动跑一次 `<asrPython> <asrScript> <音频文件> [模型目录]`。模型目录必须是**纯 ASCII 路径**（vosk 的 C++ 层不认中文路径）。
 
 **记忆存在哪 / 会不会和宿主串**
-默认 `isolateByPeer: true`：私聊在 `<workspaceRoot>/会话/私聊_<QQ号>/`，群在 `群_<群号>/`，第一次用自动铺好 `AGENTS.md` + `记忆区/`。想共用宿主目录就设 `false`。
+默认 `isolateByPeer: true`：私聊在 `<workspaceRoot>/私聊_<QQ号>/`，群聊在 `<workspaceRoot>/群_<群号>/`，第一次用自动铺好 `AGENTS.md` + `记忆区/`。`workspaceRoot` 留空时才使用 `<cwd>/会话`，`cwd` 留空则使用进程工作目录。想共用宿主目录就设 `isolateByPeer: false`。
 
 **能不能群发 / 主动推消息**
 不做群发。**冷场时会主动开口**：会话安静满 `proactiveSilentMs`（默认 20 分钟）之后，它有机会自己说一句，说不说由它判断（不想说就 `[SILENT]`）。有静默时段、每天次数上限、以及「连着几次没人接就闭嘴」三道闸，见 [配置项](docs/configuration.md#没人说话的时候主动开口)。想定时定点让它说话，就在 DSH 里给它挂个定时任务。
@@ -226,6 +259,8 @@ NapCat 的 **WS 和 HTTP 是两个不同的 token**，填错不报错，只是�
 | NapCat | v4.x（推荐 `NapCat.Shell.Windows.OneKey` 独立版） |
 | 一个 QQ 小号 | 别用主号，真的 |
 | （可选）vosk + numpy | 只有想让语音自动转文字才要；不装也行，语音会标成「没听清」 |
+
+源码与 mock 测试已在 Node.js 26.13.0 下验证通过。插件运行在 DSH 宿主进程内，修改系统 Node.js 或 `engines.node` 不会升级 DSH 内置运行时；真实宿主与协议端仍需按 [测试清单](TESTING.md) 验证。
 
 ## 放出去之前，逐条确认
 
