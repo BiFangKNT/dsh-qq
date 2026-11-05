@@ -14,6 +14,7 @@ import {
 } from './settings.js'
 import { resolvePeerWorkspace } from './workspace.js'
 import { listOf } from './config.js'
+import { imagePolicy, blocksImage } from './image-filter.js'
 import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
 import { join, extname } from 'node:path'
@@ -415,14 +416,14 @@ export async function expandForwards(client, forwards, { logger } = {}) {
  * export 出去是因为 `qq_images`（tools.js）也要用同一条下载路径：
  * 按消息 id 现取图的时候，落到跟收消息一样的缓存目录里，用完能一起被清。
  */
-export async function downloadImage(url, cacheDir, maxMB) {
+export async function downloadImage(url, cacheDir, maxMB, policy) {
   try {
-    if (!url) return null
+    if (!url || policy?.all) return null
 
     // base64:// 直接落盘
     if (url.startsWith('base64://')) {
       const buf = Buffer.from(url.slice('base64://'.length), 'base64')
-      if (buf.length > maxMB * 1024 * 1024) return null
+      if (buf.length > maxMB * 1024 * 1024 || blocksImage(buf, policy)) return null
       const p = join(cacheDir, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`)
       await writeFile(p, buf)
       return p
@@ -433,7 +434,7 @@ export async function downloadImage(url, cacheDir, maxMB) {
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
     if (!res.ok) return null
     const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.length > maxMB * 1024 * 1024) return null
+    if (buf.length > maxMB * 1024 * 1024 || blocksImage(buf, policy)) return null
 
     const ext = guessExt(url, res.headers.get('content-type') ?? '')
     const p = join(cacheDir, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
@@ -594,7 +595,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
       seenMessages.set(key, now + 10 * 60_000)
       if (seenMessages.size > 4096) seenMessages.delete(seenMessages.keys().next().value)
     }
-    const blockImages = isGroup && listOf(config.groupImageBlock).includes(`${peerId}:${event.user_id}`)
+    const policy = imagePolicy(config, isGroup ? peerId : null, event.user_id)
+    const blockImages = policy.all
     const info = readMessage(event.message, {
       selfId, selfName: event.self_name ?? '机器人', blockImages,
     })
@@ -886,9 +888,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
     let imagePaths = []
     if (info.images.length > 0) {
       await mkdir(cacheDir, { recursive: true }).catch(() => {})
-      imagePaths = (await Promise.all(info.images.slice(0, 4).map((u) => downloadImage(u, cacheDir, maxMB)))).filter(Boolean)
+      imagePaths = (await Promise.all(info.images.slice(0, 4).map((u) => downloadImage(u, cacheDir, maxMB, policy)))).filter(Boolean)
       if (imagePaths.length > 0) pruneCache(cacheDir)
-      else logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
+      else if (!policy.sizes.length) logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
     }
 
     // ── 文件：下载到本地，把路径交给 agent ──
@@ -1008,7 +1010,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       )
       const hint = faceCollectRule(config)
       if (hint) parts.push(hint)
-    } else if (info.images.length > 0) {
+    } else if (info.images.length > 0 && !policy.sizes.length) {
       parts.push('[用户发了图片，但没能下载下来]')
     }
 

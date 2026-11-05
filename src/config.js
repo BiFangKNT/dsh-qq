@@ -138,7 +138,7 @@ export const ConfigSchema = Schema.object({
     .description('免 @ 群号列表；仍受访问控制和回复间隔限制，允许选择不回复'),
   groupImageBlock: Schema.array(Schema.string())
     .default([])
-    .description('屏蔽指定群成员的图片，格式「群号:QQ号」，例如 ["123456789:10001"]；不下载图片，保留文字及 [图片] 占位符，让模型知道对方发过图'),
+    .description('按群成员屏蔽图片：「群号:QQ号」屏蔽全部且不下载；「群号:QQ号:宽x高」仅屏蔽指定尺寸（如 123456789:10001:1920x1080，宽高精确匹配）。尺寸过滤需获取图片，命中后不保存，只保留文字和 [图片]，不向模型提供分辨率'),
   groupWakeMs: Schema.number()
     .default(60000)
     .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭；2026-10-24 按群友的建议从 5 分钟改成 1 分钟）'),

@@ -33,7 +33,7 @@
 | 语音发送 | `qq_send_voice` 使用 Windows SAPI 合成并发送语音，可用 `voiceName` 选择声音 |
 | 私聊流水查询 | `qq_private_history` 查询落盘记录；主人可读正文，其他人达到好感度门槛后仅可查时间线 |
 | 空间发布 | `qq_qzone_send` 仅主人私聊可用；确认内容与可见范围后发布，每天最多两次尝试 |
-| 群聊细分控制 | `groupFree` 指定免 @ 群；`groupImageBlock` 按成员屏蔽图片内容，保留文字和图片占位符 |
+| 群聊细分控制 | `groupFree` 指定免 @ 群；`groupImageBlock` 按成员屏蔽全部或指定分辨率的图片，保留文字和图片占位符 |
 | 问答与审批能转回 QQ | `ask_user_question` 的问题可回数字选择；审批请求展示操作详情，可回「通过 / 拒绝 / 取消」 |
 | 本地网页模拟器 | 运行真实插件，模拟 DSH 宿主和 NapCat；支持消息收发、工具编排、故障注入和重载验证 |
 
@@ -154,7 +154,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | `localApiPort` | `34569` | 多实例改成不同端口；`0` 关闭独立设置服务，修改后重启宿主 |
 | `privateAllow` | `[]` | 允许私聊的 QQ 号；默认空名单，不回应任何私聊 |
 | `groupFree` | `[]` | 只让指定群免 @，仍受访问控制与回复间隔限制 |
-| `groupImageBlock` | `[]` | 按「群号:QQ号」屏蔽成员图片内容 |
+| `groupImageBlock` | `[]` | 「群号:QQ号」屏蔽全部图片；「群号:QQ号:宽x高」只屏蔽指定尺寸 |
 | `holdNightMessages` | `false` | 开启休息时段静默；私聊攒到醒来，群聊略过 |
 | `groupReplyGapMs` | `20000` | 觉得回得太密（防刷屏、防风控） |
 | `rateLimitPerMin` | `12` | 每个会话每分钟最多发几条 |

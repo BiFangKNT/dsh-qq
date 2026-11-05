@@ -250,3 +250,27 @@ test('入站实例释放后取消私聊合并定时器，不再投递', async ()
   await h.inbound(h.event(2))
   assert.equal(h.delivered.length, 0)
 })
+
+test('成员分辨率过滤逐图匹配，保留文字占位符，不向 AI 暴露尺寸', async t => {
+  const root = await temporary(t)
+  const h = inboundHarness({ requireMention: false, cwd: root, imageCacheDir: root })
+  h.config.groupImageBlock = [h.group + ':10001:1x1']
+  const png = 'base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6L/sAAAAASUVORK5CYII='
+  const image = { type: 'image', data: { url: png } }
+  await h.inbound(h.event(1, [{ type: 'text', data: { text: '保留这句话' } }, image]))
+  await h.flush()
+  let text = JSON.stringify(h.delivered[0])
+  assert.match(text, /保留这句话\[图片\]/)
+  assert.doesNotMatch(text, /已存到本机|1x1|分辨率|base64|没能下载/)
+  // 同一条消息里既有命中图片，又有不同尺寸图片，后者仍能提供。
+  const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+  gif.writeUInt16LE(2, 6)
+  await h.inbound(h.event(2, [image, { type: 'image', data: { url: 'base64://' + gif.toString('base64') } }]))
+  await h.flush()
+  text = JSON.stringify(h.delivered[1])
+  assert.match(text, /用户发了 1 张图片/)
+  assert.doesNotMatch(text, /1x1|2x1|分辨率/)
+  await h.inbound(h.event(3, [image], { user_id: 10002 }))
+  await h.flush()
+  assert.match(JSON.stringify(h.delivered[2]), /用户发了 1 张图片/)
+})

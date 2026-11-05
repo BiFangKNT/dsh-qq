@@ -61,6 +61,7 @@
     "access": "public"
   },
   "dependencies": {
+    "image-size": "^2.0.4",
     "ws": "^8.18.0"
   },
   "peerDependencies": {
