@@ -13,7 +13,7 @@ export async function waitFor(predicate, { timeout = 5000, what = '条件' } = {
   throw new Error(`等待超时：${what}`)
 }
 
-export function createMockDsh({ home, webServer, autoReply = true, verbose = false } = {}) {
+export function createMockDsh({ home, webServer, autoReply = true, verbose = false, llm } = {}) {
   if (!home) throw new Error('mock DSH 必须指定隔离的 home')
   const listeners = new Map(), tools = new Map(), live = new Map(), plans = [], effects = [], logs = []
   let closed = false, callId = 0
@@ -26,6 +26,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     if (verbose) console.error(`[mock-dsh:${level}]`, entry.text)
   }]))
   const services = {
+    llm,
     tools: { register(tool) { if (tools.has(tool.name)) throw new Error(`工具重复注册：${tool.name}`); tools.set(tool.name, tool) } },
     dshHomePath: name => join(home, name), approval: {}, webServer,
     agentPresets: {
@@ -97,6 +98,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
   async function run(agent, message) {
     const plan = plans.shift() ?? (autoReply ? [{ type: 'text', text: '模拟回复：已收到这条消息。' }] : [])
     await event(agent, 'turn/start')
+    await event(agent, 'user/message', { message })
     let reason = { kind: 'completed' }
     try {
       for (const step of plan) {
@@ -132,7 +134,12 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     if (options.setup) { const commit = await options.setup(agentCtx); commit?.commit?.() }
     const agent = {
       id, ctx: agentCtx, scopedTools, results: [],
-      session: { id, header, events: saved?.events ?? [] },
+      session: { id, header, events: saved?.events ?? [],
+        deriveMessages() {
+          return structuredClone(this.events.filter(raw => ['user/message', 'assistant/message'].includes(raw.type))
+            .map(raw => ({ role: raw.type === 'user/message' ? 'user' : 'assistant', ...raw.data.message })))
+        },
+      },
       received: saved?.received ?? [], injected: saved?.injected ?? [],
       followup(message) {
         if (closed || disposed) throw new Error('Agent 已释放')

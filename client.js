@@ -377,6 +377,13 @@ window.__ModuleLoader__.load({
 
         /* ── 群里怎么说话 ── */
         h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '先判断是不是在和我说话'),
+          boolField('addressClassifierEnabled', '启用前置判断（群聊与私聊）', '独立会话判断；跳过的消息保留，下次放行时一起提供。开启后由它替代群聊的 @、名字和概率判断，访问控制与作息仍有效。'),
+          textField('addressClassifierProvider', '判断模型的 provider', { hint: '填写宿主注册的 provider 名称；留空使用插件明确配置的 provider。' }),
+          textField('addressClassifierModel', '判断模型', { hint: '填写模型名；留空使用插件明确配置的 model。未明确配置模型时会记录错误并保留消息。' }),
+          textField('addressClassifierReasoningEffort', '推理强度', { hint: '默认 low，可以填写模型支持的其他值。' }),
+          textField('addressClassifierTimeoutMs', '判断最长等待（毫秒）', { type: 'number', hint: '默认 30000。失败时保留消息，后续放行时一起交付。' })),
+        h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '群里怎么说话'),
           listField('groupFree', '免 @ 群', { hint: '群号，用逗号分隔；仍受访问控制和回复间隔限制。' }),
           listField('groupImageBlock', '屏蔽成员图片', { hint: '填「群号:QQ号」屏蔽全部图片；填「群号:QQ号:宽x高」只屏蔽指定尺寸，如 123456789:10001:1920x1080。多条用逗号分隔，宽高精确匹配。尺寸过滤会获取图片进行检查，命中后不保存；仅保留文字和 [图片]，不向 AI 提供分辨率。' }),

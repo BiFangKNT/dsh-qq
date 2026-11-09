@@ -8,7 +8,7 @@ import { startMockNapcat } from './mock-napcat.mjs'
 import { createMockDsh, waitFor } from './mock-dsh.mjs'
 
 /** 真插件 + 真 WS 客户端 + 两个模拟边界；运行数据全部落在独立目录。 */
-export async function createMockEnvironment({ port = 0, root, config: overrides = {}, verbose = false, autoReply = true } = {}) {
+export async function createMockEnvironment({ port = 0, root, config: overrides = {}, verbose = false, autoReply = true, llm } = {}) {
   root ??= await mkdtemp(join(tmpdir(), 'dsh-qq-sim-'))
   await mkdir(root, { recursive: true })
   const routes = new Set()
@@ -64,7 +64,7 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
   Object.assign(config, { localApiPort: 0, accessToken: token, selfId: '10001', cwd: root,
     workspaceRoot: join(root, '会话'), memoryRoot: join(root, '共享记忆') })
   async function load() {
-    host = createMockDsh({ home: root, webServer, verbose, autoReply })
+    host = createMockDsh({ home: root, webServer, verbose, autoReply, llm })
     apply(host.ctx, config)
     await waitFor(() => peer.clientCount === 1, { what: '模拟器连接' })
     await waitFor(() => peer.calls.some(call => call.action === 'get_login_info'), { what: '登录查询' })

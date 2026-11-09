@@ -130,6 +130,16 @@ export const ConfigSchema = Schema.object({
     .description('单轮回复最长等待时间，单位毫秒（默认 10 分钟；超时只提示，不打断 Agent）'),
 
   // ── 触发策略 ──
+  addressClassifierEnabled: Schema.boolean().default(false)
+    .description('使用独立模型会话判断是否在和机器人说话；跳过的消息保留，下次放行时一起提供'),
+  addressClassifierProvider: Schema.string().default('')
+    .description('前置分类器 provider；留空使用插件明确配置的 provider，不能自动读取宿主默认'),
+  addressClassifierModel: Schema.string().default('')
+    .description('前置分类器模型；留空使用插件明确配置的 model'),
+  addressClassifierReasoningEffort: Schema.string().default('low')
+    .description('前置分类器推理强度，由所选模型支持的值决定'),
+  addressClassifierTimeoutMs: Schema.number().min(1).default(30000)
+    .description('前置分类超时毫秒；失败保留消息并记录错误，等待后续消息放行'),
   requireMention: Schema.boolean()
     .default(true)
     .description('群聊里是否必须 @ 机器人才回复'),

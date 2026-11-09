@@ -5,6 +5,7 @@ import { OneBotClient } from './onebot/client.js'
 import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
+import { createAddressClassifier } from './address-classifier.js'
 import { appendChatLog } from './chatlog.js'
 import { SILENT_MARKER, personaLeaks, stripSilentMark } from './prompts.js'
 import { createOutbound } from './outbound.js'
@@ -459,7 +460,8 @@ const pin = createPin({ config, logger })
   const reading = createReading({ config, manager, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
-  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin })
+  const addressClassifier = createAddressClassifier({ config, home: homeDirOf(ctx, logger), llm: ctx.get?.('llm'), logger })
+  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin, addressClassifier })
   const outbound = createOutbound({ manager, config, logger, send, wake, contextGuard })
 
   // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方

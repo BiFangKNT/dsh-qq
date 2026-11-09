@@ -51,6 +51,11 @@ export const OVERRIDABLE = [
   'isolateByPeer',
   'imageCacheDir',
   // 触发与节奏
+  'addressClassifierEnabled',
+  'addressClassifierProvider',
+  'addressClassifierModel',
+  'addressClassifierReasoningEffort',
+  'addressClassifierTimeoutMs',
   'requireMention',
   'groupFree',
   'groupImageBlock',
@@ -396,6 +401,18 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const body = await readJsonBody(req)
       const patch = body?.patch && typeof body.patch === 'object' ? body.patch : body
       if (!patch || typeof patch !== 'object') return sendJson(res, 400, { ok: false, error: '要一个对象' })
+
+      if (patch.addressClassifierEnabled != null && typeof patch.addressClassifierEnabled !== 'boolean') {
+        return sendJson(res, 400, { ok: false, error: 'addressClassifierEnabled 必须为布尔值' })
+      }
+      if (patch.addressClassifierTimeoutMs != null && (!Number.isFinite(patch.addressClassifierTimeoutMs) || patch.addressClassifierTimeoutMs <= 0)) {
+        return sendJson(res, 400, { ok: false, error: 'addressClassifierTimeoutMs 必须为正数' })
+      }
+      for (const key of ['addressClassifierProvider', 'addressClassifierModel', 'addressClassifierReasoningEffort']) {
+        if (patch[key] != null && typeof patch[key] !== 'string') {
+          return sendJson(res, 400, { ok: false, error: `${key} 必须为字符串` })
+        }
+      }
 
       if (patch.localApiPort != null && (!Number.isInteger(patch.localApiPort) || patch.localApiPort < 0 || patch.localApiPort > 65535)) {
         return sendJson(res, 400, { ok: false, error: 'localApiPort 必须为 0–65535 的整数' })

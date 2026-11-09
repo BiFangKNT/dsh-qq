@@ -34,6 +34,11 @@
         historyLimit: 20
 
         # ── 触发 ──
+        addressClassifierEnabled: false
+        addressClassifierProvider: ''
+        addressClassifierModel: ''
+        addressClassifierReasoningEffort: low
+        addressClassifierTimeoutMs: 30000
         requireMention: true
         replyToPrivate: true
         groupMode: open

@@ -17,9 +17,10 @@ import { listOf } from './config.js'
 import { imagePolicy, blocksImage } from './image-filter.js'
 import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
 import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
-import { join, extname } from 'node:path'
+import { join, extname, dirname } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { randomUUID } from 'node:crypto'
 
 /** 插件自带的 ASR 脚本；配置里没写 asrScript 时用它。 */
 const DEFAULT_ASR_SCRIPT = fileURLToPath(new URL('../tools/asr.py', import.meta.url))
@@ -446,12 +447,12 @@ export async function downloadImage(url, cacheDir, maxMB, policy) {
 }
 
 /** 清掉缓存里太老的图，避免堆成垃圾场。 */
-async function pruneCache(cacheDir, keepFiles = 200) {
+async function pruneCache(cacheDir, protectedPaths, keepFiles = 200) {
   try {
     const names = (await readdir(cacheDir)).filter((n) => n.startsWith('qq-'))
     if (names.length <= keepFiles) return
     const stats = await Promise.all(
-      names.slice(0, names.length - keepFiles).map(async (n) => {
+      names.filter(n => !protectedPaths.has(join(cacheDir, n))).slice(0, names.length - keepFiles).map(async (n) => {
         const p = join(cacheDir, n)
         try {
           const { stat } = await import('node:fs/promises')
@@ -475,7 +476,7 @@ async function pruneCache(cacheDir, keepFiles = 200) {
  *
  * 触发规则全部走配置，插件自己不做「猜你还想聊」这种自作聪明的事。
  */
-export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, pin }) {
+export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, pin, addressClassifier }) {
   // 没配 imageCacheDir 时落在工作目录下的「图片缓存」；每个会话再各占一层子目录（见下）
   const baseCacheDir =
     String(config.imageCacheDir ?? '').trim() ||
@@ -490,31 +491,74 @@ export function createInbound({ config, manager, logger, client, send, approval,
   const mergeBatches = new Map()
   // 被回复间隔压住的消息，到点重放；卸载时与合并定时器一起取消。
   const gapReplayTimers = new Map()
+  const ingressQueues = new Map()
+  const preparingSources = new Set()
+  const preparingAttachments = new Set()
   let disposed = false
+
+  function initialChatParts(record, { isGroup, isOwner }) {
+    const parts = []
+    const pinLines = pin?.view?.(record) ?? []
+    if (pinLines.length > 0) parts.push(...pinLines, '')
+    const chatPrompt = buildChatPrompt(config, {
+      isGroup, isOwner,
+      faces: facesForPrompt(config, 12),
+      facts: loadFactsFor(record), factsFile: factsFileFor(record),
+      glossary: isGroup ? loadGlossaryFor(record) : '', glossaryFile: glossaryFileFor(record),
+      groupDigest: isGroup ? '' : loadGroupDigest({
+        workspaceRoot: String(config.workspaceRoot ?? '').trim() ||
+          join(String(config.cwd ?? '').trim() || process.cwd(), '会话'),
+        today: localDay(), selfId: String(config.selfId ?? '').trim(),
+      }),
+    })
+    if (chatPrompt) parts.unshift(chatPrompt, '')
+    if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
+      parts.unshift(
+        '[你刚才自己留的便签 / 最近几句话——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
+        ...record.swapSeed, '[刚才那段聊到这里]', '',
+      )
+    }
+    return parts
+  }
+
+  function markChatPromptInjected(record) {
+    if (typeof manager?.markChatPromptInjected === 'function') manager.markChatPromptInjected(record)
+    else record.chatPromptInjected = true
+    record.swapSeed = null
+  }
 
   /**
    * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
    */
-  function runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs }) {
-    const message = createUserMessage({
-      content: [{ type: 'text', text: body }],
-      source: { kind: 'user' },
-    })
+  function runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs, beforeSubmit, onAccepted, onRejected, onIdle, canDeliver }) {
     const startedAt = Date.now()
 
     manager.enqueue(record, async () => {
       let timer = null
       try {
+        if (disposed || (canDeliver && !canDeliver())) {
+          onRejected?.()
+          return
+        }
+        const message = createUserMessage({
+          content: [{ type: 'text', text: typeof body === 'function' ? body() : body }],
+          source: { kind: 'user' },
+        })
         // 私聊回一句「正在输入」，让对方知道这边在敲字（群聊没有这个概念，跳过）
         if (!isGroup && client) {
           client
             .call('set_input_status', { user_id: Number(peerId), event_type: 1 }, 5000)
             .catch(() => {})
         }
+        beforeSubmit?.()
         record.agent.followup(message)
+        onAccepted?.()
 
         const outcome = await Promise.race([
-          Promise.resolve(record.agent.whenIdle?.()).then(() => 'idle'),
+          Promise.resolve(record.agent.whenIdle?.()).then(() => {
+            onIdle?.()
+            return 'idle'
+          }),
           new Promise((resolve) => {
             timer = setTimeout(() => resolve('timeout'), maxTurnMs)
           }),
@@ -534,6 +578,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
           }
         }
       } catch (err) {
+        onRejected?.(err)
         logger.warn?.(`[dsh-qq] 投递给 ${label} 失败:`, err)
       }
     })
@@ -541,7 +586,25 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
   const seenMessages = new Map()
 
-  const onEvent = async (event) => {
+  const handleEvent = async event => {
+    const attachments = new Set()
+    preparingAttachments.add(attachments)
+    try {
+      await processEvent(event, attachments)
+      if (disposed || attachments.size === 0) return
+      const protectedPaths = addressClassifier?.pendingAttachmentPaths() ?? new Set()
+      for (const files of preparingAttachments) {
+        for (const path of files) protectedPaths.add(path)
+      }
+      for (const dir of new Set([...attachments].map(path => dirname(path)))) {
+        await pruneCache(dir, protectedPaths)
+      }
+    } finally {
+      preparingAttachments.delete(attachments)
+    }
+  }
+
+  const processEvent = async (event, attachments) => {
     if (disposed) return
     if (event?.post_type !== 'message') return
     // 补回：这条是「被间隔压住、到点自己醒过来」的重放，不是新消息。
@@ -574,6 +637,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const isGroup = event.message_type === 'group'
     const scope = isGroup ? 'group' : 'private'
     const peerId = String(isGroup ? event.group_id : event.user_id)
+    const classified = Boolean(config.addressClassifierEnabled && addressClassifier)
     const sender = event.sender ?? {}
     const senderName = sender.card || sender.nickname || peerId
     const label = isGroup ? `群 ${peerId}` : `私聊 ${senderName}(${peerId})`
@@ -584,7 +648,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (peerBot) ownerInfo.isBot = true
 
     const allowed = isGroup ? allowGroup(config, peerId) : allowPrivate(config, peerId)
-    if (!isReplay && event.message_id !== undefined && event.message_id !== null) {
+    if (!isReplay && !event.__classifierRecovery && event.message_id !== undefined && event.message_id !== null) {
       const now = Date.now()
       for (const [key, expires] of seenMessages) {
         if (expires <= now) seenMessages.delete(key)
@@ -622,7 +686,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 聊天流水：跳过的消息也先记下来——「它怎么突然接不上话」全靠这段回查。
     // 只落盘、不参与投递，写失败也不影响聊天。
     // 白名单外的落到 `聊天记录/_未开通/`（2026-10-26 姐姐定的）：留痕，不投递。
-    if (config.chatLog !== false && !isReplay) {
+    if (config.chatLog !== false && !isReplay && !event.__classifierRecovery) {
       const logDir = resolvePeerWorkspace(config, scope, peerId)
       const who = `${senderName}(${event.user_id})`
       appendChatLog(
@@ -697,7 +761,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 为什么要这一层：私聊里两只鲸鲸互相回话没有天然终点——A 回 B，B 又回 A，
     // 每轮都算「有人跟我说话」，出站限流只能把它压慢。真人一开口就清零（下面的 else），
     // 所以有人在场时不受这个上限管，只有它们自己转圈时才刹车。
-    if (peerBot) {
+    if (peerBot && !classified) {
       // 冷启动补历史（isReplay）不算连聊：那不是它们在聊，是我们在补记录，
       // 记进轮次会把「补三条」误算成「连聊三轮」，第 5 条就被拦掉。
       const maxTurns = isReplay ? 0 : Number(config.peerChatMaxTurns) || 0
@@ -712,7 +776,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
           return
         }
       }
-    } else {
+    } else if (!peerBot) {
       // 真人开口 = 有人在场了，自动对话的额度全部重置。
       peerChatTurns.clear()
     }
@@ -722,7 +786,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 这种算「有人冲它来了」，必须回，不给 [SILENT] 出口。
     const freeGroup = isGroup && listOf(config.groupFree).includes(peerId)
     let addressedBy = null
-    if (isGroup && config.requireMention && !freeGroup && !info.atMe && !isReplay) {
+    if (!classified && isGroup && config.requireMention && !freeGroup && !info.atMe && !isReplay) {
       // 没 @ 我、却 @ 了别人（包括群里另一个机器人）：那明显不是跟我说话，
       // 保活期也不算 —— 否则别人一句「@ 那个谁 来帮我测一下」它也会冲上去接。
       if (info.atNames.length > 0) {
@@ -782,7 +846,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
     // 均匀回应：距上次回复太近就先攒着（消息进 backlog，下次一起看见），别连珠炮。
     // 但「攒着」得有兜底：间隔一过就自己醒一次，不然这句就永远躺在 backlog 里。
-    if (isGroup && !isReplay && !gapReady(config, peerId, senderId)) {
+    if (!classified && isGroup && !isReplay && !gapReady(config, peerId, senderId)) {
       logger.debug?.(
         `[dsh-qq] 群 ${peerId} 距上次回复不到 ${config.groupReplyGapMs}ms，先攒着（到点补回）`,
       )
@@ -792,7 +856,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     // 窗口内回复额度（可选，默认 0 = 不限；和「续期」一起用要注意，别设太小）
-    if (isGroup && !isReplay && !freeGroup && repliesLeft(config, peerId, senderId) <= 0) {
+    if (!classified && isGroup && !isReplay && !freeGroup && repliesLeft(config, peerId, senderId) <= 0) {
       logger.debug?.(
         `[dsh-qq] 群 ${peerId} 这个保活窗口已经回过 ${config.groupRepliesPerWindow} 次，先歇着`,
       )
@@ -803,15 +867,15 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 通过额度检查后才续期，耗尽额度的消息不能无限延长旧窗口。
     // 窗口续期（QLark 的 touch()）：@ 我、引用我、或者本来就在窗口里接着说话，都续上。
     // 但只有窗口的「正主」能续 —— 别人说话不续期也不蹭用，这条一松就变成群里谁说话都接。
-    if (isGroup && (info.atMe || quotedMe || addressedBy || wakeAlive(peerId, senderId))) {
+    if (!classified && isGroup && (info.atMe || quotedMe || addressedBy || wakeAlive(peerId, senderId))) {
       refreshWake(config, peerId, senderId)
     }
 
     let record = await manager.obtain({ scope, peerId, label })
     // 有人说话了：冷场计时要清零，主动说话那层也知道「这会儿不缺人」
-    wake?.noteInbound?.(record)
+    if (!classified) wake?.noteInbound?.(record)
 
-    if (isGroup && sleep?.shouldHold?.(record)) return
+    if (!classified && isGroup && sleep?.shouldHold?.(record)) return
 
     // 这个会话自己的缓存目录（隔离模式下一会话一目录；关掉隔离就共用 baseCacheDir）
     const cacheDir = record.dir ? join(record.dir, '图片缓存') : baseCacheDir
@@ -878,19 +942,24 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     // 给互动工具留线索：戳谁、给哪条消息贴表情、撤回哪条
-    record.lastSenderId = Number(event.user_id) || record.lastSenderId || null
-    record.lastSenderName = senderName
-    record.lastMessageId = Number(event.message_id) || record.lastMessageId || null
-    record.lastMessageAt = Date.now()
-    if (record.lastSenderName) record.label = label
+    if (!classified) {
+      record.lastSenderId = Number(event.user_id) || record.lastSenderId || null
+      record.lastSenderName = senderName
+      record.lastMessageId = Number(event.message_id) || record.lastMessageId || null
+      record.lastMessageAt = Date.now()
+      if (record.lastSenderName) record.label = label
+    }
 
     // ── 图片：下载到本地，把路径交给 agent ──
     let imagePaths = []
     if (info.images.length > 0) {
       await mkdir(cacheDir, { recursive: true }).catch(() => {})
-      imagePaths = (await Promise.all(info.images.slice(0, 4).map((u) => downloadImage(u, cacheDir, maxMB, policy)))).filter(Boolean)
-      if (imagePaths.length > 0) pruneCache(cacheDir)
-      else if (!policy.sizes.length) logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
+      imagePaths = (await Promise.all(info.images.slice(0, 4).map(async u => {
+        const path = await downloadImage(u, cacheDir, maxMB, policy)
+        if (path) attachments.add(path)
+        return path
+      }))).filter(Boolean)
+      if (imagePaths.length === 0 && !policy.sizes.length) logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
     }
 
     // ── 文件：下载到本地，把路径交给 agent ──
@@ -901,7 +970,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
         const src = f.url || f.file || ''
         if (!src) continue
         const p = await downloadImage(src, cacheDir, 64)
-        if (p) filePaths.push({ path: p, name: f.name || p.split(/[\\/]/).pop() })
+        if (p) {
+          attachments.add(p)
+          filePaths.push({ path: p, name: f.name || p.split(/[\\/]/).pop() })
+        }
       }
       if (filePaths.length === 0) logger.warn?.(`[dsh-qq] 文件下载失败（${info.files.length} 个）`)
     }
@@ -957,7 +1029,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     // ── 上下文压力太大就先换新会话：把最近聊天记进记忆区，新会话带 seed 接话 ──
-    if (contextGuard) {
+    if (!classified && contextGuard) {
       const seed = await contextGuard.maybeSwap(record)
       if (seed) {
         const prev = record
@@ -976,7 +1048,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // ── 组装交给 agent 的那段文字 ──
     const parts = []
     // 当前时间：每条消息都带在最前面，跟着正文走 —— 会话压缩、历史被裁掉，这行也不会丢
-    parts.push(`[现在是 ${humanTime()}]`)
+    parts.push(classified ? `[收到消息的时间：${humanTime(new Date(event.__classifierReceivedAt ?? Date.now()))}]` : `[现在是 ${humanTime()}]`)
     if (quoteLine) {
       parts.push(quoteLine, QUOTE_DIRECTION_HINT)
     }
@@ -997,7 +1069,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       atMe: info.atMe,
       quotedMe,
       isReplay,
-      addressedBy,
+      addressedBy: classified ? 'classifier' : addressedBy,
       addressedMaySilent: config.addressedMaySilent,
     })
     if (!mustReply) parts.push(SILENT_HINT)
@@ -1035,7 +1107,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     // 之前跳过的群消息补进来（只说给它听，不叫醒它）：
     // 这一句是在接前一句，不补的话它只能凭空接。
-    if (isGroup) {
+    if (!classified && isGroup) {
       const backlog = drainBacklog(peerId)
       for (const line of backlog) pushHistory(record, line, config.historyLimit)
     }
@@ -1051,66 +1123,43 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     // 聊天规矩（内置中性版 + 可选 persona + directPrompt/groupPrompt）只在本会话第一次投递时
     // 注入一次，别每条都重复占 token；会话被回收或 /reset 后会重新注入一遍。
-    if (!record.chatPromptInjected) {
-      // 话头：它自己钉住的、还没接上的。**不每轮硬塞** —— 老三自己说的：「每轮开头硬塞五条，
-      // 聊得正顺的时候反倒碍眼；真到换地方的时候，开头给一次就够。」平时想翻用 qq_pin list。
-      const pinLines = pin?.view?.(record) ?? []
-      if (pinLines.length > 0) parts.unshift(...pinLines, '')
-      const chatPrompt = buildChatPrompt(config, {
-        isGroup,
-        isOwner: ownerInfo.isOwner,
-        faces: facesForPrompt(config, 12),
-        facts: loadFactsFor(record),
-        factsFile: factsFileFor(record),
-        // 群词典：这个群自己的黑话。私聊传空串，别把某个群的词带进私聊。
-        glossary: isGroup ? loadGlossaryFor(record) : '',
-        glossaryFile: glossaryFileFor(record),
-        // 纸条：私聊时告诉她「别的群今天的尾巴」——最后谁说了话、有没有人点她名没应。
-        //    群聊不传——她在那个群里，用不着有人替她讲。正文字一个字都不给。
-        groupDigest: isGroup
-          ? ''
-          : loadGroupDigest({
-              workspaceRoot:
-                String(config.workspaceRoot ?? '').trim() ||
-                join(String(config.cwd ?? '').trim() || process.cwd(), '会话'),
-              today: localDay(),
-              // 判断「哪条不是她发的」「有没有人 @ 她」，都要她自己的号
-              selfId: String(config.selfId ?? '').trim(),
-            }),
-      })
-      if (chatPrompt) parts.unshift(chatPrompt, '')
-      // 主动换过会话：把上一段聊天的尾巴放最前面，让它知道刚聊到哪
-      if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
-        parts.unshift(
-          '[你刚才自己留的便签 / 最近几句话——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
-          ...record.swapSeed,
-          '[刚才那段聊到这里]',
-          '',
-        )
-      }
-      record.swapSeed = null
-      // ⭐ 2026-10-26 姐姐说「不能每次都发那么长一截」：标记也记到盘上。
-      // 宿主重启 / 闲置回收后 record 重建，靠 manager 的账本记住「这个会话注过了」。
-      if (typeof manager?.markChatPromptInjected === 'function') manager.markChatPromptInjected(record)
-      else record.chatPromptInjected = true
+    if (!classified && !record.chatPromptInjected) {
+      parts.unshift(...initialChatParts(record, { isGroup, isOwner: ownerInfo.isOwner }))
+      markChatPromptInjected(record)
     }
 
     // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，
     // tick 的提醒就白丢了。等真的有人说话时补一句，塞进这一轮的提示词里，不多开一轮。
-    const lateBed = sleep?.takeLateBedtime?.(record)
+    const lateBed = !classified && sleep?.takeLateBedtime?.(record)
     if (lateBed) parts.unshift(lateBed, '')
 
     // 通道回执：桥断过 / 上一句话没送出去，得让她知道。
     // 放在最前面 —— 不然她会把「没收到回应」读成对方的态度。
-    const bridgeLines = bridge?.take?.(record) ?? []
+    const bridgeLines = classified ? [] : bridge?.take?.(record) ?? []
     if (bridgeLines.length > 0) parts.unshift(...bridgeLines, '')
 
     // 门口：大姐鲸鲸捎的话。只报「有几封、在哪」，内容她自己 read 才看。
     // 2026-10-26 姐姐定的：不敲门、不占主动额度，只在她本来就要开口的这一轮里多一行。
-    const doorNotice = doorLine(config)
+    const doorNotice = !classified && doorLine(config)
     if (doorNotice) parts.unshift(doorNotice, '')
 
     const body = parts.join('\n')
+
+    if (classified) {
+      const session = record.agent.session
+      await addressClassifier.accept({
+        id: event.__classifierId ?? (event.message_id == null ? randomUUID() : String(event.message_id)),
+        meta: { selfId, scope, peerId, label },
+        body, source: event, attachmentPaths: [...attachments],
+        robotName: manager.selfName || event.self_name || '机器人',
+        mainContext: { header: session.requestHeader?.(), messages: session.deriveMessages() },
+        background: isGroup ? [...(groupBacklog.get(peerId) ?? [])] : [],
+        message: { senderId, senderName, text: info.text || '[非文字消息]',
+          atMe: info.atMe, atOthers: info.atNames, quote: quoteInfo, time: event.time,
+          voiceTranscripts: voiceTexts, imageCount: info.images.length, fileNames: filePaths.map(f => f.name) },
+      }, deliverClassified)
+      return
+    }
 
     logger.info?.(`[dsh-qq] ← ${label}: ${(info.text || '[图片]').slice(0, 60)}`)
 
@@ -1165,8 +1214,176 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs })
   }
+
+  function permitted(meta) {
+    const selfId = String(manager.selfId || config.selfId || '')
+    return config.addressClassifierEnabled && meta.selfId === selfId &&
+      (meta.scope === 'group' ? allowGroup(config, meta.peerId) : allowPrivate(config, meta.peerId))
+  }
+
+  async function deliverClassified(batch, meta) {
+    if (disposed || !permitted(meta)) return false
+    const last = batch.at(-1)
+    const peerBot = isPeerBot(config, last.source?.user_id, last.source)
+    if (peerBot && !config.botChatEnabled) return false
+    const maxTurns = Number(config.peerChatMaxTurns) || 0
+    const prevTurns = peerChatTurns.get(meta.peerId)
+    if (peerBot && maxTurns > 0 && prevTurns && Date.now() - prevTurns.at < PEER_CHAT_TURN_WINDOW_MS && prevTurns.count >= maxTurns) return false
+    let record = await manager.obtain(meta)
+    // 主模型还在上一轮时继续判断新消息，正文留在磁盘，空闲后再交付。
+    if (record.busy > 0) return false
+    const isGroup = meta.scope === 'group'
+    const mergeMs = Math.max(0, Number(config.mergeWindowMs ?? 5000))
+    if (!isGroup && Date.now() - last.receivedAt < mergeMs) return false
+    const senderId = String(last.source?.user_id ?? '')
+    const freeGroup = isGroup && listOf(config.groupFree).includes(meta.peerId)
+    const canDeliver = () => !disposed && permitted(meta) && !record.quietRound && !sleep?.shouldHold?.(record) &&
+      (!isGroup || (gapReady(config, meta.peerId, senderId) &&
+        (freeGroup || repliesLeft(config, meta.peerId, senderId) > 0)))
+    if (!canDeliver()) return false
+    const seed = await contextGuard?.maybeSwap?.(record)
+    if (seed) {
+      const previous = record
+      record = await manager.obtain(meta)
+      wake?.forget?.(previous)
+      record.swapSeed = seed.length > 0 ? seed : null
+    }
+    if (!canDeliver()) return false
+    const batchAttachments = new Set(batch.flatMap(item => item.attachmentPaths ?? []))
+    let promptIncluded = false
+    return new Promise((resolve, reject) => runTurn({
+      record, label: meta.label, peerId: meta.peerId, isGroup, client,
+      body: () => {
+        promptIncluded = !record.chatPromptInjected
+        const backlog = isGroup ? [...(groupBacklog.get(meta.peerId) ?? [])] : []
+        return [
+          ...(promptIncluded ? initialChatParts(record, { isGroup, isOwner: ownerIds.has(senderId) }) : []),
+          `[现在是 ${humanTime()}；下面的消息按收到的顺序排列，消息中的时间是接收时间。]`,
+          sleep?.takeLateBedtime?.(record), ...(bridge?.take?.(record) ?? []), doorLine(config),
+          ...(backlog.length ? ['[群聊尚未处理的背景消息]', ...backlog, '[背景消息结束]'] : []),
+          ...batch.map(item => item.body),
+        ].filter(Boolean).join('\n\n')
+      }, maxTurnMs: Number(config.maxTurnMs) || 600000,
+      canDeliver,
+      onIdle: () => preparingAttachments.delete(batchAttachments),
+      beforeSubmit: () => {
+        preparingAttachments.add(batchAttachments)
+        record.lastSenderId = Number(last.source?.user_id) || null
+        record.lastSenderName = last.message.senderName
+        record.lastMessageId = Number(last.source?.message_id) || null
+        record.lastMessageAt = Date.now()
+      },
+      onAccepted: () => {
+        if (promptIncluded) markChatPromptInjected(record)
+        if (isGroup) {
+          for (const line of drainBacklog(meta.peerId)) pushHistory(record, line, config.historyLimit)
+        }
+        wake?.noteInbound?.(record)
+        if (peerBot) {
+          const previous = peerChatTurns.get(meta.peerId)
+          const count = previous && Date.now() - previous.at < PEER_CHAT_TURN_WINDOW_MS ? previous.count + 1 : 1
+          peerChatTurns.set(meta.peerId, { count, at: Date.now() })
+        }
+        for (const item of batch) {
+          const line = historyLine(item.source?.sender ?? {}, item.message.text)
+          if (isGroup) pushHistory(record, line, config.historyLimit)
+          record.recent.push(line)
+        }
+        record.recent = record.recent.slice(-Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3))
+        sleep?.noteText?.(record, last.message.text)
+        if (isGroup) {
+          refreshWake(config, meta.peerId, senderId)
+          countReply(meta.peerId, senderId)
+          groupLastReplyAt.set(wakeKey(meta.peerId, senderId), Date.now())
+        }
+        resolve(true)
+      },
+      onRejected: err => {
+        preparingAttachments.delete(batchAttachments)
+        if (err) reject(err)
+        else resolve(false)
+      },
+    }))
+  }
+
+  const onEvent = async event => {
+    if (disposed) return
+    if (!config.addressClassifierEnabled || !addressClassifier) return handleEvent(event)
+    // 审批/问答走控制通道，不等待正在执行的分类请求。
+    if (event?.post_type === 'message') {
+      const scope = event.message_type === 'group' ? 'group' : 'private'
+      const peerId = String(scope === 'group' ? event.group_id : event.user_id)
+      const selfId = String(event.self_id ?? manager.selfId ?? '')
+      const allowed = scope === 'group' ? allowGroup(config, peerId) : allowPrivate(config, peerId)
+      const eventKey = event.message_id == null ? null : JSON.stringify([selfId, scope, peerId, String(event.message_id)])
+      if (!event.__classifierRecovery && eventKey && (seenMessages.get(eventKey) ?? 0) > Date.now()) return
+      const botAllowed = !isPeerBot(config, event.user_id, event) || config.botChatEnabled
+      const record = allowed && botAllowed && String(event.user_id) !== selfId && manager.findByPeer?.(scope, peerId)
+      const text = record && readMessage(event.message, { selfId }).text?.trim()
+      if (text && (approval?.tryResolve?.(record, text) || questions?.tryResolve?.(record, text))) {
+        if (eventKey) seenMessages.set(eventKey, Date.now() + 10 * 60_000)
+        return Promise.resolve()
+      }
+    }
+    const scope = event?.message_type === 'group' ? 'group' : 'private'
+    const selfId = String(event?.self_id ?? manager.selfId ?? '')
+    const peerId = String(scope === 'group' ? event?.group_id : event?.user_id)
+    const key = JSON.stringify([selfId, scope, peerId])
+    const meta = { selfId, scope, peerId, label: scope === 'group' ? `群 ${peerId}` : `私聊 ${peerId}` }
+    let sourceKey, sourceId
+    if (event?.post_type === 'message' && String(event.user_id) !== selfId && permitted(meta) &&
+      (!isPeerBot(config, event.user_id, event) || config.botChatEnabled)) {
+      const info = readMessage(event.message, { selfId })
+      const command = String(info.text || '').toLowerCase().replace(/／/g, '/').trim()
+      const control = ['/reset', '#reset', '/new', '#new', '/status', '#status', '/cwd', '#cwd', '/help', '#help'].includes(command)
+      if (!control && (info.text || info.images.length || info.records.length || info.files.length || info.mfaces.length || info.forwards.length)) {
+        if (!event.__classifierRecovery) {
+          for (const item of addressClassifier.unprepared(meta)) {
+            onEvent({ ...item.source, __classifierId: item.id, __classifierRecovery: true })
+              .catch(err => logger.warn?.('恢复源消息失败:', err))
+          }
+        }
+        sourceId = String(event.__classifierId ?? event.message_id ?? randomUUID())
+        sourceKey = JSON.stringify([key, sourceId])
+        if (preparingSources.has(sourceKey)) return
+        event = { ...event, __classifierId: sourceId,
+          __classifierReceivedAt: event.__classifierReceivedAt ?? Date.now() }
+        if (!addressClassifier.stage({ meta, id: sourceId, source: event })) return
+        preparingSources.add(sourceKey)
+      }
+    }
+    const task = (ingressQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(() => {
+      if (sourceKey && !config.addressClassifierEnabled) return
+      return handleEvent(event)
+    }).then(result => {
+      if (sourceKey && !disposed && permitted(meta)) addressClassifier.discardUnprepared(meta, sourceId)
+      return result
+    }).finally(() => { if (sourceKey) preparingSources.delete(sourceKey) })
+    ingressQueues.set(key, task)
+    task.finally(() => { if (ingressQueues.get(key) === task) ingressQueues.delete(key) }).catch(() => {})
+    return task
+  }
+  const resumeTimer = addressClassifier && setInterval(() => {
+    if (disposed || !config.addressClassifierEnabled) return
+    try {
+      for (const item of addressClassifier.unprepared()) {
+        if (!permitted(item.meta)) continue
+        onEvent({ ...item.source, __classifierId: item.id, __classifierRecovery: true })
+          .catch(err => logger.warn?.('恢复源消息失败:', err))
+      }
+      for (const meta of addressClassifier.list()) {
+        if (!permitted(meta)) continue
+        addressClassifier.resume(meta, deliverClassified).catch(err => logger.warn?.('恢复待回复消息失败:', err))
+      }
+    } catch (err) {
+      logger.warn?.('读取待回复消息失败:', err)
+    }
+  }, 1000)
+  resumeTimer?.unref?.()
   onEvent.dispose = () => {
     disposed = true
+    if (resumeTimer) clearInterval(resumeTimer)
+    addressClassifier?.stop()
     for (const batch of mergeBatches.values()) clearTimeout(batch.timer)
     for (const timer of gapReplayTimers.values()) clearTimeout(timer)
     mergeBatches.clear()
