@@ -13,6 +13,7 @@ import { createQzonePublisher } from '../src/qzone.js'
 import { readPrivateHistory } from '../src/private-history.js'
 import { SessionManager } from '../src/session.js'
 import { registerTools } from '../src/tools.js'
+import { createMockPromptScope } from './mock-dsh.mjs'
 
 const logger = { info() {}, warn() {}, debug() {} }
 async function temporary(t) {
@@ -166,10 +167,15 @@ test('语音工具抑制后续正文重复；包装标签统一清理，颜文�
 test('preset 在 create 和 resume 的 setup 中挂载，缺服务显式报错', async () => {
   for (const restore of [false, true]) {
     const mounted = []
-    const agentCtx = {}
+    const agentCtx = createMockPromptScope({ get() {} })
+    const handle = async options => {
+      await options.setup(agentCtx)
+      const id = options.sessionId ?? options.resumeSessionId
+      return { agent: { id, ctx: agentCtx, session: { id, events: [], requestHeader() {} } }, dispose() {} }
+    }
     const agents = {
-      async resume(options) { if (!restore) throw new Error('不存在'); await options.setup(agentCtx); return { agent: {}, dispose() {} } },
-      async create(options) { assert.equal(options.meta.agentPreset, 'test-preset'); await options.setup(agentCtx); return { agent: {}, dispose() {} } },
+      async resume(options) { if (!restore) throw new Error('不存在'); return handle(options) },
+      async create(options) { assert.equal(options.meta.agentPreset, 'test-preset'); return handle(options) },
     }
     const manager = new SessionManager({ agents, config: { preset: 'test-preset', isolateByPeer: false }, logger,
       ctx: { get: () => ({ mount: async (ctx, id) => mounted.push([ctx, id]) }) } })

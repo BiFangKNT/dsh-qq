@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -139,12 +139,4 @@ test('buildChatPrompt：纸条只进私聊，群聊不塞', () => {
 
   const none = buildChatPrompt({}, { isGroup: false, groupDigest: '' })
   assert.ok(!none.includes('【今天群里发生过'), '没内容就别占 token')
-})
-
-test('接线：inbound 只在私聊里读纸条，且按本地日期找、带上自己的号', () => {
-  const src = readFileSync(new URL('../src/inbound.js', import.meta.url), 'utf8')
-  assert.ok(src.includes('loadGroupDigest({'), 'import 与调用都要在')
-  assert.ok(src.includes('today: localDay()'), '不许用 toISOString —— 那是 UTC，凌晨会算成昨天')
-  assert.ok(src.includes('selfId: String(config.selfId'), '不给她自己的号就分不清谁是她、谁 @ 了她')
-  assert.ok(/groupDigest: isGroup\s*\n?\s*\? ''/.test(src), '群聊必须传空串')
 })

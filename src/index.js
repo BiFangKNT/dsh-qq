@@ -4,6 +4,7 @@ import { ConfigSchema, listOf } from './config.js'
 import { OneBotClient } from './onebot/client.js'
 import { textSegments } from './onebot/segment.js'
 import { SessionManager } from './session.js'
+import { createPromptSync } from './prompt-sync.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { createAddressClassifier } from './address-classifier.js'
 import { appendChatLog } from './chatlog.js'
@@ -264,7 +265,8 @@ export function apply(ctx, config) {
   // 只当「设置面板」用：桌面 / Web GUI 那份只提供这一页，不去连 NapCat。
   // 不然同一个 QQ 号在两处同时登录，消息会互相抢。
   if (config.uiOnly) {
-    mountSettingsApi({ personaRef, overridesRef })
+    const promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, logger })
+    mountSettingsApi({ personaRef, overridesRef, promptSync })
     logger.info('uiOnly：只提供设置页，不连接 NapCat')
     return
   }
@@ -296,6 +298,8 @@ export function apply(ctx, config) {
   let selfId = String(config.selfId ?? '')
   const manager = new SessionManager({ ctx, agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
   manager.start()
+  const promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, manager, logger })
+  promptSync.start()
 
   // 通道回执：断线 / 发送失败要让她知道（见 bridge.js 顶部那段起因）
   const bridge = createBridge({ config, logger, manager })
@@ -578,7 +582,7 @@ const pin = createPin({ config, logger })
 
   // ── 设置页接口：/api/dsh-qq/* ─────────────────────────────────────────────
   // DSH 设置界面里那一页（client.js）打的就是这几个口。
-  mountSettingsApi({ client, manager, personaRef, overridesRef })
+  mountSettingsApi({ client, manager, personaRef, overridesRef, promptSync })
 
 
   ctx.on('dispose', () => {
@@ -595,6 +599,7 @@ const pin = createPin({ config, logger })
     wake.stop()
     bedtime.stop()
     reading.stop()
+    promptSync.stop()
     manager.stop()
     approval.cancelAll()
     questions.cancelAll()

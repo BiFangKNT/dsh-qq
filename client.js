@@ -158,6 +158,11 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = useState(null)
       const [draft, setDraft] = useState({})
       const [persona, setPersona] = useState(null)
+      const [syncDeferred, setSyncDeferred] = useState(false)
+      const [syncExcluded, setSyncExcluded] = useState([])
+      const syncPending = st?.promptSync?.pending ?? []
+      const syncOperations = st?.promptSync?.operations ?? []
+      const syncRunning = syncOperations.some(item => ['queued', 'running'].includes(item.status))
 
       const load = useCallback(async () => {
         try {
@@ -177,9 +182,9 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         const t = setInterval(async () => {
           try { setSt(await jget('/status')) } catch { /* 忽略 */ }
-        }, 15000)
+        }, syncRunning ? 1000 : 15000)
         return () => clearInterval(t)
-      }, [])
+      }, [syncRunning])
 
       const patch = async (body, label) => {
         setBusy('save')
@@ -191,6 +196,10 @@ window.__ModuleLoader__.load({
           if (r.persona) setPersona({ ...r.persona })
           const tail = r.needReconnect ? '（点右边「重连」生效）' : r.needRestart ? '（有几项要重启宿主才生效）' : ''
           let text = `${label} 已保存${tail}`
+          if (r.systemChanged && r.promptSync?.pending?.length) {
+            text += '，现有会话仍使用原提示词，请选择同步方式'
+            setSyncDeferred(false)
+          }
           if (r.persona && r.persona.file) {
             text += r.persona.ok ? `，人设从文件读入 ${r.persona.chars} 字` : `，人设文件读不到（${r.persona.error}），先用着原来的`
           }
@@ -201,6 +210,17 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('')
         }
+      }
+
+      const syncPrompts = async action => {
+        setBusy('sync')
+        try {
+          const sessionIds = syncPending.filter(item => !syncExcluded.includes(item.sessionId)).map(item => item.sessionId)
+          await jpost('/prompt-sync', { action, sessionIds })
+          setSt(await jget('/status'))
+          setMsg({ text: '操作已排队，正在回复的会话会等本轮结束后处理。', tone: 'good' })
+        } catch (e) { setMsg({ text: '同步失败：' + e.message, tone: 'warn' }) }
+        finally { setBusy('') }
       }
 
       const reconnect = async () => {
@@ -328,6 +348,23 @@ window.__ModuleLoader__.load({
             h('button', { 'data-qq-btn': '', disabled: busy === 'reconnect', onClick: reconnect }, '重连'),
             h('button', { 'data-qq-btn': '', onClick: load }, '重新读一遍')),
           msg ? h('div', { 'data-qq-msg': '', 'data-warn': msg.tone === 'warn' ? '' : undefined, 'data-good': msg.tone === 'good' ? '' : undefined }, msg.text) : null),
+
+        syncPending.length ? h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '会话提示词待同步'),
+          h('div', { 'data-qq-note': '' }, '配置已保存，以下会话继续使用原提示词。新建会话或压缩成功后才会更新。'),
+          syncDeferred ? h('button', { 'data-qq-btn': '', onClick: () => setSyncDeferred(false) }, `选择同步方式（${syncPending.length} 个会话）`) : h(React.Fragment, null,
+            ...syncPending.map(item => h('label', { key: item.sessionId, 'data-qq-row': '' },
+              h('input', { type: 'checkbox', checked: !syncExcluded.includes(item.sessionId), disabled: syncRunning,
+                onChange: e => setSyncExcluded(ids => e.target.checked ? ids.filter(id => id !== item.sessionId) : [...ids, item.sessionId]) }), item.label)),
+            h('div', { 'data-qq-note': '' }, '创建新会话会切换上下文，旧历史保留在原会话；压缩会保留摘要。'),
+            h('div', { 'data-qq-row': '' },
+              h('button', { 'data-qq-btn': '', disabled: busy === 'sync' || syncRunning || syncPending.every(item => syncExcluded.includes(item.sessionId)), onClick: () => syncPrompts('new') }, '创建新会话'),
+              h('button', { 'data-qq-btn': '', disabled: busy === 'sync' || syncRunning || syncPending.every(item => syncExcluded.includes(item.sessionId)), onClick: () => syncPrompts('compact') }, '压缩会话'),
+              h('button', { 'data-qq-btn': '', onClick: () => setSyncDeferred(true) }, '稍后同步')))) : null,
+        ...syncOperations.slice(-1).map(operation => h('div', { key: operation.id, 'data-qq-msg': '',
+          'data-warn': operation.status === 'failed' ? '' : undefined, 'data-good': operation.status === 'done' ? '' : undefined },
+          operation.status === 'queued' ? '等待 QQ 运行进程执行同步…' : operation.status === 'running' ? '等待本轮回复结束或正在同步…' : operation.status === 'done' ? '所选会话提示词已同步。' : '部分会话未同步：',
+          ...operation.sessions.filter(item => item.status === 'failed').map(item => h('div', { key: item.sessionId }, `${item.label}：${item.error}`)))),
 
         /* ── 连接 ── */
         h('div', { 'data-qq-sec': '' },

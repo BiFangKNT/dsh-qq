@@ -2,6 +2,21 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join, resolve, relative, dirname, isAbsolute } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { SystemPrompt, renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
+import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+
+/** 使用真实 systemPrompt 注册/组装器，其余宿主能力仍由模拟器提供。 */
+export function createMockPromptScope(base, cwd, scopedTools = new Map()) {
+  const promptCtx = new Context()
+  const prompt = new SystemPrompt(promptCtx, {})
+  return { ...base, cwd,
+    get: name => name === 'systemPrompt' ? prompt : name === 'tools'
+      ? { register: tool => scopedTools.set(tool.name, tool) } : base.get?.(name),
+    on: (name, fn, options) => name.startsWith('system-prompt/')
+      ? promptCtx.on(name, fn, options) : base.on(name, fn, options),
+  }
+}
 
 export const textOf = message => (message?.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('')
 export async function waitFor(predicate, { timeout = 5000, what = '条件' } = {}) {
@@ -76,8 +91,8 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     inject(names, callback) { if (names.every(name => services[name])) return callback(ctx) },
     effect(setup) { const cleanup = setup(); if (typeof cleanup === 'function') effects.push(cleanup); return cleanup },
   }
-  async function event(agent, type, data = {}) {
-    const raw = { type, sessionId: agent.id, seq: agent.session.events.length, data }
+  async function event(agent, type, data = {}, surface = {}) {
+    const raw = { type, sessionId: agent.id, seq: agent.session.events.length, data, ...surface }
     agent.session.events.push(raw); save(agent)
     await ctx.emit('session/event', agent.session, raw)
   }
@@ -101,13 +116,14 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     await event(agent, 'user/message', { message })
     let reason = { kind: 'completed' }
     try {
+      await request(agent)
       for (const step of plan) {
         switch (step.type) {
           case 'text': await event(agent, 'assistant/message', { message: { content: [{ type: 'text', text: step.text }] }, usage: step.usage }); break
           case 'chunk': await event(agent, 'assistant/chunk', { chunk: { type: 'text-delta', text: step.text } }); break
-          case 'tool': await invoke(agent, step.name, step.args ?? {}); break
+          case 'tool': await invoke(agent, step.name, step.args ?? {}); await request(agent); break
           case 'context': await event(agent, 'request/context', { contextWindow: step.window }); break
-          case 'compact': await event(agent, 'compaction/end'); break
+          case 'compact': await event(agent, 'compaction/end'); await request(agent); break
           case 'error': reason = { kind: 'error', error: { message: step.message } }; return
           case 'question': {
             const result = await ctx.waterfall('user-questions/request', { agent, questions: step.questions })
@@ -125,18 +141,39 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     } catch (err) { logger.warn(err); reason = { kind: 'error', error: { message: err.message } } }
     finally { await event(agent, 'turn/end', { reason }) }
   }
+  async function request(agent) {
+    const assembly = await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))
+    const header = { system: renderPrompt(assembly), tools: assembly.tools }
+    agent.requests.push({ ...header, context: renderContextSnapshot(assembly) })
+    await event(agent, 'request/header', { header })
+  }
+  services.compaction = {
+    compactNow(agent, signal) {
+      return agent.runMaintenance(async () => {
+        signal.throwIfAborted()
+        const shadowed = agent.session.events.filter(raw => ['user/message', 'assistant/message'].includes(raw.type)).map(raw => raw.seq)
+        if (!shadowed.length) return null
+        await event(agent, 'compaction/start')
+        await event(agent, 'user/message', { message: { content: [{ type: 'text', text: '模拟压缩摘要' }] } },
+          { surfaceOp: 'replace', sourceEventSeqs: shadowed })
+        await event(agent, 'compaction/end')
+        return { endSeq: agent.session.events.length - 1 }
+      })
+    },
+  }
   async function attach(id, options, saved) {
-    let idle = Promise.resolve(), disposed = false
+    let idle = Promise.resolve(), disposed = false, maintenance = false
     const header = saved?.header ?? { id, meta: options.meta ?? {} }
     const scopedTools = new Map()
-    const agentCtx = { ...ctx, cwd: header.meta?.cwd, get: name => name === 'tools'
-      ? { register: tool => scopedTools.set(tool.name, tool) } : ctx.get(name) }
+    const agentCtx = createMockPromptScope(ctx, header.meta?.cwd, scopedTools)
     if (options.setup) { const commit = await options.setup(agentCtx); commit?.commit?.() }
     const agent = {
-      id, ctx: agentCtx, scopedTools, results: [],
+      id, ctx: agentCtx, scopedTools, results: [], requests: [],
       session: { id, header, events: saved?.events ?? [],
+        requestHeader() { return this.events.findLast(raw => raw.type === 'request/header')?.data.header },
         deriveMessages() {
-          return structuredClone(this.events.filter(raw => ['user/message', 'assistant/message'].includes(raw.type))
+          const shadowed = new Set(this.events.flatMap(raw => raw.surfaceOp === 'replace' ? raw.sourceEventSeqs : []))
+          return structuredClone(this.events.filter(raw => !shadowed.has(raw.seq) && ['user/message', 'assistant/message'].includes(raw.type))
             .map(raw => ({ role: raw.type === 'user/message' ? 'user' : 'assistant', ...raw.data.message })))
         },
       },
@@ -149,6 +186,13 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
       },
       inject(message) { this.injected.push(message); save(this) },
       whenIdle: () => idle,
+      runMaintenance(task) {
+        if (maintenance) throw new Error('Agent 正在维护')
+        maintenance = true
+        const run = Promise.resolve().then(task).finally(() => { maintenance = false })
+        idle = run.catch(() => {})
+        return run
+      },
     }
     live.set(id, agent); save(agent)
     return { agent, async dispose() { disposed = true; live.delete(id) } }

@@ -2,9 +2,8 @@
  * 上下文守卫：让 QQ 上的长会话不会「聊着聊着把自己是谁聊丢了」。
  *
  * 两件事：
- *  1) **压缩后补规矩**——DSH 自己在窗口快满时会把旧对话压成摘要（见 dsh-compaction-basic），
- *     但「聊天规矩」只在会话第一轮注入过一次，会跟着旧对话一起被卷进摘要里。这里监听
- *     `compaction/end`，把注入标记清掉（下一轮重新注入完整规矩），并立刻塞一张短卡提醒。
+ *  1) **压缩后提醒**——成功压缩后记录次数，注入短卡说明细节已压缩。
+ *     固定 system 的锁定和同步由 system-prompt.js 管理，与守卫开关无关。
  *  2) **超限前主动换会话**——最近一次请求的 prompt token 超过窗口比例时，把最近聊天
  *     记进 `记忆区/压缩记忆/`，然后重置会话换个新 sessionId：上下文归零、token 成本
  *     降下来，新会话首轮会带上上一段聊天的尾巴（seed）接话。
@@ -72,9 +71,8 @@ export function createContextGuard({ manager, config, logger }) {
     }
   }
 
-  /** 压缩结束：规矩被卷进摘要了，下一轮补回来，并立刻提醒一句。 */
+  /** 成功压缩后只提醒上下文变化，不再往历史重复写固定规则。 */
   function onCompacted(record) {
-    record.chatPromptInjected = false
     record.compactedCount = (record.compactedCount ?? 0) + 1
     const isGroup = record.scope === 'group'
     const card = isGroup
@@ -91,7 +89,7 @@ export function createContextGuard({ manager, config, logger }) {
             kind: 'plugin',
             plugin: 'dsh-qq',
             form: 'notice',
-            summary: '上下文已压缩，人设与聊天规矩重新注入',
+            summary: '上下文已压缩',
           },
         }),
       )
@@ -99,7 +97,7 @@ export function createContextGuard({ manager, config, logger }) {
       logger.debug?.(`[dsh-qq] 压缩后注入记忆卡失败: ${err?.message ?? err}`)
     }
     logger.info?.(
-      `[dsh-qq] ${record.label} 上下文被压缩（第 ${record.compactedCount} 次），下一轮重注入聊天规矩`,
+      `[dsh-qq] ${record.label} 上下文被压缩（第 ${record.compactedCount} 次）`,
     )
   }
 
@@ -141,7 +139,7 @@ export function createContextGuard({ manager, config, logger }) {
       const record = manager.find(sessionId)
       if (!record) return
       note(record, raw)
-      if (raw?.type === 'compaction/end') onCompacted(record)
+      if (raw?.type === 'compaction/end' && !Object.hasOwn(raw.data ?? {}, 'error')) onCompacted(record)
     },
 
     /**

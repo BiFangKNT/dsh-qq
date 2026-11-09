@@ -98,7 +98,7 @@ export const ConfigSchema = Schema.object({
   personaInSystem: Schema.boolean()
     .default(false)
     .description(
-      '人设已经由宿主的系统提示（profile 里 system-prompt 的 personaPrefix）带着时设 true：插件不再把 persona 拼进每条消息。人设放对话历史里会被模型当成「上一轮说过的话」、还会被压缩器当聊天搅进去；放系统提示里只说一次、不进历史。留 false 维持旧行为',
+      '人设已由宿主 system-prompt 的 personaPrefix 提供时设 true，避免重复添加 persona。false 时插件将 persona 放进 system；固定 system 只在新建会话或成功压缩后更新',
     ),
   ownerIds: Schema.array(Schema.string())
     .default([])

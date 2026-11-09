@@ -312,7 +312,7 @@ export function settingsInfo(ctx, logger) {
  * @param {object} opts.overridesRef `{ current: {} }`，设置页存下来的覆盖
  * @returns {boolean} 是否挂上
  */
-export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef }) {
+export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef, promptSync }) {
   // 自证：这次到底有没有把路由挂上（排查「设置页 404」时不用靠猜）
   const noteApiState = (ok, detail) => {
     try {
@@ -371,6 +371,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       settingsFile: info.file,
       settingsExists: info.exists,
       overrides: Object.keys(overridesRef?.current ?? {}).length,
+      promptSync: promptSync?.status() ?? { pending: [], operations: [] },
     }
   }
 
@@ -385,6 +386,14 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
     if (req.method === 'GET' && path === '/api/dsh-qq/status') {
       return sendJson(res, 200, statusOf())
+    }
+
+    if (req.method === 'POST' && path === '/api/dsh-qq/prompt-sync') {
+      if (!promptSync) return sendJson(res, 503, { ok: false, error: '提示词同步服务未启动' })
+      const body = await readJsonBody(req)
+      try {
+        return sendJson(res, 202, { ok: true, operation: promptSync.request(body.action, body.sessionIds) })
+      } catch (err) { return sendJson(res, 400, { ok: false, error: err?.message ?? String(err) }) }
     }
 
     if (req.method === 'GET' && path === '/api/dsh-qq/settings') {
@@ -422,6 +431,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       }
 
       // 值是 null = 清掉这条覆盖，回到 cordis 里的默认值
+      const systemBefore = JSON.stringify(promptSync?.status().pending ?? [])
       const next = { ...(overridesRef?.current ?? {}) }
       for (const [key, value] of Object.entries(patch)) {
         if (!OVERRIDABLE.includes(key)) continue
@@ -444,6 +454,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const touched = (key) => Object.prototype.hasOwnProperty.call(patch, key)
       const needReconnect = ['wsUrl', 'accessToken'].some(touched)
       const needRestart = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'asrPython'].some(touched)
+      const promptStatus = promptSync?.status() ?? { pending: [], operations: [] }
 
       return sendJson(res, 200, {
         ok: true,
@@ -452,6 +463,8 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
         persona: personaNow,
         needReconnect,
         needRestart,
+        promptSync: promptStatus,
+        systemChanged: systemBefore !== JSON.stringify(promptStatus.pending),
       })
     }
 

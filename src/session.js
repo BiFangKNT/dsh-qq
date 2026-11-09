@@ -1,9 +1,11 @@
 import { join } from 'node:path'
+import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { deriveSessionId, sessionKey } from './shared/session-id.js'
 import { ensurePeerWorkspace, resolvePeerWorkspace } from './workspace.js'
 import { loadHandoffFor } from './settings.js'
 import { createInjectState } from './inject-state.js'
 import { createSessionState } from './session-state.js'
+import { createSystemPromptStore, installChatSystem, pendingSystemPrompts } from './system-prompt.js'
 
 /**
  * 一个 QQ 会话（私聊 or 群）对应一个 DSH Agent。
@@ -23,6 +25,7 @@ export class SessionManager {
   #seedByKey = new Map() // basePeerKey -> 下一代的交接 seed（换会话时留下）
   #ready = new Map() // 已铺好的会话目录（避免每次 attach 都 mkdir）
   #sweeper = null
+  #obtaining = new Map()
 
   constructor({ ctx, agents, selfId, config, logger, home = '' }) {
     this.ctx = ctx
@@ -31,8 +34,10 @@ export class SessionManager {
     this.config = config
     this.logger = logger
     this.closed = false
-    // 「这个会话已经注入过聊天规矩」的账本：落盘，宿主重启/回收后别再注一遍。
+    this.systemPrompts = createSystemPromptStore(home)
+    // 旧账本只用于兼容已有会话的一次性交接，固定规则已迁到 system。
     this.injectState = createInjectState(home ? join(String(home), 'inject-state.json') : '', logger)
+    this.initialContextState = createInjectState(home ? join(String(home), 'initial-context.json') : '', logger)
     // 「reset 到第几代 / 这一代落在哪个 sessionId」的账本：也落盘。
     // 不落盘的后果见 session-state.js 顶上那段 —— 重启即退回 reset 前的老会话 + 每次多一个空壳。
     this.sessionState = createSessionState(home ? join(String(home), 'session-state.json') : '', logger)
@@ -56,6 +61,7 @@ export class SessionManager {
     if (this.#sweeper) clearInterval(this.#sweeper)
     this.#sweeper = null
     for (const record of this.#records.values()) {
+      record.promptDispose?.()
       if (!record.owned) continue
       try {
         Promise.resolve(record.dispose?.()).catch(() => {})
@@ -112,6 +118,9 @@ export class SessionManager {
   reset(record, seed = null) {
     const current = this.#records.get(record.sessionId)
     if (!current) return false
+    const snapshot = this.systemPrompts.get(current.sessionId)
+    if (snapshot) this.systemPrompts.save({ ...snapshot, retired: true })
+    current.promptDispose?.()
     const baseKey = this.#baseKey(current.scope, current.peerId)
     // ⭐ 2026-10-25：换会话时把「交接」留给下一代（姐姐/NapCat 触发 /reset 时也能接上话）。
     if (Array.isArray(seed) && seed.length > 0) this.#seedByKey.set(baseKey, seed)
@@ -135,18 +144,23 @@ export class SessionManager {
     return true
   }
 
-  /**
-   * 本会话第一轮投递把聊天规矩注完了 —— 记到盘上。
-   * 以后宿主重启、会话被回收后再回来，都不会再往历史里重复塞一遍人设。
-   */
-  markChatPromptInjected(record) {
+  /** 交接便签和首轮话头已被接纳，与固定 system 的同步独立。 */
+  markInitialContextDelivered(record) {
     if (!record) return
-    record.chatPromptInjected = true
-    this.injectState.mark(record.sessionId)
+    record.initialContextDelivered = true
+    this.initialContextState.mark(record.sessionId)
   }
 
   /** 按 scope + peerId 拿一个可用的会话记录，必要时新建。 */
   async obtain({ scope, peerId, label }) {
+    const key = this.#baseKey(scope, peerId)
+    if (this.#obtaining.has(key)) return this.#obtaining.get(key)
+    const task = this.#obtain({ scope, peerId, label })
+    this.#obtaining.set(key, task)
+    try { return await task } finally { this.#obtaining.delete(key) }
+  }
+
+  async #obtain({ scope, peerId, label }, prepared = null) {
     if (this.closed) throw new Error('dsh-qq 已停止')
     const baseKey = this.#baseKey(scope, peerId)
     const gen = this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)
@@ -173,7 +187,16 @@ export class SessionManager {
       return cached
     }
 
-    const attached = await this.#attach(sessionId, { scope, peerId, label })
+    const attached = prepared ?? await this.#attach(sessionId, { scope, peerId, label })
+    if (!prepared) {
+      try {
+        await attached.agent.ctx.get('systemPrompt').assemble(assembleContextFor(attached.agent))
+      } catch (err) {
+        attached.promptDispose?.()
+        if (attached.owned) await attached.dispose?.()
+        throw err
+      }
+    }
     // #attach 可能换了 id（磁盘上留了恢复不出来的空壳会话时），以它实际用的为准
     const actualId = attached.sessionId ?? sessionId
     // 换过壳就记下：下一次重启直接接回这个壳，不再傻乎乎去找那个恢复不了的老 id
@@ -186,6 +209,7 @@ export class SessionManager {
       label,
       agent: attached.agent,
       dispose: attached.dispose,
+      promptDispose: attached.promptDispose,
       owned: attached.owned,
       dir: attached.cwd ?? null,
       lastActive: Date.now(),
@@ -199,15 +223,41 @@ export class SessionManager {
       // ——不然新会话永远是个空壳，把交接卡漏掉（今晚就是这么漏的）。
       swapSeed: this.#seedByKey.get(baseKey)
         ?? ((gen > 0 || actualId !== sessionId) ? loadHandoffFor({ dir: attached.cwd }) || null : null),
-      // ⭐ 2026-10-26 姐姐说「不能每次都发那么长一截」：注入标记落盘了。
-      // 重启/回收后 record 重建，这里能读到「这个会话真的注过」→ 不再重复注入人设那一大坨。
-      // 按 sessionId 查（不是 key）：key 会因换代变，历史却是跟着 sessionId 走的。
-      chatPromptInjected: this.injectState.has(actualId),
+      // 按 sessionId 记录一次性交接；兼容旧会话已交付的便签。
+      initialContextDelivered: this.initialContextState.has(actualId) || this.injectState.has(actualId),
     }
     this.#seedByKey.delete(baseKey)
     this.#records.set(actualId, record)
     this.#byPeer.set(key, actualId)
+    const snapshot = this.systemPrompts.get(actualId)
+    if (snapshot?.retired) this.systemPrompts.save({ ...snapshot, retired: false })
     this.logger.info?.(`[dsh-qq] 会话就绪 ${label} → ${actualId}`)
+    return record
+  }
+
+  pendingSystemPrompts() {
+    return pendingSystemPrompts(this.systemPrompts, this.config, String(this.selfId))
+  }
+
+  /** 先准备新会话，成功后才切换；排队中的消息继续通过同一个 record 投递。 */
+  async replaceSession(record) {
+    const info = { scope: record.scope, peerId: record.peerId, label: record.label }
+    const baseKey = this.#baseKey(record.scope, record.peerId)
+    const gen = (this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)) + 1
+    const attached = await this.#attach(deriveSessionId(`${baseKey}#${gen}`), info)
+    try {
+      await attached.agent.ctx.get('systemPrompt').assemble(assembleContextFor(attached.agent))
+      if (!this.reset(record)) throw new Error('会话已被切换，请刷新后重试')
+    } catch (err) {
+      attached.promptDispose?.()
+      await attached.dispose?.()
+      throw err
+    }
+    const queue = record.queue, busy = record.busy
+    const next = await this.#obtain(info, attached)
+    for (const key of Object.keys(record)) delete record[key]
+    Object.assign(record, next, { queue, busy })
+    this.#records.set(record.sessionId, record)
     return record
   }
 
@@ -236,29 +286,37 @@ export class SessionManager {
     if (this.config.model) agentOptions.model = this.config.model
 
     const preset = String(this.config.preset ?? '').trim()
-    let setup
-    if (preset) {
-      const presets = this.ctx?.get?.('agentPresets')
-      if (typeof presets?.mount !== 'function') throw new Error(`无法加载 preset '${preset}'：宿主未提供 agentPresets`)
-      setup = async (agentCtx) => { await presets.mount(agentCtx, preset) }
+    if (preset && typeof this.ctx?.get?.('agentPresets')?.mount !== 'function') {
+      throw new Error(`无法加载 preset '${preset}'：宿主未提供 agentPresets`)
+    }
+    const cwd = await this.#peerDir(info)
+    const metaInfo = { ...info, selfId: String(this.selfId), dir: cwd || this.config.cwd || null }
+    const installPrompt = agentCtx => installChatSystem({ agentCtx, config: this.config, meta: metaInfo, store: this.systemPrompts })
+    let setupError
+    const setup = async agentCtx => {
+      try {
+        if (preset) await this.ctx.get('agentPresets').mount(agentCtx, preset)
+        installPrompt(agentCtx)
+      } catch (err) {
+        setupError = err
+        throw err
+      }
     }
     const options = {
       ...(Object.keys(agentOptions).length ? { agentOptions } : {}),
       ...(setup ? { setup } : {}),
     }
-    const cwd = await this.#peerDir(info)
     this.logger.debug?.(
       `[dsh-qq] attach ${sessionId.slice(0, 8)} scope=${info.scope} peer=${info.peerId} cwd=${cwd ?? '(null)'}`,
     )
 
     // 1) 宿主里已经有这个 agent 在跑 → 直接借用（不算我们拥有，别 dispose）
-    try {
-      const live = this.agents.get?.(sessionId)
-      if (live && typeof live.followup === 'function') {
-        return { agent: live, dispose: null, owned: false, cwd }
-      }
-    } catch {
+    let live
+    try { live = this.agents.get?.(sessionId) } catch {
       /* get 不可用就往下走 */
+    }
+    if (live && typeof live.followup === 'function') {
+      return { agent: live, dispose: null, owned: false, cwd, promptDispose: installPrompt(live.ctx) }
     }
 
     // 2) 恢复持久化的历史会话
@@ -273,6 +331,7 @@ export class SessionManager {
         return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd, sessionId }
       }
     } catch (err) {
+      if (setupError) throw setupError
       // 恢复失败不一定是「没有历史」：也可能是磁盘上留了个半截会话。
       // 把原因打出来，下次再遇到「发消息没反应」能直接看到。
       this.logger.debug?.(`[dsh-qq] resume 未命中 ${sessionId.slice(0, 8)}：${err?.message ?? err}`)
@@ -291,6 +350,7 @@ export class SessionManager {
             return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd, sessionId }
           }
         } catch (err2) {
+          if (setupError) throw setupError
           this.logger.debug?.(`[dsh-qq] 退一步 resume 也没成 ${sessionId.slice(0, 8)}：${err2?.message ?? err2}`)
         }
       }
@@ -311,6 +371,7 @@ export class SessionManager {
       if (!handle?.agent) throw new Error('agents.create 没有返回 agent')
       return { agent: handle.agent, dispose: () => handle.dispose(), owned: true, cwd: workdir || null, sessionId }
     } catch (err) {
+      if (setupError) throw setupError
       // 上一次崩在写会话的那一刻，磁盘上会留一个只有 header 的空壳：
       // 拿这个 id 去 create 会被拒（already exists），resume 又恢复不出东西来，
       // 用户看到的就是「发消息没人回」。这里兜底：再 resume 一次，还不行就换 id 重开。
@@ -354,6 +415,7 @@ export class SessionManager {
           this.logger.warn?.('[dsh-qq] 回收会话失败:', err)
         }
       }
+      record.promptDispose?.()
       this.#records.delete(sessionId)
       if (this.#byPeer.get(record.key) === sessionId) this.#byPeer.delete(record.key)
       this.logger.info?.(`[dsh-qq] 回收闲置会话 ${record.label}`)

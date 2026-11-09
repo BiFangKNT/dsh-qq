@@ -40,7 +40,7 @@ function inboundHarness(t, gate, extra = {}) {
     async obtain(meta) {
       const key = `${meta.scope}:${meta.peerId}`
       if (!records.has(key)) records.set(key, { ...meta, sessionId: key, queue: Promise.resolve(),
-        recent: [], history: [], chatPromptInjected: true, agent: {
+        recent: [], history: [], initialContextDelivered: true, agent: {
           session: { deriveMessages: () => [] },
           followup: m => delivered.push(m), whenIdle: async () => {},
         } })
@@ -492,21 +492,21 @@ test('审批和问答快速通道保留同类机器人开关，群聊与私聊�
   }
 })
 
-test('no 不修改主会话提示和交接，关闭分类器后的正式首轮仍注入人设', async t => {
+test('no 不修改主会话提示和交接，关闭分类器后的正式首轮仍交付便签', async t => {
   const home = await directory(t), config = configOf(), llm = model('no')
   let swaps = 0, marked = 0
   const gate = createAddressClassifier({ home, config, llm, logger })
   const h = inboundHarness(t, gate, { config: { persona: '测试人设_首轮必须存在', requireMention: false, historyLimit: 5 },
     contextGuard: { maybeSwap: async () => { swaps++; return null } } })
   const record = await h.manager.obtain(meta)
-  record.chatPromptInjected = false
+  record.initialContextDelivered = false
   record.swapSeed = ['保留交接内容']
-  h.manager.markChatPromptInjected = r => { marked++; r.chatPromptInjected = true }
+  h.manager.markInitialContextDelivered = r => { marked++; r.initialContextDelivered = true }
   keepBacklog(meta.peerId, '此前没有回应的群背景')
   const previous = structuredClone({ recent: record.recent, history: record.history,
     swapSeed: record.swapSeed, lastSenderId: record.lastSenderId })
   await h.inbound(h.event(801))
-  assert.equal(record.chatPromptInjected, false)
+  assert.equal(record.initialContextDelivered, false)
   assert.equal(marked, 0)
   assert.equal(swaps, 0)
   assert.deepEqual({ recent: record.recent, history: record.history,
@@ -517,35 +517,36 @@ test('no 不修改主会话提示和交接，关闭分类器后的正式首轮�
   await record.queue
   assert.equal(h.delivered.length, 1)
   const body = textOf(h.delivered[0])
-  assert.match(body, /测试人设_首轮必须存在/)
+  assert.doesNotMatch(body, /测试人设_首轮必须存在/)
   assert.match(body, /保留交接内容/)
   assert.match(body, /此前没有回应的群背景/)
-  assert.equal(record.chatPromptInjected, true)
+  assert.equal(record.initialContextDelivered, true)
   assert.equal(marked, 1)
 })
 
-test('yes 投递失败不更新注入标记，成功接纳才注入且只注入一次', async t => {
+test('yes 投递失败不消费交接，成功接纳后才记录一次性交付', async t => {
   const home = await directory(t), config = configOf(), llm = model('no', 'yes', 'yes')
   const gate = createAddressClassifier({ home, config, llm, logger })
   const h = inboundHarness(t, gate, { config: { persona: '测试人设_不得重复注入' } })
   const record = await h.manager.obtain(meta)
-  record.chatPromptInjected = false
+  record.initialContextDelivered = false
   record.swapSeed = ['未交付的交接']
   await h.inbound(h.event(901))
-  assert.equal(record.chatPromptInjected, false)
+  assert.equal(record.initialContextDelivered, false)
   const followup = record.agent.followup
   record.agent.followup = () => { throw new Error('投递拒绝') }
   await assert.rejects(h.inbound(h.event(902)), /投递拒绝/)
-  assert.equal(record.chatPromptInjected, false)
+  assert.equal(record.initialContextDelivered, false)
   assert.deepEqual(record.swapSeed, ['未交付的交接'])
   record.agent.followup = followup
   await gate.resume(meta, async () => false)
   await h.inbound(h.event(903))
   assert.equal(h.delivered.length, 1)
-  assert.equal(record.chatPromptInjected, true)
+  assert.equal(record.initialContextDelivered, true)
   assert.equal(record.swapSeed, null)
   const body = textOf(h.delivered[0])
-  assert.equal(body.split('测试人设_不得重复注入').length - 1, 1)
+  assert.doesNotMatch(body, /测试人设_不得重复注入/)
+  assert.match(body, /未交付的交接/)
   assert.match(body, /消息901[\s\S]*消息902[\s\S]*消息903/)
 })
 

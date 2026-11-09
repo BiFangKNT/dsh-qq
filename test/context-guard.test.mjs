@@ -56,12 +56,15 @@ guard.onSessionEvent(
 )
 assert.equal(record.promptTokens, 10000)
 
-// 3) 压缩结束：规矩标记重置 + 注入短卡
+// 3) 成功压缩只注入短卡；失败不提醒，也不改一次性交付状态
 guard.onSessionEvent({ header: { id: 's1' } }, { type: 'compaction/end', data: {} })
-assert.equal(record.chatPromptInjected, false)
+assert.equal(record.chatPromptInjected, true)
 assert.equal(injected.length, 1)
 assert.match(injected[0].content[0].text, /压缩/)
 assert.equal(record.compactedCount, 1)
+guard.onSessionEvent({ header: { id: 's1' } }, { type: 'compaction/end', data: { error: 'summary failed' } })
+assert.equal(record.compactedCount, 1)
+assert.equal(injected.length, 1)
 
 // 4) 阈值以下：不换（测试 config 的 minTokens=1000，先压到 500）
 record.promptTokens = 500

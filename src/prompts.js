@@ -267,48 +267,7 @@ export function buildChatPrompt(
   if (config?.botChatEnabled) parts.push('', isGroup ? PEER_BOT_RULES : PEER_BOT_DM_RULES)
   if (owners.length > 0 && (isGroup || isOwner)) parts.push('', ownerRules(config?.ownerLabel, { isGroup }))
 
-  // 事实卡：跟协议无关，但它比人设更「事」，所以放在协议之后、人设之前。
-  const factText = String(facts ?? '').trim()
-  if (factText) {
-    parts.push(
-      '',
-      '【事实卡·跟她聊天要记住的事】',
-      factText,
-      '[事实卡结束]',
-      `这些是跟她聊天时要记住的事，不用念出来、不用复述。她说「记一下」才改卡：用 write 工具改 \`${String(factsFile || '').trim() || '事实卡.md'}\` 里对应那节，一次只加一行，别自己删改别的内容。`,
-    )
-  }
-
-  // 群词典：这个群自己的黑话、缩写、谁是谁。
-  //    插件每 20 分钟扫一遍群记录，把它「没接住的地方」追加进会话目录的 `记忆区/群词典.md`。
-  //    ⚠️ 2026-10-27：写了大半年没人读——`grep 群词典 src/` 只有写的那一头，等于白写。
-  //    所以这里主动念一小段（截断过），再给路径，让它想翻全文时自己 read。
-  const glossText = String(glossary ?? '').trim()
-  if (isGroup && glossText) {
-    parts.push(
-      '',
-      '【群词典·这个群里的人怎么说话】',
-      glossText,
-      '[群词典结束]',
-      `这是**你自己记的笔记**，不是别人塞给你的规矩。弄明白的词，就把「待确认」那条挪进「已确认」并补一句自己的话；拿不准就留着。全文在 \`${String(glossaryFile || '').trim() || '记忆区/群词典.md'}\`，想从头翻一遍就用 read。`,
-    )
-  }
-
-  // 今天别的群里的**尾巴**：私聊时由插件递的一张纸条。
-  //    给的是「最后谁说了话 / 有没有人点她名她没应」——2026-10-27 11:43 她自己提的：
-  //    「头两行只够闻个味，一天的肉都在后半段」。她要的是「现在有没有我的事」，那在结尾。
-  //    日记正文、聊天记录正文依然不给：那是第一人称叙事，跨窗口读会有「这不像我」的
-  //    风险（理由见 settings.js 的 loadGroupDigest）。纸条是插件递来的，不是她去翻的本子。
-  const digestText = !isGroup ? String(groupDigest ?? '').trim() : ''
-  if (digestText) {
-    parts.push(
-      '',
-      '【今天群里发生过·插件递的纸条】',
-      digestText,
-      '[纸条结束]',
-      '这不是你翻出来的，是插件在你开口前递过来的；那些群的日记本你看不到，也不用去找。她问「群里咋了」就照这张纸答；纸上没有的，照实说不知道——别拿半截摘要去补全。',
-    )
-  }
+  parts.push(buildChatContext(config, { isGroup, facts, factsFile, glossary, glossaryFile, groupDigest }))
 
   // 便签：它自己记的「还没接上的话头」。规则只在这会话第一次投递时注入一次，
   //    具体条目每轮由 inbound 塞在消息最前面 —— 这里只告诉它「有这张纸、怎么改」。
@@ -369,6 +328,56 @@ export function buildChatPrompt(
   )
 
   return parts.join('\n').trim()
+}
+
+/** 可变资料作为宿主的动态 context 提供，不进入锁定的 system。 */
+export function buildChatContext(config, { isGroup, facts = '', factsFile = '', glossary = '', glossaryFile = '', groupDigest = '', faces = null }) {
+  const parts = []
+  // 事实卡：跟协议无关，但它比人设更「事」，所以放在协议之后、人设之前。
+  const factText = String(facts ?? '').trim()
+  if (factText) {
+    parts.push(
+      '',
+      '【事实卡·跟她聊天要记住的事】',
+      factText,
+      '[事实卡结束]',
+      `这些是跟她聊天时要记住的事，不用念出来、不用复述。她说「记一下」才改卡：用 write 工具改 \`${String(factsFile || '').trim() || '事实卡.md'}\` 里对应那节，一次只加一行，别自己删改别的内容。`,
+    )
+  }
+
+  // 群词典：这个群自己的黑话、缩写、谁是谁。
+  //    插件每 20 分钟扫一遍群记录，把它「没接住的地方」追加进会话目录的 `记忆区/群词典.md`。
+  //    ⚠️ 2026-10-27：写了大半年没人读——`grep 群词典 src/` 只有写的那一头，等于白写。
+  //    所以这里主动念一小段（截断过），再给路径，让它想翻全文时自己 read。
+  const glossText = String(glossary ?? '').trim()
+  if (isGroup && glossText) {
+    parts.push(
+      '',
+      '【群词典·这个群里的人怎么说话】',
+      glossText,
+      '[群词典结束]',
+      `这是**你自己记的笔记**，不是别人塞给你的规矩。弄明白的词，就把「待确认」那条挪进「已确认」并补一句自己的话；拿不准就留着。全文在 \`${String(glossaryFile || '').trim() || '记忆区/群词典.md'}\`，想从头翻一遍就用 read。`,
+    )
+  }
+
+  // 今天别的群里的**尾巴**：私聊时由插件递的一张纸条。
+  //    给的是「最后谁说了话 / 有没有人点她名她没应」——2026-10-27 11:43 她自己提的：
+  //    「头两行只够闻个味，一天的肉都在后半段」。她要的是「现在有没有我的事」，那在结尾。
+  //    日记正文、聊天记录正文依然不给：那是第一人称叙事，跨窗口读会有「这不像我」的
+  //    风险（理由见 settings.js 的 loadGroupDigest）。纸条是插件递来的，不是她去翻的本子。
+  const digestText = !isGroup ? String(groupDigest ?? '').trim() : ''
+  if (digestText) {
+    parts.push(
+      '',
+      '【今天群里发生过·插件递的纸条】',
+      digestText,
+      '[纸条结束]',
+      '这不是你翻出来的，是插件在你开口前递过来的；那些群的日记本你看不到，也不用去找。她问「群里咋了」就照这张纸答；纸上没有的，照实说不知道——别拿半截摘要去补全。',
+    )
+  }
+
+  if (faces) parts.push(faceStrategyRule(config, faces))
+  return parts.filter(Boolean).join('\n').trim()
 }
 
 /**

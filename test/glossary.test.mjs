@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -84,13 +84,4 @@ test('buildChatPrompt：群里会带上群词典，私聊不带', () => {
 
   const empty = buildChatPrompt({}, { isGroup: true, glossary: '' })
   assert.ok(!empty.includes('【群词典'), '没内容就别占 token')
-})
-
-test('接线：inbound 只在群聊里取词典，私聊传空串', () => {
-  const src = readFileSync(new URL('../src/inbound.js', import.meta.url), 'utf8')
-  assert.ok(
-    src.includes('glossary: isGroup ? loadGlossaryFor(record) : \'\''),
-    'inbound.js 里必须按 isGroup 取，否则私聊会把上次那个群的词带进来',
-  )
-  assert.ok(src.includes('loadGlossaryFor,'), 'import 要接上（2026-10-27 起改成多行 import）')
 })

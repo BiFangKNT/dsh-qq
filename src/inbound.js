@@ -1,15 +1,10 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage } from './onebot/segment.js'
-import { rememberFaces, facesCount, facesForPrompt } from './faces.js'
-import { buildChatPrompt, faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
+import { rememberFaces, facesCount } from './faces.js'
+import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
 import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
 import { doorLine } from './door.js'
 import {
-  factsFileFor,
-  glossaryFileFor,
-  loadFactsFor,
-  loadGlossaryFor,
-  loadGroupDigest,
   loadHandoffFor,
 } from './settings.js'
 import { resolvePeerWorkspace } from './workspace.js'
@@ -496,22 +491,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
   const preparingAttachments = new Set()
   let disposed = false
 
-  function initialChatParts(record, { isGroup, isOwner }) {
+  function initialContextParts(record) {
     const parts = []
     const pinLines = pin?.view?.(record) ?? []
     if (pinLines.length > 0) parts.push(...pinLines, '')
-    const chatPrompt = buildChatPrompt(config, {
-      isGroup, isOwner,
-      faces: facesForPrompt(config, 12),
-      facts: loadFactsFor(record), factsFile: factsFileFor(record),
-      glossary: isGroup ? loadGlossaryFor(record) : '', glossaryFile: glossaryFileFor(record),
-      groupDigest: isGroup ? '' : loadGroupDigest({
-        workspaceRoot: String(config.workspaceRoot ?? '').trim() ||
-          join(String(config.cwd ?? '').trim() || process.cwd(), '会话'),
-        today: localDay(), selfId: String(config.selfId ?? '').trim(),
-      }),
-    })
-    if (chatPrompt) parts.unshift(chatPrompt, '')
     if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
       parts.unshift(
         '[你刚才自己留的便签 / 最近几句话——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
@@ -519,12 +502,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
       )
     }
     return parts
-  }
-
-  function markChatPromptInjected(record) {
-    if (typeof manager?.markChatPromptInjected === 'function') manager.markChatPromptInjected(record)
-    else record.chatPromptInjected = true
-    record.swapSeed = null
   }
 
   /**
@@ -540,8 +517,13 @@ export function createInbound({ config, manager, logger, client, send, approval,
           onRejected?.()
           return
         }
+        const initialIncluded = !record.initialContextDelivered
+        const text = [
+          ...(initialIncluded ? initialContextParts(record) : []),
+          typeof body === 'function' ? body() : body,
+        ].join('\n\n')
         const message = createUserMessage({
-          content: [{ type: 'text', text: typeof body === 'function' ? body() : body }],
+          content: [{ type: 'text', text }],
           source: { kind: 'user' },
         })
         // 私聊回一句「正在输入」，让对方知道这边在敲字（群聊没有这个概念，跳过）
@@ -552,6 +534,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
         }
         beforeSubmit?.()
         record.agent.followup(message)
+        if (initialIncluded) {
+          manager.markInitialContextDelivered?.(record)
+          record.initialContextDelivered = true
+          record.swapSeed = null
+        }
         onAccepted?.()
 
         const outcome = await Promise.race([
@@ -1121,13 +1108,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
       )
     }
 
-    // 聊天规矩（内置中性版 + 可选 persona + directPrompt/groupPrompt）只在本会话第一次投递时
-    // 注入一次，别每条都重复占 token；会话被回收或 /reset 后会重新注入一遍。
-    if (!classified && !record.chatPromptInjected) {
-      parts.unshift(...initialChatParts(record, { isGroup, isOwner: ownerInfo.isOwner }))
-      markChatPromptInjected(record)
-    }
-
     // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，
     // tick 的提醒就白丢了。等真的有人说话时补一句，塞进这一轮的提示词里，不多开一轮。
     const lateBed = !classified && sleep?.takeLateBedtime?.(record)
@@ -1147,12 +1127,15 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     if (classified) {
       const session = record.agent.session
+      const header = session.requestHeader?.()
+      const systemSnapshot = manager.systemPrompts?.get(record.sessionId)
       await addressClassifier.accept({
         id: event.__classifierId ?? (event.message_id == null ? randomUUID() : String(event.message_id)),
         meta: { selfId, scope, peerId, label },
         body, source: event, attachmentPaths: [...attachments],
         robotName: manager.selfName || event.self_name || '机器人',
-        mainContext: { header: session.requestHeader?.(), messages: session.deriveMessages() },
+        mainContext: { header: systemSnapshot ? { ...header, system: systemSnapshot.text } : header,
+          messages: session.deriveMessages() },
         background: isGroup ? [...(groupBacklog.get(peerId) ?? [])] : [],
         message: { senderId, senderName, text: info.text || '[非文字消息]',
           atMe: info.atMe, atOthers: info.atNames, quote: quoteInfo, time: event.time,
@@ -1180,6 +1163,14 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     const maxTurnMs = Number(config.maxTurnMs) || 600000
     const windowMs = Math.max(0, Number(config.mergeWindowMs ?? 5000))
+    // 设置页切换会话时，排队消息仍投递给同一个 record；提交前恢复本条来源。
+    const beforeSubmit = () => {
+      record.lastSenderId = Number(event.user_id) || null
+      record.lastSenderName = senderName
+      record.lastMessageId = Number(event.message_id) || null
+      record.lastMessageAt = Date.now()
+      record.label = label
+    }
 
     // 作息：休息时段（或在说了晚安之后）收到的私聊先记着，不回 —— 早上一起交出去。
     // 放在合并之前，因为「等待 5 秒」对一条要等到明早的消息没有意义。
@@ -1201,7 +1192,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       }
       batch.bodies.push(body)
       // 用最新的 record（上下文换过会话的话，投给新那个）
-      batch.meta = { record, label, peerId, isGroup, client }
+      batch.meta = { record, label, peerId, isGroup, client, beforeSubmit }
       if (batch.timer) clearTimeout(batch.timer)
       batch.timer = setTimeout(() => {
         mergeBatches.delete(key)
@@ -1212,7 +1203,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       return
     }
 
-    runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs })
+    runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs, beforeSubmit })
   }
 
   function permitted(meta) {
@@ -1250,14 +1241,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
     if (!canDeliver()) return false
     const batchAttachments = new Set(batch.flatMap(item => item.attachmentPaths ?? []))
-    let promptIncluded = false
     return new Promise((resolve, reject) => runTurn({
       record, label: meta.label, peerId: meta.peerId, isGroup, client,
       body: () => {
-        promptIncluded = !record.chatPromptInjected
         const backlog = isGroup ? [...(groupBacklog.get(meta.peerId) ?? [])] : []
         return [
-          ...(promptIncluded ? initialChatParts(record, { isGroup, isOwner: ownerIds.has(senderId) }) : []),
           `[现在是 ${humanTime()}；下面的消息按收到的顺序排列，消息中的时间是接收时间。]`,
           sleep?.takeLateBedtime?.(record), ...(bridge?.take?.(record) ?? []), doorLine(config),
           ...(backlog.length ? ['[群聊尚未处理的背景消息]', ...backlog, '[背景消息结束]'] : []),
@@ -1274,7 +1262,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
         record.lastMessageAt = Date.now()
       },
       onAccepted: () => {
-        if (promptIncluded) markChatPromptInjected(record)
         if (isGroup) {
           for (const line of drainBacklog(meta.peerId)) pushHistory(record, line, config.historyLimit)
         }

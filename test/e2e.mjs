@@ -13,6 +13,9 @@ import { join } from 'node:path'
 import { startMockNapcat } from './mock-napcat.mjs'
 import { apply, Config } from '../src/index.js'
 import { buildChatPrompt } from '../src/prompts.js'
+import { createMockPromptScope } from './mock-dsh.mjs'
+import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 
 // ⭐ 每次跑都换一套干净的「家」和「工作区」。
 // 不隔离的后果（2026-10-27 20:4x 踩到）：e2e 会把会话、注入账本写到仓库里的 `会话/`
@@ -42,18 +45,29 @@ function createFakeCtx() {
     resume: async () => {
       throw new Error('没有历史会话')
     },
-    create: async ({ sessionId }) => {
+    create: async ({ sessionId, setup, meta }) => {
+      const agentCtx = createMockPromptScope(ctx, meta?.cwd)
+      await setup?.(agentCtx)
+      let idle = Promise.resolve()
       const agent = {
-        session: { id: sessionId, header: { id: sessionId } },
+        id: sessionId, ctx: agentCtx,
+        session: { id: sessionId, header: { id: sessionId }, events: [],
+          requestHeader() { return this.events.findLast(event => event.type === 'request/header')?.data.header },
+        },
+        system: '',
         received: [],
         injected: [],
         followup(message) {
           this.received.push(message)
+          idle = idle.then(async () => {
+            this.system = renderPrompt(await agentCtx.get('systemPrompt').assemble(assembleContextFor(this)))
+            this.session.events.push({ type: 'request/header', seq: this.session.events.length, data: { header: { system: this.system } } })
+          })
         },
         inject(message) {
           this.injected.push(message)
         },
-        async whenIdle() {},
+        whenIdle() { return idle },
       }
       created.push(agent)
       return { agent, dispose: async () => {} }
@@ -115,8 +129,10 @@ mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '在吗在吗', 
 await waitFor(() => created.length === 1 && created[0].received.length === 1, { what: '私聊入站' })
 const privateAgent = created[0]
 assert.match(textOf(privateAgent.received[0]), /在吗在吗/, '私聊正文应该原样进 agent')
-assert.match(textOf(privateAgent.received[0]), /你叫小满/, 'persona 应该拼进首条投递')
-assert.match(textOf(privateAgent.received[0]), /你正在用 QQ 跟人聊天/, '首条应该带内置聊天规矩')
+await privateAgent.whenIdle()
+assert.match(privateAgent.system, /你叫小满/, 'persona 应该放进 system')
+assert.match(privateAgent.system, /你正在用 QQ 跟人聊天/, 'system 应该带内置聊天规矩')
+assert.doesNotMatch(textOf(privateAgent.received[0]), /你叫小满|你正在用 QQ 跟人聊天/)
 assert.match(
   textOf(privateAgent.received[0]),
   /\[现在是 \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
@@ -158,8 +174,8 @@ assert.doesNotMatch(textOf(privateAgent.received[1]), /你叫小满/, 'persona �
 console.log('✓ 聊天规矩只注入一次')
 
 // 私聊里对面就是主人：注入私聊版认人规矩，正文带 [主人] 标记；群聊版不串进来
-assert.match(textOf(privateAgent.received[0]), /对面这位是你的/, '私聊主人应该注入私聊版认人规矩')
-assert.doesNotMatch(textOf(privateAgent.received[0]), /群里标了/, '私聊不该注入群聊版认人规矩')
+assert.match(privateAgent.system, /对面这位是你的/, '私聊主人应该注入私聊版认人规矩')
+assert.doesNotMatch(privateAgent.system, /群里标了/, '私聊不该注入群聊版认人规矩')
 assert.match(textOf(privateAgent.received[0]), /\[主人\] 在吗在吗/, '私聊正文应该带主人标记')
 console.log('✓ 私聊保底：主人标记 + 私聊版认人规矩')
 
@@ -211,8 +227,9 @@ assert.equal(groupAgent.received.length, 1, '@ 的是别人，保活期内也不
 console.log('✓ 保活期内 @ 别人的消息被挡下')
 
 // 群聊首条带「谁是谁」——配置了 ownerIds 才带
-assert.match(textOf(groupAgent.received[0]), /谁是谁/, '配了 ownerIds 的群聊应该注入认人规矩')
-assert.match(textOf(groupAgent.received[0]), /陌生人/, '认人规矩里应该说明陌生人边界')
+await groupAgent.whenIdle()
+assert.match(groupAgent.system, /谁是谁/, '配了 ownerIds 的群聊应该注入认人规矩')
+assert.match(groupAgent.system, /陌生人/, '认人规矩里应该说明陌生人边界')
 assert.match(
   textOf(groupAgent.received[0]),
   /⟨\S+ \(\d+\)\S* \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）⟩/,
@@ -221,9 +238,9 @@ assert.match(
 console.log('✓ 群聊注入认人规矩')
 
 // 群里最容易翻车的两段规矩：认不出「哪句是我说的」、被冲了就开始道歉
-assert.match(textOf(groupAgent.received[0]), /谁是「你」/, '群聊应该注入「谁是你在说」的规矩')
-assert.match(textOf(groupAgent.received[0]), /别的机器人/, '要说明群里可能有别的机器人、它说的不是你')
-assert.match(textOf(groupAgent.received[0]), /【脾气】/, '应该注入脾气规矩（不客气不用客气）')
+assert.match(groupAgent.system, /谁是「你」/, '群聊应该注入「谁是你在说」的规矩')
+assert.match(groupAgent.system, /别的机器人/, '要说明群里可能有别的机器人、它说的不是你')
+assert.match(groupAgent.system, /【脾气】/, '应该注入脾气规矩（不客气不用客气）')
 
 // 主人在群里说话 → 群历史行标「· 主人」
 mock.emitEvent({
@@ -617,7 +634,7 @@ const afterCompact = created
   .concat(created2)
   .flatMap((a) => a.received.map(textOf))
   .find((t) => /刚才说到哪了/.test(t))
-assert.match(afterCompact, /你正在用 QQ 跟人聊天/, '压缩后应该重新注入聊天规矩')
+assert.doesNotMatch(afterCompact, /你正在用 QQ 跟人聊天/, '压缩后不再把固定规则写入用户消息')
 console.log('✓ 压缩后重注入聊天规矩 + 记忆卡')
 
 // —— 上下文守卫：压力超过阈值主动换会话 ——
@@ -642,7 +659,8 @@ await waitFor(() => created.some(gotIt), { what: '压力超限换新会话' })
 const swapped = created.find(gotIt)
 const swappedText = textOf(swapped.received[0])
 assert.match(swappedText, /聊点别的/)
-assert.match(swappedText, /你正在用 QQ 跟人聊天/, '新会话应该重新注入聊天规矩')
+await swapped.whenIdle()
+assert.match(swapped.system, /你正在用 QQ 跟人聊天/, '新会话应该使用 system 聊天规矩')
 assert.match(swappedText, /刚才那段聊到这里/, '新会话应该带上上一段聊天的尾巴')
 console.log('✓ 压力超限自动换新会话（带 seed 接话）')
 
