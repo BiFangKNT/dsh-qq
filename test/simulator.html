@@ -15,7 +15,7 @@
 <details><summary>为这一轮编排模型行为</summary><small>留空使用模拟回复。仅模拟动作顺序，不调用真实模型。</small><textarea id="plan" rows="6" placeholder='[{"type":"tool","name":"qq_send","args":{"text":"工具回复"}},{"type":"text","text":"不会重复转发"}]'></textarea><div class="row"><button class="secondary" id="question">填入问答</button><button class="secondary" id="approval">填入审批</button><button class="secondary" id="overflow">填入上下文超限</button></div></details>
 <button id="send">发送到真实插件</button>
 </section>
-<section><h2>插件设置</h2><small>读取和保存都走插件自己的设置 API。连接地址和数据目录固定在模拟环境内。</small><textarea id="settings" rows="9"></textarea><button id="save">保存设置</button><button class="secondary" id="reloadSettings">重新读取</button></section>
+<section><h2>插件设置</h2><p><a href="/settings" target="_blank" rel="noopener">打开正式设置页预览 ↗</a></p><small>预览页直接加载 client.js，与这里共用本次模拟环境。也可使用下方 JSON 编辑；连接地址和数据目录固定在模拟环境内。</small><textarea id="settings" rows="9"></textarea><button id="save">保存设置</button><button class="secondary" id="reloadSettings">重新读取</button></section>
 <section><h2>故障与生命周期</h2><label for="action">下一次失败的 OneBot API</label><input id="action" value="send_private_msg"><div class="row"><button class="secondary" id="fail">返回失败</button><button class="secondary" id="disconnect">断线后自动重连</button><button class="secondary" id="reload">重载插件与宿主</button></div><small>重载保留本次模拟目录，验证会话恢复和监听器清理。所有发送均落到模拟 NapCat。</small></section>
 </div><div>
 <section><h2>模拟 QQ 收到的消息 / 空间发布</h2><pre id="outgoing">尚无回复</pre></section>

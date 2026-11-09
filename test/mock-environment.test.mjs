@@ -21,6 +21,27 @@ async function setup(t, options) {
 }
 async function idle(env) { for (const agent of env.host.agents.values()) await agent.whenIdle() }
 
+test('设置预览加载正式组件和本地 React，浏览器连接限制在当前模拟器', async t => {
+  const env = await setup(t)
+  const response = await fetch(`${env.url}/settings`)
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-security-policy'), /connect-src 'self'/)
+  const html = await response.text()
+  const scripts = [...html.matchAll(/<script defer src="([^"]+)"/g)].map(match => match[1])
+  assert.equal(scripts.length, 4)
+  for (const path of scripts) {
+    assert.ok(path.startsWith('/mock-assets/'))
+    const script = await fetch(`${env.url}${path}`)
+    assert.equal(script.status, 200, path)
+    assert.match(script.headers.get('content-type'), /javascript/)
+    const source = await script.text()
+    if (path.endsWith('/client.js')) {
+      assert.equal(source, await readFile(new URL('../client.js', import.meta.url), 'utf8'))
+    } else assert.ok(source.length > 0)
+  }
+  assert.equal((await fetch(`${env.url}/mock-assets/package.json`)).status, 404)
+})
+
 test('真实插件可用：默认回复、预设工具、消息去重和宿主设置 API', async t => {
   const env = await setup(t)
   assert.ok(env.host.tools.has('qq_send_voice'))

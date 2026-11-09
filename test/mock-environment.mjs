@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { apply, Config } from '../src/index.js'
 import { startMockNapcat } from './mock-napcat.mjs'
 import { createMockDsh, waitFor } from './mock-dsh.mjs'
@@ -15,6 +16,14 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
   const webServer = { register(route) { routes.add(route); return () => routes.delete(route) } }
   const token = randomUUID()
   const peer = startMockNapcat({ port: 0, token, quiet: true })
+  const require = createRequire(import.meta.url)
+  // 仅暴露预览所需的固定文件，不提供任意目录的静态访问。
+  const previewAssets = new Map([
+    ['/mock-assets/settings-preview.js', () => new URL('./settings-preview.js', import.meta.url)],
+    ['/mock-assets/client.js', () => new URL('../client.js', import.meta.url)],
+    ['/mock-assets/react.js', () => join(require.resolve('react/package.json'), '..', 'umd', 'react.development.js')],
+    ['/mock-assets/react-dom.js', () => join(require.resolve('react-dom/package.json'), '..', 'umd', 'react-dom.development.js')],
+  ])
   let host, closing = false
   const server = createServer(async (req, res) => {
     const send = (status, value) => {
@@ -27,6 +36,17 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
       if (req.url === '/' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
         res.end(await readFile(new URL('./simulator.html', import.meta.url))); return
+      }
+      if (req.url === '/settings' && req.method === 'GET') {
+        const source = await readFile(new URL('./settings-preview.html', import.meta.url))
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; object-src 'none'; base-uri 'none'" })
+        res.end(source); return
+      }
+      if (previewAssets.has(req.url) && req.method === 'GET') {
+        const source = await readFile(previewAssets.get(req.url)())
+        res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(source); return
       }
       if (req.url.startsWith('/api/dsh-qq')) {
         const route = [...routes].find(route => req.url.startsWith(route.path))

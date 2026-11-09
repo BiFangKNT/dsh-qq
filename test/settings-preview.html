@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QQ 设置页预览</title>
+<style>
+:root{color-scheme:light;--dsw-alias-label-tertiary:#64748b;--dsw-alias-border-l2:#cbd5e1;--dsw-alias-bg-overlay:#f1f5f9;--dsw-alias-interactive-bg-hover:#cbd5e1;background:#f4f6fa;color:#172033;font:14px/1.6 system-ui,sans-serif}
+:root[data-theme=dark]{color-scheme:dark;--dsw-alias-label-tertiary:#a1acbd;--dsw-alias-border-l2:#475569;--dsw-alias-bg-overlay:#293548;--dsw-alias-interactive-bg-hover:#526078;background:#101722;color:#e2e8f0}
+body{margin:0}main{max-width:740px;margin:auto;padding:24px}header{margin-bottom:24px}nav{display:flex;align-items:center;justify-content:space-between;gap:16px}a{color:inherit}h1{font-size:24px;margin:20px 0 8px}.note{color:var(--dsw-alias-label-tertiary);font-size:13px;margin:8px 0}#theme{font:inherit;background:var(--dsw-alias-bg-overlay);color:inherit;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;padding:6px 12px;cursor:pointer}#settings-root{padding:24px;background:#fff;border:1px solid var(--dsw-alias-border-l2);border-radius:12px}:root[data-theme=dark] #settings-root{background:#192231}@media(max-width:560px){main{padding:16px}#settings-root{padding:16px}}
+</style>
+<script defer src="/mock-assets/react.js"></script>
+<script defer src="/mock-assets/react-dom.js"></script>
+<script defer src="/mock-assets/settings-preview.js"></script>
+<script defer src="/mock-assets/client.js"></script>
+</head>
+<body>
+<main>
+<header>
+<nav><a href="/">← 返回消息模拟器</a><button id="theme" type="button" aria-pressed="false">切换深色</button></nav>
+<h1>QQ 设置页预览</h1>
+<p class="note">直接加载正式设置组件；外层容器模拟宿主的基础配色。修改会保存到本次 mock 环境。</p>
+<p class="note">可先在消息模拟器发一条消息，再修改人设，查看现有会话的同步选项。连接地址和数据目录固定在模拟环境内，本页仅允许访问当前模拟器接口。</p>
+</header>
+<div id="settings-root">正在加载设置页…</div>
+</main>
+</body>
+</html>
