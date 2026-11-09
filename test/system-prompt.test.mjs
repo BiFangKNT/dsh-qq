@@ -204,6 +204,64 @@ test('压缩成功保存摘要和新 system，失败或无可压缩内容保留�
   assert.deepEqual(h.sync.status().pending, [])
 })
 
+test('跨设置进程强制同步等待回复结束，保留完整历史并重新锁定 system', async t => {
+  const h = await runtime(t), oldId = h.record.sessionId, agent = h.record.agent
+  agent.followup({ content: [{ type: 'text', text: '强制同步前的完整聊天' }] })
+  await agent.whenIdle()
+  const events = structuredClone(agent.session.events)
+  const messages = structuredClone(agent.session.deriveMessages())
+  const oldSystem = h.manager.systemPrompts.get(oldId).text
+  const whenIdle = agent.whenIdle
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  t.after(() => release())
+  agent.whenIdle = () => gate
+  await writeFile(join(h.home, 'settings.json'), JSON.stringify({ persona: '强制同步最新人设' }))
+  const ui = createPromptSync({ ctx: h.host.ctx, home: h.home,
+    config: { ...h.config, persona: '强制同步最新人设' }, logger })
+  const op = ui.request('force', [oldId])
+  await waitFor(() => operationOf(ui, op.id)?.status === 'running')
+  assert.equal(h.manager.systemPrompts.get(oldId).text, oldSystem)
+  release()
+  await waitFor(() => operationOf(ui, op.id)?.status === 'done')
+  agent.whenIdle = whenIdle
+  assert.equal(h.record.sessionId, oldId)
+  assert.equal(h.record.agent, agent)
+  assert.deepEqual(agent.session.events, events)
+  assert.deepEqual(agent.session.deriveMessages(), messages)
+  const updated = h.manager.systemPrompts.get(oldId).text
+  assert.match(updated, /强制同步最新人设/)
+  assert.deepEqual(ui.status().pending, [])
+  agent.followup({ content: [{ type: 'text', text: '同步后的请求' }] })
+  await agent.whenIdle()
+  assert.equal(agent.requests.at(-1).system, updated)
+  h.config.persona = '尚未同步的下一版'
+  const assembly = await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))
+  assert.equal(renderPrompt(assembly), updated)
+  const resumed = fixture({ id: oldId, config: h.config, events: agent.session.events,
+    store: createSystemPromptStore(h.home) })
+  assert.equal((await resumed.request()).system, updated)
+  resumed.dispose()
+})
+
+test('强制同步写入失败保留旧 system，普通请求不重试，明确重试后可成功', async t => {
+  const h = await runtime(t), id = h.record.sessionId, agent = h.record.agent
+  const original = h.manager.systemPrompts.get(id).text
+  h.config.persona = '强制同步目标'
+  const save = h.manager.systemPrompts.save
+  h.manager.systemPrompts.save = () => { throw new Error('快照写入失败') }
+  t.after(() => { h.manager.systemPrompts.save = save })
+  const op = h.sync.request('force', [id])
+  await waitFor(() => operationOf(h.sync, op.id)?.status === 'failed')
+  assert.match(operationOf(h.sync, op.id).sessions[0].error, /快照写入失败/)
+  assert.equal(h.manager.systemPrompts.get(id).text, original)
+  assert.equal(renderPrompt(await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))), original)
+  h.manager.systemPrompts.save = save
+  const retry = h.sync.request('force', [id])
+  await waitFor(() => operationOf(h.sync, retry.id)?.status === 'done')
+  assert.match(h.manager.systemPrompts.get(id).text, /强制同步目标/)
+})
+
 test('新会话准备失败不切换现有上下文，后续可重新执行', async t => {
   const h = await runtime(t), oldId = h.record.sessionId
   h.config.persona = '新配置'

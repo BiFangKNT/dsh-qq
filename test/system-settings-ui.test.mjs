@@ -43,11 +43,12 @@ async function panel() {
 }
 const button = (tree, text) => tree.find(element => element.type === 'button' && element.children.includes(text))
 
-test('设置页显示三个选择，可选择会话；稍后同步保留待同步入口', async () => {
+test('设置页显示四个选择，可选择会话；稍后同步保留待同步入口', async () => {
   const h = await panel()
   let tree = h.render()
   assert.ok(button(tree, '创建新会话'))
   assert.ok(button(tree, '压缩会话'))
+  assert.ok(button(tree, '强制同步'))
   button(tree, '稍后同步').props.onClick()
   tree = h.render()
   assert.equal(button(tree, '创建新会话'), undefined)
@@ -57,6 +58,24 @@ test('设置页显示三个选择，可选择会话；稍后同步保留待同�
   await button(h.render(), '压缩会话').props.onClick()
   assert.deepEqual(h.calls.find(call => call.url.endsWith('/prompt-sync')).body,
     { action: 'compact', sessionIds: ['b'] })
+})
+
+test('强制同步位于稍后同步前，解释缓存影响且只提交所选会话', async () => {
+  const h = await panel(), tree = h.render()
+  const force = button(tree, '强制同步')
+  assert.ok(tree.indexOf(force) < tree.indexOf(button(tree, '稍后同步')))
+  assert.match(force.props.title, /保留当前会话和完整历史/)
+  assert.match(force.props.title, /缓存命中率/)
+  tree.find(element => element.type === 'input' && element.props.type === 'checkbox').props.onChange({ target: { checked: false } })
+  await button(h.render(), '强制同步').props.onClick()
+  assert.deepEqual(h.calls.find(call => call.url.endsWith('/prompt-sync')).body,
+    { action: 'force', sessionIds: ['b'] })
+  h.status.promptSync.operations = [{ id: 'op', status: 'running', sessions: [] }]
+  assert.equal(button(h.render(), '强制同步').props.disabled, true)
+  h.status.promptSync.operations = []
+  h.render().filter(element => element.type === 'input' && element.props.type === 'checkbox')
+    .forEach(element => element.props.onChange({ target: { checked: false } }))
+  assert.equal(button(h.render(), '强制同步').props.disabled, true)
 })
 
 test('普通保存不重复弹出已推迟的提示，执行中的操作禁用重复同步', async () => {

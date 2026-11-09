@@ -351,7 +351,7 @@ window.__ModuleLoader__.load({
 
         syncPending.length ? h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '会话提示词待同步'),
-          h('div', { 'data-qq-note': '' }, '配置已保存，以下会话继续使用原提示词。新建会话或压缩成功后才会更新。'),
+          h('div', { 'data-qq-note': '' }, '配置已保存，以下会话继续使用原提示词。可新建会话、压缩会话，或强制同步。'),
           syncDeferred ? h('button', { 'data-qq-btn': '', onClick: () => setSyncDeferred(false) }, `选择同步方式（${syncPending.length} 个会话）`) : h(React.Fragment, null,
             ...syncPending.map(item => h('label', { key: item.sessionId, 'data-qq-row': '' },
               h('input', { type: 'checkbox', checked: !syncExcluded.includes(item.sessionId), disabled: syncRunning,
@@ -360,6 +360,9 @@ window.__ModuleLoader__.load({
             h('div', { 'data-qq-row': '' },
               h('button', { 'data-qq-btn': '', disabled: busy === 'sync' || syncRunning || syncPending.every(item => syncExcluded.includes(item.sessionId)), onClick: () => syncPrompts('new') }, '创建新会话'),
               h('button', { 'data-qq-btn': '', disabled: busy === 'sync' || syncRunning || syncPending.every(item => syncExcluded.includes(item.sessionId)), onClick: () => syncPrompts('compact') }, '压缩会话'),
+              h('button', { 'data-qq-btn': '', disabled: busy === 'sync' || syncRunning || syncPending.every(item => syncExcluded.includes(item.sessionId)),
+                title: '保留当前会话和完整历史，直接更新 system 提示词，不等待压缩。可能降低后续请求的提示缓存命中率，增加费用和延迟；正在回复时会等本轮结束后执行。',
+                onClick: () => syncPrompts('force') }, '强制同步'),
               h('button', { 'data-qq-btn': '', onClick: () => setSyncDeferred(true) }, '稍后同步')))) : null,
         ...syncOperations.slice(-1).map(operation => h('div', { key: operation.id, 'data-qq-msg': '',
           'data-warn': operation.status === 'failed' ? '' : undefined, 'data-good': operation.status === 'done' ? '' : undefined },

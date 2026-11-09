@@ -38,6 +38,9 @@ export function createPromptSync({ ctx, home, config, manager, logger }) {
       applyOverrides(config, loadOverrides(ctx, logger), logger)
       resolvePersonaFile(config, logger, { home })
       if (operation.action === 'new') await manager.replaceSession(record)
+      else if (operation.action === 'force') {
+        await record.agent.ctx.get('systemPrompt').assemble({ ...assembleContextFor(record.agent), qqForceSystemSync: true })
+      }
       else {
         const compaction = ctx.get('compaction')
         if (!compaction?.compactNow) throw new Error('宿主未启用手动压缩服务')
@@ -88,7 +91,7 @@ export function createPromptSync({ ctx, home, config, manager, logger }) {
       return { pending: pending(), operations: operations().filter(item => !selfId() || item.selfId === selfId()).slice(-10) }
     },
     request(action, sessionIds) {
-      if (!['new', 'compact'].includes(action) || !Array.isArray(sessionIds) || !sessionIds.length ||
+      if (!['new', 'compact', 'force'].includes(action) || !Array.isArray(sessionIds) || !sessionIds.length ||
         sessionIds.some(id => typeof id !== 'string')) throw new Error('请选择会话和同步方式')
       const available = new Map(pending().map(item => [item.sessionId, item]))
       const sessions = [...new Set(sessionIds)].map(id => {

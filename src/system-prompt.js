@@ -100,7 +100,7 @@ export function installChatSystem({ agentCtx, config, meta, store }) {
           at: new Date().toISOString() }
         store.save(snapshot)
         creationRules = null
-      } else if (compactSeq > snapshot.compactSeq) {
+      } else if (context.qqForceSystemSync === true || compactSeq > snapshot.compactSeq) {
         snapshot = { ...snapshot, text: renderPrompt(current), rules: digest(assembled.variables.qq_chat_rules),
           compactSeq, at: new Date().toISOString() }
         store.save(snapshot)
