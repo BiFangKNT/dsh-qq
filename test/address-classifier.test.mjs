@@ -33,7 +33,7 @@ const input = id => ({ id: String(id), meta, body: `正文${id}`, source: { user
 function inboundHarness(t, gate, extra = {}) {
   const delivered = [], records = new Map()
   const config = { ...configOf(), groupMode: 'open', privateMode: 'open', replyToPrivate: true,
-    requireMention: true, groupWakeMs: 0, groupReplyGapMs: 0, mergeWindowMs: 0,
+    requireMention: false, groupWakeMs: 0, groupReplyGapMs: 0, mergeWindowMs: 0,
     chatLog: false, historyLimit: 0, ...extra.config }
   const manager = { selfId: '9',
     findByPeer: (scope, peerId) => records.get(`${scope}:${peerId}`),
@@ -182,7 +182,7 @@ test('第三次请求识别成功采用真实结果，不记录兜底', async t 
 
 test('兜底通过现有日志器落盘，关闭功能不会触发兜底放行', async t => {
   const root = await directory(t), llm = model('unknown', 'unknown', 'unknown')
-  const env = await createMockEnvironment({ root, llm, autoReply: false, config: configOf() })
+  const env = await createMockEnvironment({ root, llm, autoReply: false, config: { ...configOf(), requireMention: false } })
   t.after(() => env.close())
   env.emitMessage({ scope: 'group', peerId: 72002, text: '测试兜底放行', messageId: 12345 })
   await waitFor(() => env.snapshot().sessions.some(s => s.received.length === 1))
@@ -208,7 +208,7 @@ test('兜底通过现有日志器落盘，关闭功能不会触发兜底放行',
 
 test('完整消息入口：替代无@规则、保留媒体与来源、隔离判断过程、访问控制优先', async t => {
   const root = await directory(t), llm = model('no', 'no', 'yes')
-  const env = await createMockEnvironment({ root, llm, autoReply: false, config: { ...configOf(), debug: true } })
+  const env = await createMockEnvironment({ root, llm, autoReply: false, config: { ...configOf(), requireMention: false, debug: true } })
   t.after(() => env.close())
   env.emitMessage({ scope: 'group', peerId: 72001, text: '第一条背景', messageId: 1, image: true })
   env.emitMessage({ scope: 'group', peerId: 72001, text: '第二条背景', messageId: 2 })
@@ -291,7 +291,7 @@ for (const quoted of [false, true]) {
       holding = false
       await h.inbound(h.event(3, '最后一条普通补充'))
       await waitFor(() => h.delivered.length === 1)
-      assert.equal(h.delivered[0].source.qqMaySilent, addressedMaySilent)
+      assert.equal(h.delivered[0].source.qqMaySilent, quoted || addressedMaySilent)
       assert.match(textOf(h.delivered[0]), /第一条问题/)
       assert.match(textOf(h.delivered[0]), /最后一条普通补充/)
     })
@@ -315,12 +315,12 @@ test('重启后恢复的整批消息仍保留前面的点名要求', async t => 
 })
 
 for (const { text, config, maySilent } of [
-  { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'] }, maySilent: false },
+  { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'] }, maySilent: true },
   { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'], groupWakeNameMention: false }, maySilent: true },
-  { text: '请协助处理', config: { groupWakeKeywords: ['请协助'] }, maySilent: false },
+  { text: '请协助处理', config: { groupWakeKeywords: ['请协助'] }, maySilent: true },
   { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'], addressedMaySilent: true }, maySilent: true },
 ]) {
-  test(`分类器放行保留现有名字和关键词规则：${JSON.stringify(config)}`, async t => {
+  test(`旧名字和关键词设置不再强制回复：${JSON.stringify(config)}`, async t => {
     const home = await directory(t)
     const gate = createAddressClassifier({ home, config: configOf(), llm: model('yes'), logger })
     t.after(() => gate.stop())
@@ -331,7 +331,7 @@ for (const { text, config, maySilent } of [
   })
 }
 
-test('审批回答不等待分类，关闭后恢复旧触发，未授权与同类开关不被绕过', async t => {
+test('审批回答不等待分类，关闭后遵守当前触发，未授权与同类开关不被绕过', async t => {
   const home = await directory(t), config = configOf()
   let unblock
   const llm = { calls: 0, async *stream() {
@@ -355,6 +355,7 @@ test('审批回答不等待分类，关闭后恢复旧触发，未授权与同�
   unblock()
   await pending
   h.config.addressClassifierEnabled = false
+  h.config.requireMention = true
   await h.inbound(h.event(3))
   assert.equal(h.delivered.length, 0)
   await h.inbound(h.event(4, [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '你好' } }]))
@@ -373,7 +374,7 @@ test('主模型繁忙不阻塞逐消息分类，空闲后按顺序补齐', async
   const h = inboundHarness(t, gate)
   const record = await h.manager.obtain(meta)
   let finish
-  record.agent.whenIdle = () => new Promise(resolve => { finish = resolve })
+  record.agent.whenIdle = () => h.delivered.length ? new Promise(resolve => { finish = resolve }) : Promise.resolve()
   await h.inbound(h.event(1))
   await h.inbound(h.event(2))
   await h.inbound(h.event(3))
@@ -447,7 +448,7 @@ test('等待上一条判断时先保存新源事件，重启后完整恢复尚�
   assert.equal(restored.hasPending(), false)
 })
 
-test('判断过程中关闭开关，已排队的旧消息暂停，新的消息走原流程', async t => {
+test('判断过程中关闭开关，旧消息保留并随新触发一起交付', async t => {
   const home = await directory(t), config = configOf()
   let complete
   const llm = { async *stream() {
@@ -463,13 +464,83 @@ test('判断过程中关闭开关，已排队的旧消息暂停，新的消息�
   complete()
   await Promise.all([first, second])
   assert.equal(h.delivered.length, 0)
-  await h.inbound(h.event(3))
+  await h.inbound(h.event(3, [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '消息3' } }]))
   assert.equal(h.delivered.length, 1)
-  assert.match(textOf(h.delivered[0]), /消息3/)
-  config.addressClassifierEnabled = true
-  assert.deepEqual(gate.unprepared().map(item => item.id), ['2'])
-  assert.equal(gate.hasPending(), true)
+  assert.match(textOf(h.delivered[0]), /消息1[\s\S]*消息2[\s\S]*消息3/)
+  assert.deepEqual(gate.unprepared(), [])
+  assert.equal(gate.hasPending(), false)
 })
+
+test('关闭分类器后，正在判断和排队的私聊与新消息按顺序转普通处理', async t => {
+  const home = await directory(t), config = configOf()
+  let complete, calls = 0
+  const llm = { async *stream() {
+    if (++calls === 1) await new Promise(resolve => { complete = resolve })
+    yield { type: 'text-delta', index: 0, text: 'yes' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  } }
+  const gate = createAddressClassifier({ home, config, llm, logger })
+  const h = inboundHarness(t, gate)
+  const privateEvent = id => ({ ...h.event(id), message_type: 'private' })
+  const first = h.inbound(privateEvent(1))
+  await waitFor(() => typeof complete === 'function')
+  const second = h.inbound(privateEvent(2))
+  assert.deepEqual(gate.unprepared().map(item => item.id), ['2'])
+  config.addressClassifierEnabled = h.config.addressClassifierEnabled = false
+  const third = h.inbound(privateEvent(3))
+  complete()
+  await Promise.all([first, second, third])
+  assert.equal(h.delivered.length, 1)
+  assert.match(textOf(h.delivered[0]), /消息1[\s\S]*消息2[\s\S]*消息3/)
+  assert.deepEqual(gate.unprepared(), [])
+  assert.equal(gate.hasPending(), false)
+  assert.equal(calls, 1)
+  await h.inbound(privateEvent(4))
+  assert.equal(h.delivered.length, 2)
+  assert.match(textOf(h.delivered[1]), /消息4/)
+  assert.doesNotMatch(textOf(h.delivered[1]), /消息[123]/)
+})
+
+test('准备私聊正文时关闭分类器，保留消息并转普通处理', async t => {
+  const home = await directory(t), config = configOf(), llm = model('yes')
+  let complete
+  const gate = createAddressClassifier({ home, config, llm, logger })
+  const h = inboundHarness(t, gate, { client: { async call(method) {
+    if (method !== 'get_msg') return {}
+    return new Promise(resolve => { complete = resolve })
+  } } })
+  const pending = h.inbound({ ...h.event(1, [
+    { type: 'reply', data: { id: '88' } }, { type: 'text', data: { text: '消息1' } },
+  ]), message_type: 'private' })
+  await waitFor(() => typeof complete === 'function')
+  config.addressClassifierEnabled = h.config.addressClassifierEnabled = false
+  complete({ sender: { user_id: 9 }, message: '引用原文' })
+  await pending
+  assert.equal(h.delivered.length, 1)
+  assert.match(textOf(h.delivered[0]), /消息1/)
+  assert.equal(llm.calls.length, 0)
+  assert.equal(gate.hasPending(), false)
+})
+
+for (const newMessage of [false, true]) {
+  test(`分类器关闭时重启恢复私聊，新消息=${newMessage}，不重新分类旧消息`, async t => {
+    const home = await directory(t), config = configOf()
+    const privateMeta = { ...meta, scope: 'private', peerId: '10001' }
+    const gate = createAddressClassifier({ home, config, llm: model('no'), logger })
+    await gate.accept({ ...input(1), meta: privateMeta }, async () => false)
+    gate.stage({ meta: privateMeta, id: '2', source: { post_type: 'message', message_type: 'private',
+      self_id: 9, user_id: 10001, message_id: 2, message: '消息2', sender: { nickname: '甲' } } })
+    gate.stop()
+    config.addressClassifierEnabled = false
+    const llm = model('yes'), restored = createAddressClassifier({ home, config, llm, logger })
+    const h = inboundHarness(t, restored, { config: { addressClassifierEnabled: false } })
+    if (newMessage) await h.inbound({ ...h.event(3), message_type: 'private' })
+    await waitFor(() => h.delivered.length === 1)
+    assert.match(textOf(h.delivered[0]), newMessage ? /正文1[\s\S]*消息2[\s\S]*消息3/ : /正文1[\s\S]*消息2/)
+    assert.equal(llm.calls.length, 0)
+    assert.equal(restored.hasPending(), false)
+  })
+}
 
 test('重启后先收到新消息，也先恢复同聊天中的旧源事件', async t => {
   const home = await directory(t), config = configOf(), llm = model('no', 'yes')
@@ -498,22 +569,18 @@ test('共用原图片缓存：重启和关闭期间不误删待交付附件，�
   const image = [{ type: 'image', data: { url: 'base64://aW1hZ2U=' } }]
   await h.inbound(h.event(2, image))
   assert.equal((await readdir(cacheDir)).length, 202)
-  assert.deepEqual(restored.pendingAttachmentPaths(), new Set(paths))
-  const delivered = textOf(h.delivered[0])
-  assert.ok(delivered.includes(cacheDir))
-  assert.doesNotMatch(delivered, /分类消息附件/)
-  config.addressClassifierEnabled = true
-  // no 消息仍未放行；下一条 yes 将这些附件一起交给主模型。
-  const next = createAddressClassifier({ home, config, llm: model('yes'), logger })
-  await next.accept(input(3), async () => true)
-  next.stop()
-  restored.stop()
+  assert.ok(paths.every(path => restored.pendingAttachmentPaths().has(path)))
+  assert.equal(h.delivered.length, 0)
+  await h.inbound(h.event(3, [{ type: 'at', data: { qq: '9' } }, ...image]))
+  await waitFor(() => h.delivered.length === 1)
+  await h.manager.findByPeer('group', '70001').queue
+  assert.equal(restored.pendingAttachmentPaths().size, 0)
+  h.inbound.dispose()
   const afterDelivery = createAddressClassifier({ home, config, logger })
   const normal = inboundHarness(t, afterDelivery, { config: {
     addressClassifierEnabled: false, requireMention: false, imageCacheDir: cacheDir,
   } })
-  assert.equal(afterDelivery.pendingAttachmentPaths().size, 0)
-  await normal.inbound(normal.event(4, image))
+  await normal.inbound(normal.event(4, [{ type: 'at', data: { qq: '9' } }, ...image]))
   const names = await readdir(cacheDir)
   assert.equal(names.length, 200)
   assert.ok(names.filter(name => name.startsWith('qq-old-')).length < paths.length)
@@ -531,7 +598,7 @@ test('放行后本轮尚未结束时，旧消息里的图片仍可读取', async
   let finish
   const idle = new Promise(resolve => { finish = resolve })
   t.after(() => finish())
-  record.agent.whenIdle = () => idle
+  record.agent.whenIdle = () => h.delivered.length ? idle : Promise.resolve()
   const image = [{ type: 'image', data: { url: 'base64://aW1hZ2U=' } }]
   await h.inbound(h.event(2, image))
   assert.equal(h.delivered.length, 1)
@@ -541,7 +608,7 @@ test('放行后本轮尚未结束时，旧消息里的图片仍可读取', async
   await record.queue
   h.config.addressClassifierEnabled = false
   h.config.requireMention = false
-  await h.inbound(h.event(3, image))
+  await h.inbound(h.event(3, [{ type: 'at', data: { qq: '9' } }, ...image]))
   assert.equal((await readdir(cacheDir)).length, 200)
 })
 
@@ -594,7 +661,7 @@ test('no 不修改主会话；正式轮不再交付旧便签', async t => {
     swapSeed: record.swapSeed, lastSenderId: record.lastSenderId }, previous)
   assert.match(JSON.stringify(llm.calls[0].messages), /此前没有回应的群背景/)
   h.config.addressClassifierEnabled = false
-  await h.inbound(h.event(802))
+  await h.inbound(h.event(802, [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '正式处理' } }]))
   await record.queue
   assert.equal(h.delivered.length, 1)
   const body = textOf(h.delivered[0])

@@ -144,56 +144,22 @@ export const ConfigSchema = Schema.object({
     .description('前置分类超时毫秒；失败保留消息并记录错误，等待后续消息放行'),
   requireMention: Schema.boolean()
     .default(true)
-    .description('群聊里是否必须 @ 机器人才回复'),
-  groupFree: Schema.array(Schema.string())
-    .default([])
-    .description('免 @ 群号列表；仍受访问控制和回复间隔限制，允许选择不回复'),
+    .description('群聊必须通过协议消息段 @ 自身才启动主模型；分类器、引用和名字不能绕过'),
+  groupMentionOverrides: Schema.dict(Schema.boolean()).default({})
+    .description('按群覆盖必须 @：群号对应 true 为必须 @，false 为免 @；未列出的群沿用全局设置'),
+  groupMessageIntervalMs: Schema.number().min(1).default(30000)
+    .description('免 @ 且未开启分类器时，从第一条消息起等待多久合并处理（毫秒）；自身 @ 或触发词可提前处理'),
+  groupTriggerWords: Schema.array(Schema.string()).default([])
+    .description('免 @ 且未开启分类器时，当前消息文字包含任一触发词则立即处理；区分大小写，不匹配引用或历史，仍允许沉默'),
+  groupFree: Schema.array(Schema.string()).default([]).hidden()
+    .description('已退役：启动时迁移到 groupMentionOverrides'),
   groupImageBlock: Schema.array(Schema.string())
     .default([])
     .description('按群成员屏蔽图片：「群号:QQ号」屏蔽全部且不下载；「群号:QQ号:宽x高」仅屏蔽指定尺寸（如 123456789:10001:1920x1080，宽高精确匹配）。尺寸过滤需获取图片，命中后不保存，只保留文字和 [图片]，不向模型提供分辨率'),
-  groupWakeMs: Schema.number()
-    .default(60000)
-    .description('群里被 @ 过一次之后，多久内不用再 @ 也能接话，单位毫秒（0 = 关闭；2026-10-24 按群友的建议从 5 分钟改成 1 分钟）'),
-  groupWakeIdleMs: Schema.number()
-    .default(5000)
-    .description(
-      '保活窗的续期门槛，单位毫秒（0 = 关闭，退回「窗内每句都续期」）。窗里说话跟上一条隔得比这更久，窗就当场关掉——连着聊才续，一停顿就散场，2026-10-25 姐姐定的',
-    ),
-  groupRepliesPerWindow: Schema.number()
-    .default(0)
-    .description(
-      '一个保活窗口里最多回几次（默认 0 = 不限）。注意：它和「窗口内说话续期」会打架——窗口一直续着、额度却固定，聊几句就哑了。想防连珠炮请用 groupReplyGapMs',
-    ),
-  groupReplyGapMs: Schema.number()
-    .default(20000)
-    .description(
-      '群里两次回复之间至少隔多久，单位毫秒（默认 20000，0 = 不限）。间隔内的消息不丢，攒进 backlog，下一次回复时一起看见 —— 这就是「均匀地回应几次」的实现方式',
-    ),
-  // ── 群聊「非 @ 叫醒」（2026-10-25 姐姐提的：只会跟 @ 的人回复太死板）──
-  // 判定逻辑在 src/wake-trigger.js，学自 qq-bridge 的 evaluateWakeTriggerV2。
-  // 发布默认保守：叫名字、被问话都听得见（这两样不会乱插话），关键词表留空、概率关着。
-  // 想让它在群里活络一点，把 groupWakeKeywords 填上、groupWakeProbability 开成 0.05 就行。
-  groupWakeNameMention: Schema.boolean()
-    .default(true)
-    .description('群里叫机器人的名字（含 groupWakeNames 里的别名）就算在叫它，不用 @'),
-  groupWakeQuestion: Schema.boolean()
-    .default(true)
-    .description('明显在问它（「你行不行」「在不在」「理我」这类）就算在叫它，不用 @'),
-  groupWakeKeywords: Schema.array(Schema.string())
-    .default([])
-    .description('自定义关键词，消息里出现就算在叫它（如 白毛、DS）。短英文自动按词边界匹配，不会误伤 ADS'),
-  groupWakeProbability: Schema.number()
-    .default(0)
-    .description(
-      '没人叫它时，每条群消息有这么大的比例顺带看一眼（0 = 关闭；这种唤醒允许它看完不说话）',
-    ),
-  groupWakeNames: Schema.array(Schema.string())
-    .default([])
-    .description('额外的称呼，除了 QQ 昵称以外还算作叫它（如 小助手、助理）'),
   addressedMaySilent: Schema.boolean()
     .default(false)
     .description(
-      '群里被 @ / 被引用 / 被点名时，允许它看完不说话（默认 false = 被叫必须回）。开了以后消息照样进上下文，只是不再强制开口',
+      '群里被协议消息段 @ 时也允许沉默（默认 false）。只影响本轮是否允许沉默，不绕过群聊触发条件',
     ),
   replyToPrivate: Schema.boolean()
     .default(true)

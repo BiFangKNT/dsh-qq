@@ -32,8 +32,8 @@ t('默认（开关关）：群里被 @ 必须回', () => {
   assert.equal(mustReplyFor({ isGroup: true, atMe: true }), true)
 })
 
-t('默认（开关关）：被叫名字点名也必须回', () => {
-  assert.equal(mustReplyFor({ isGroup: true, addressedBy: 'name' }), true)
+t('旧名字点名不再改变回复要求', () => {
+  assert.equal(mustReplyFor({ isGroup: true, addressedBy: 'name' }), false)
 })
 
 t('开关开：群里被 @ 可以沉默', () => {

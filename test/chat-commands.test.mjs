@@ -16,7 +16,7 @@ async function harness(t, classified) {
   t.after(() => rm(root, { recursive: true, force: true }))
   const host = createMockDsh({ home: root })
   const config = Config({ cwd: root, isolateByPeer: false, ownerIds: [], chatLog: false,
-    privateMode: 'open', groupMode: 'open', requireMention: false, mergeWindowMs: 0,
+    privateMode: 'open', groupMode: 'open', requireMention: false, groupMessageIntervalMs: 1, mergeWindowMs: 0,
     groupWakeMs: 60000, groupWakeIdleMs: 0, groupReplyGapMs: 0, groupRepliesPerWindow: 0,
     addressClassifierEnabled: classified, addressClassifierProvider: 'test', addressClassifierModel: 'judge' })
   const manager = new SessionManager({ ctx: host.ctx, agents: host.ctx.agents, selfId: '10001', config, logger, home: root })
@@ -34,6 +34,7 @@ async function harness(t, classified) {
   const receive = async (message, scope = 'group') => {
     await inbound({ post_type: 'message', message_type: scope, self_id: 10001, user_id: 11001,
       group_id: 22001, message_id: ++id, sender: { user_id: 11001, nickname: '测试用户' }, message })
+    await new Promise(resolve => setTimeout(resolve, 15))
     const current = await manager.obtain({ scope, peerId: scope === 'group' ? '22001' : '11001', label: '测试聊天' })
     await current.queue
     return current
@@ -59,7 +60,7 @@ for (const classified of [false, true]) {
     assert.equal(h.calls.length, 0)
   })
 
-  test(`群聊未 @ 时不执行命令，保活和关闭必须 @ 均不例外（分类器=${classified}）`, async t => {
+  test(`群聊未 @ 时不执行命令，开启必须 @ 后只作背景（分类器=${classified}）`, async t => {
     const h = await harness(t, classified)
     await h.receive(mention(' /status'))
     const sent = h.sent.length, oldId = h.record.sessionId
@@ -71,7 +72,7 @@ for (const classified of [false, true]) {
     h.config.requireMention = true
     await h.receive('/status')
     assert.equal(h.sent.length, sent)
-    assert.equal(h.record.agent.received.length, 2)
+    assert.equal(h.record.agent.received.length, 1)
   })
 
   test(`私聊仍可直接执行命令（分类器=${classified}）`, async t => {

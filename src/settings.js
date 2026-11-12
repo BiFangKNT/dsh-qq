@@ -21,6 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync, readdirSy
 import { join, resolve, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
+import { migrateGroupSettings, retiredGroupSettings } from './group-trigger.js'
 
 /**
  * 设置页本地服务端口。
@@ -64,10 +65,10 @@ export const OVERRIDABLE = [
   'addressClassifierReasoningEffort',
   'addressClassifierTimeoutMs',
   'requireMention',
-  'groupFree',
+  'groupMentionOverrides',
+  'groupMessageIntervalMs',
+  'groupTriggerWords',
   'groupImageBlock',
-  'groupWakeMs',
-  'groupReplyGapMs',
   'groupMinGapMs',
   'rateLimitPerMin',
   'historyLimit',
@@ -197,6 +198,7 @@ export function loadOverrides(ctx, logger) {
 export function sanitizeOverrides(input, logger) {
   const out = {}
   if (!input || typeof input !== 'object') return out
+  input = migrateGroupSettings(input)
   for (const key of OVERRIDABLE) {
     if (!Object.prototype.hasOwnProperty.call(input, key)) continue
     const value = input[key]
@@ -229,6 +231,13 @@ export function saveOverrides(ctx, overrides, logger) {
 export function applyOverrides(config, overrides, logger) {
   const applied = []
   if (!config || !overrides) return applied
+  const base = migrateGroupSettings(config)
+  if (config.groupFree !== undefined) {
+    config.groupMentionOverrides = base.groupMentionOverrides
+    delete config.groupFree
+  }
+  for (const key of retiredGroupSettings) delete config[key]
+  overrides = migrateGroupSettings(overrides)
   for (const [key, value] of Object.entries(overrides)) {
     try {
       config[key] = value
@@ -432,7 +441,8 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
     if (req.method === 'POST' && path === '/api/dsh-qq/settings') {
       const body = await readJsonBody(req)
-      const patch = body?.patch && typeof body.patch === 'object' ? body.patch : body
+      const rawPatch = body?.patch && typeof body.patch === 'object' ? body.patch : body
+      const patch = rawPatch && typeof rawPatch === 'object' ? migrateGroupSettings(rawPatch) : rawPatch
       if (!patch || typeof patch !== 'object') return sendJson(res, 400, { ok: false, error: '要一个对象' })
       if (patch.acceptedDshVersions != null && (typeof patch.acceptedDshVersions !== 'object' || Array.isArray(patch.acceptedDshVersions) ||
         Object.values(patch.acceptedDshVersions).some(value => typeof value !== 'string'))) {
@@ -441,6 +451,19 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
       if (patch.addressClassifierEnabled != null && typeof patch.addressClassifierEnabled !== 'boolean') {
         return sendJson(res, 400, { ok: false, error: 'addressClassifierEnabled 必须为布尔值' })
+      }
+      if (patch.requireMention != null && typeof patch.requireMention !== 'boolean') {
+        return sendJson(res, 400, { ok: false, error: 'requireMention 必须为布尔值' })
+      }
+      if (patch.groupMentionOverrides != null && (typeof patch.groupMentionOverrides !== 'object' || Array.isArray(patch.groupMentionOverrides) ||
+        Object.entries(patch.groupMentionOverrides).some(([id, value]) => !/^\d+$/.test(id) || typeof value !== 'boolean'))) {
+        return sendJson(res, 400, { ok: false, error: '按群覆盖必须是群号到布尔值的对象' })
+      }
+      if (patch.groupMessageIntervalMs != null && (!Number.isFinite(patch.groupMessageIntervalMs) || patch.groupMessageIntervalMs < 1)) {
+        return sendJson(res, 400, { ok: false, error: '普通群聊处理间隔必须为正数' })
+      }
+      if (patch.groupTriggerWords != null && (!Array.isArray(patch.groupTriggerWords) || patch.groupTriggerWords.some(word => typeof word !== 'string'))) {
+        return sendJson(res, 400, { ok: false, error: '触发词必须是字符串数组' })
       }
       if (patch.addressClassifierTimeoutMs != null && (!Number.isFinite(patch.addressClassifierTimeoutMs) || patch.addressClassifierTimeoutMs <= 0)) {
         return sendJson(res, 400, { ok: false, error: 'addressClassifierTimeoutMs 必须为正数' })

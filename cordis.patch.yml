@@ -45,6 +45,9 @@
         memoryTimeoutMs: 30000
         memoryTaskTtlHours: 24
         requireMention: true
+        groupMentionOverrides: {}
+        groupMessageIntervalMs: 30000
+        groupTriggerWords: []
         replyToPrivate: true
         groupMode: open
         groupAllow: []

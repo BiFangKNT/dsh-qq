@@ -100,3 +100,20 @@ test('设置页提供 Agent 工具预设，保存 preset 并说明新会话生�
   await new Promise(resolve => setImmediate(resolve))
   assert.deepEqual(h.calls.find(call => call.url.endsWith('/settings')).body, { patch: { preset: 'images' } })
 })
+
+test('设置页可保存多个触发词并清空', async () => {
+  const h = await panel()
+  h.state[2].groupTriggerWords = ['小助手']
+  const tree = h.render()
+  const label = tree.find(element => element.children.includes('立即处理的触发词'))
+  assert.ok(label)
+  const input = tree.slice(tree.indexOf(label)).find(element => element.type === 'input')
+  input.props.onBlur({ target: { value: '小助手,来看看' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls.find(call => call.url.endsWith('/settings')).body,
+    { patch: { groupTriggerWords: ['小助手', '来看看'] } })
+  input.props.onBlur({ target: { value: '' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls.filter(call => call.url.endsWith('/settings')).at(-1).body,
+    { patch: { groupTriggerWords: [] } })
+})

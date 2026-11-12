@@ -19,20 +19,23 @@ function parseDecision(text) {
 }
 
 // 分类记录和待交付消息独立于主模型。只在主会话接纳 followup 后删除待交付正文。
-export function createAddressClassifier({ config, home, llm, logger }) {
-  const dir = join(home, 'address-classifier')
+export function createAddressClassifier({ config, home = '', llm, logger }) {
+  // 普通群消息与分类消息共用待交付记录；空 home 仅用于不落盘的测试实例。
+  const dir = home ? join(home, 'address-classifier') : ''
   const states = new Map(), queues = new Map(), controllers = new Set()
   let stopped = false, loaded = false
   const fileOf = key => join(dir, `${createHash('sha256').update(key).digest('hex')}.json`)
   function stateOf(meta) {
-    mkdirSync(dir, { recursive: true })
+    if (dir) mkdirSync(dir, { recursive: true })
     const key = JSON.stringify([meta.selfId, meta.scope, meta.peerId])
     if (!states.has(key)) {
       let state
-      try { state = JSON.parse(readFileSync(fileOf(key), 'utf8')) } catch (err) {
+      try {
+        state = dir ? JSON.parse(readFileSync(fileOf(key), 'utf8')) : null
+      } catch (err) {
         if (err.code !== 'ENOENT') throw err
-        state = { version: 1, sessionId: `qq-address-${randomUUID()}`, meta, pending: [], seen: [] }
       }
+      state ??= { version: 1, sessionId: `qq-address-${randomUUID()}`, meta, pending: [], seen: [] }
       const validPending = Array.isArray(state.pending) && state.pending.every(item => item &&
         typeof item.id === 'string' && (item.body === null || typeof item.body === 'string') && item.source &&
         typeof item.source === 'object' && (item.body === null || (item.message && typeof item.message.text === 'string')) &&
@@ -47,6 +50,7 @@ export function createAddressClassifier({ config, home, llm, logger }) {
     return { key, state: states.get(key) }
   }
   function save(key, state) {
+    if (!dir) return
     const file = fileOf(key), temp = `${file}.tmp`
     const fd = openSync(temp, 'w', 0o600)
     try { writeFileSync(fd, JSON.stringify(state)); fsyncSync(fd) } finally { closeSync(fd) }
@@ -54,6 +58,7 @@ export function createAddressClassifier({ config, home, llm, logger }) {
   }
   function load() {
     if (loaded) return
+    if (!dir) { loaded = true; return }
     mkdirSync(dir, { recursive: true })
     for (const name of readdirSync(dir).filter(name => name.endsWith('.json'))) {
       try {
@@ -126,9 +131,9 @@ export function createAddressClassifier({ config, home, llm, logger }) {
     })
     return { decision: 'yes', method: 'fallback', attempts: 3 }
   }
-  async function flush(key, state, deliver) {
-    if (stopped || !config.addressClassifierEnabled) return false
-    const end = state.pending.findLastIndex(item => item.decision === 'yes')
+  async function flush(key, state, deliver, classify = true) {
+    if (stopped || (classify && !config.addressClassifierEnabled)) return false
+    const end = classify ? state.pending.findLastIndex(item => item.decision === 'yes') : state.pending.length - 1
     if (end < 0) return false
     const batch = state.pending.slice(0, end + 1)
     if (batch.some(item => item.body === null)) return false
@@ -139,6 +144,12 @@ export function createAddressClassifier({ config, home, llm, logger }) {
     return true
   }
   return {
+    pendingChats() {
+      if (stopped) return []
+      load()
+      return [...states.values()].filter(state => state.pending.length).map(state => state.meta)
+    },
+    pending(meta) { return stateOf(meta).state.pending.slice() },
     list() {
       if (!config.addressClassifierEnabled || stopped) return []
       load()
@@ -163,7 +174,7 @@ export function createAddressClassifier({ config, home, llm, logger }) {
       return true
     },
     unprepared(meta) {
-      if (!config.addressClassifierEnabled || stopped) return []
+      if (stopped) return []
       if (!meta) load()
       const records = meta ? [stateOf(meta).state] : [...states.values()]
       return records.flatMap(state => state.pending.filter(item => item.body === null)
@@ -176,10 +187,11 @@ export function createAddressClassifier({ config, home, llm, logger }) {
       save(key, next)
       Object.assign(state, next)
     },
-    async accept(input, deliver) {
+    async accept(input, deliver, { classify = true } = {}) {
       const { key, state } = stateOf(input.meta)
       return serial(key, async () => {
-        if (stopped || !config.addressClassifierEnabled) return false
+        if (stopped) return false
+        classify = classify && Boolean(config.addressClassifierEnabled)
         const raw = state.pending.find(item => item.id === input.id && item.body === null)
         if (state.seen.includes(input.id) && !raw) return true
         const item = { id: input.id, body: input.body, source: input.source, message: input.message,
@@ -190,6 +202,7 @@ export function createAddressClassifier({ config, home, llm, logger }) {
         const staged = { ...state, meta: input.meta, pending, seen: [...new Set([...state.seen.slice(-4095), ...pendingIds])] }
         save(key, staged)
         Object.assign(state, staged)
+        if (!classify) return true
         const result = { ...item }
         try {
           const verdict = await judge(state, input)
@@ -207,10 +220,10 @@ export function createAddressClassifier({ config, home, llm, logger }) {
       })
     },
     // 调用方提供当前仍有权限的会话。重启后重新加载这些会话的记录。
-    resume(meta, deliver) {
+    resume(meta, deliver, { classify = true } = {}) {
       const { key, state } = stateOf(meta)
       if (queues.has(key)) return Promise.resolve(false)
-      return serial(key, () => flush(key, state, deliver))
+      return serial(key, () => flush(key, state, deliver, classify))
     },
     stop() {
       stopped = true

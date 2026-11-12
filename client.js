@@ -201,6 +201,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('')
       const [msg, setMsg] = useState(null)
       const [draft, setDraft] = useState({})
+      const [groupIdDraft, setGroupIdDraft] = useState('')
       const [persona, setPersona] = useState(null)
       const [syncDeferred, setSyncDeferred] = useState(false)
       const [syncExcluded, setSyncExcluded] = useState([])
@@ -477,24 +478,41 @@ window.__ModuleLoader__.load({
           textField('memoryTaskTtlHours', '无明确期限事项的核实间隔（小时）', { type: 'number', hint: '默认 24；无新证据则收起待核实，不等于认定完成。' })),
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '先判断是不是在和我说话'),
-          boolField('addressClassifierEnabled', '启用前置判断（群聊与私聊）', '独立会话判断；跳过的消息保留，下次放行时一起提供。开启后由它替代群聊的 @、名字和概率判断，访问控制与作息仍有效。'),
+          boolField('addressClassifierEnabled', '启用前置判断（群聊与私聊）', '独立会话逐条判断；跳过的消息保留。群聊要求 @ 时仍须结构化 @ 且判断放行；不要求 @ 时由判断结果决定何时处理。关闭后不产生判断请求。'),
           textField('addressClassifierProvider', '判断模型的 provider', { hint: '填写宿主注册的 provider 名称；留空使用插件明确配置的 provider。' }),
           textField('addressClassifierModel', '判断模型', { hint: '填写模型名；留空使用插件明确配置的 model。未明确配置模型时会记录错误并保留消息。' }),
           textField('addressClassifierReasoningEffort', '推理强度', { hint: '默认 low，可以填写模型支持的其他值。' }),
           textField('addressClassifierTimeoutMs', '判断最长等待（毫秒）', { type: 'number', hint: '默认 30000。失败时保留消息，后续放行时一起交付。' })),
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '群里怎么说话'),
-          listField('groupFree', '免 @ 群', { hint: '群号，用逗号分隔；仍受访问控制和回复间隔限制。' }),
-          listField('groupImageBlock', '屏蔽成员图片', { hint: '填「群号:QQ号」屏蔽全部图片；填「群号:QQ号:宽x高」只屏蔽指定尺寸，如 123456789:10001:1920x1080。多条用逗号分隔，宽高精确匹配。尺寸过滤会获取图片进行检查，命中后不保存；仅保留文字和 [图片]，不向 AI 提供分辨率。' }),
-          boolField('requireMention', '必须 @ 才接话', '关掉的话，群里每句话它都想接——除非你就是要这个效果。'),
-          textField('groupWakeMs', '被 @ 之后多久内不用再 @（毫秒）', {
-            hint: '默认 60000（1 分钟）。窗口按「群 + 人」算：只有当初 @ 它的那个人能续，别人说话不蹭。',
-            type: 'number',
+          boolField('requireMention', '必须 @ 才接话', '默认开启。必须使用 QQ 的 @ 功能选择机器人；引用、名字和分类器结果不能代替。下方可按群覆盖。'),
+          h('div', { 'data-qq-col': '' },
+            h('div', { 'data-qq-label': '' }, '按群覆盖必须 @'),
+            ...Object.entries(val.groupMentionOverrides ?? {}).map(([id, required]) => h('div', { key: id, 'data-qq-row': '' },
+              h('span', null, id),
+              h('select', { 'data-qq-input': '', 'aria-label': id + ' 的接话条件', value: String(required),
+                onChange: e => patch({ groupMentionOverrides: { ...val.groupMentionOverrides, [id]: e.target.value === 'true' } }, '按群覆盖') },
+              h('option', { value: 'true' }, '必须 @'), h('option', { value: 'false' }, '不用 @')),
+              h('button', { 'data-qq-btn': '', type: 'button', onClick: () => {
+                const next = { ...val.groupMentionOverrides }; delete next[id]
+                patch({ groupMentionOverrides: next }, '恢复群聊默认')
+              } }, '恢复默认'))),
+            h('div', { 'data-qq-row': '' },
+              h('input', { 'data-qq-input': '', 'aria-label': '新增覆盖的群号', placeholder: '群号', value: groupIdDraft,
+                onChange: e => setGroupIdDraft(e.target.value) }),
+              h('button', { 'data-qq-btn': '', type: 'button', onClick: () => {
+                const id = groupIdDraft.trim()
+                if (!/^\d+$/.test(id)) { setMsg({ text: '请输入有效群号', tone: 'warn' }); return }
+                patch({ groupMentionOverrides: { ...val.groupMentionOverrides, [id]: val.requireMention !== false } }, '新增群覆盖')
+                setGroupIdDraft('')
+              } }, '添加')),
+            h('div', { 'data-qq-note': '' }, '未列出的群沿用上方设置。旧免 @ 群名单已迁入这里；群访问控制仍生效。')),
+          textField('groupMessageIntervalMs', '普通群聊处理间隔（毫秒）', {
+            type: 'number', hint: '默认 30000。仅用于不用 @ 且关闭分类器的群；从第一条消息开始等待，后续消息不延长，自身 @ 或触发词可提前处理。',
           }),
-          textField('groupReplyGapMs', '同一个人两次回复至少隔多久（毫秒）', {
-            hint: '默认 20000。中间来的消息不丢，攒着下次一起看见——这就是「均匀地回几次」。0 = 不限。',
-            type: 'number',
-          }),
+          listField('groupTriggerWords', '立即处理的触发词', { hint: '默认空，用逗号分隔。仅用于不用 @ 且关闭分类器的群；文字包含任一词即提前处理，区分大小写，不匹配引用、历史或 @他人的昵称。自身 @ 始终可提前处理；触发词不强制回复。' }),
+          boolField('addressedMaySilent', '被 @ 也允许沉默', '开启后，群聊被 @ 的这一轮也可选择不回复；不改变触发条件。'),
+          listField('groupImageBlock', '屏蔽成员图片', { hint: '按群号:QQ号屏蔽全部图片；追加:宽x高仅屏蔽指定尺寸。' }),
           textField('groupMinGapMs', '群里两条消息之间至少隔多久（毫秒）', {
             hint: '默认 4000，防风控。',
             type: 'number',

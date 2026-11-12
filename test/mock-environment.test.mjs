@@ -57,9 +57,14 @@ test('真实插件可用：默认回复、预设工具、消息去重和宿主�
   assert.equal(response.status, 200)
   const settings = await response.json()
   assert.ok(settings.meta.overridable.includes('groupImageBlock'))
-  const save = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', body: JSON.stringify({ patch: { groupFree: ['88888'] } }) })
+  for (const groupTriggerWords of ['小助手', [1]]) {
+    const invalid = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', body: JSON.stringify({ patch: { groupTriggerWords } }) })
+    assert.equal(invalid.status, 400)
+  }
+  const save = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', body: JSON.stringify({ patch: { groupMentionOverrides: { '88888': false }, groupMessageIntervalMs: 30000, groupTriggerWords: ['小助手'] } }) })
   assert.equal(save.status, 200)
-  env.emitMessage({ scope: 'group', peerId: 88888, text: '免 @' })
+  assert.deepEqual((await save.json()).values.groupTriggerWords, ['小助手'])
+  env.emitMessage({ scope: 'group', peerId: 88888, text: '小助手，免 @立即处理' })
   await waitFor(() => sent(env).length === 3)
   assert.match(JSON.stringify(sent(env).at(-1)), /88888/)
 })
@@ -86,7 +91,7 @@ test('真实工具调用、预设文件读写和发图下载夹具，失败不�
 })
 
 test('屏蔽图片仍让模型知道发过图，不请求图片文件', async t => {
-  const env = await setup(t, { config: { groupFree: ['88888'], groupImageBlock: ['88888:11001'] } })
+  const env = await setup(t, { config: { groupMentionOverrides: { '88888': false }, groupMessageIntervalMs: 1, groupImageBlock: ['88888:11001'] } })
   env.emitMessage({ scope: 'group', peerId: 88888, text: '', image: true })
   await waitFor(() => sent(env).length === 1)
   const agent = [...env.host.agents.values()][0]

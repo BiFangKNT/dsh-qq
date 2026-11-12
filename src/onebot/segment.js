@@ -75,6 +75,11 @@ function toSegments(message) {
   return []
 }
 
+/** 只读取消息自带的文字，不把 @ 昵称、附件或引用元数据当成正文。 */
+export function readPlainText(message) {
+  return toSegments(message).map(seg => seg?.type === 'text' ? String(seg.data?.text ?? '') : '\n').join('')
+}
+
 /** 命令只读取文本及前置的自身 @；昵称文本、其他 @ 和媒体均不能充当命令前缀。 */
 export function readCommandText(message, { selfId, requireMention = false } = {}) {
   const self = String(selfId ?? '')

@@ -2,7 +2,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage, readCommandText } from './onebot/segment.js'
 import { rememberFaces, facesCount } from './faces.js'
 import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT } from './prompts.js'
-import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
+import { createAddressClassifier } from './address-classifier.js'
+import { migrateGroupSettings, requiresGroupMention, groupMessageInterval, matchesGroupTrigger } from './group-trigger.js'
 import { doorLine } from './door.js'
 import { resolvePeerWorkspace } from './workspace.js'
 import { listOf } from './config.js'
@@ -92,26 +93,6 @@ function commandOf(message, selfId, isGroup) {
   return /^[/#](reset|new|status|cwd|help)$/.test(text) ? text : ''
 }
 
-/**
- * 「@ 之后保活」：有人在群里 @ 过它一次之后，接下来一小段时间里不用每条都 @ 也能接话。
- * 真人在群里也是这样的——被点到名之后，后续那几句话自然会跟着说。
- *
- * 2026-10-24：窗口键从「群号」改成「群号 + 人」。原来按群记，只要有人 @ 一次，
- * 45 秒内群里任何人说话都算数——别人 @ 另一个人、或者跟别人聊天，它也会冲上去接。
- * QLark（src/qlark/chat/keepalive.py）把窗口键做成 (会话, 用户) 元组，注释写得很清楚：
- * 「别人说话既不能续期，也不能蹭用你的窗口」。咱们照抄这一条。
- *
- * 纯内存 Map，进程重启就清空，不落盘。
- */
-const groupWakeUntil = new Map()
-
-/** 每个保活窗口里已经回了几次（键同窗口：群:人）。
- *  用户 2026-10-24 转述群友的设计：「@ 之后保活一分钟，发消息刷新保活时间，
- *  群友在限定时间内均匀的拆成固定回几次」—— 光有窗口没有次数上限，就是一被点亮就
- *  每句都插嘴；次数上限让它「均匀地回应几次」而不是复读机。
- *  注意：这条和「窗口内说话续期」会打架（窗口一直续着、额度却固定），默认 0 = 不限。 */
-const groupReplies = new Map()
-
 /** 同类机器人「连着聊」的计数（键：对面那个号）。
  *  2026-10-29 姐姐要「能私聊，也能停」：私聊里两只鲸鲸互相回话没有天然终点——
  *  A 回 B，B 又回 A，每轮都算「有人跟我说话」，出站限流只能把它压慢、停不下来。
@@ -122,19 +103,6 @@ const peerChatTurns = new Map()
 /** 连聊计数的有效期：半小时没动静就重新算。半夜聊两句，别让白天的账还挂着。 */
 const PEER_CHAT_TURN_WINDOW_MS = 30 * 60_000
 
-/** 每个「群:人」上次回复的时间。用来做「均匀回应」：两条回复之间至少隔 groupReplyGapMs，
- *  间隔里来的消息不丢，攒进 backlog 等下一次一起看见 —— 比「一个窗口只准回 N 次」温和，
- *  也不会跟「窗口内说话续期」打架（用户 2026-10-24 发现的冲突）。 */
-const groupLastReplyAt = new Map()
-
-/** 距上次回复够不够久。0/负数 = 不限，永远够。 */
-function gapReady(config, groupId, userId) {
-  const gap = Number(config.groupReplyGapMs) || 0
-  if (gap <= 0) return true
-  const last = groupLastReplyAt.get(wakeKey(groupId, userId)) ?? 0
-  return Date.now() - last >= gap
-}
-
 /** 这条消息是不是「同类」（群里另一个机器人）发的。
  *  两条判断：`sender.is_robot`（NapCat 对群机器人会带，但不是每只都带），
  *  以及配置里的 `peerBots` 名单（QQ 号）——名单最可靠，兜底。 */
@@ -143,78 +111,6 @@ function isPeerBot(config, senderId, event) {
   if (!id) return false
   if ((config?.peerBots ?? []).map(String).includes(id)) return true
   return event?.sender?.is_robot === true
-}
-
-/** 保活窗口的键：群 + 人。别人 @ 我，不该给群里其他人开窗。 */
-function wakeKey(groupId, userId) {
-  return `${groupId}:${userId}`
-}
-
-function wakeAlive(groupId, userId) {
-  const until = groupWakeUntil.get(wakeKey(groupId, userId)) ?? 0
-  return until > Date.now()
-}
-
-/** 每个人上一条消息的时间：判断「连着聊」还是「人已经走开了」。
- *  2026-10-25 姐姐定的：窗里说话跟上一条隔得比 groupWakeIdleMs 久，窗就当场关 ——
- *  不然群里隔三四十秒插一句也会一直续着，「被 @ 了就停不下来」。 */
-const groupLastMsgAt = new Map()
-
-/** 距这个人上一条消息超过续期门槛了没（0 = 关掉这个门槛，永远不算超）。 */
-function wakeIdleExceeded(config, groupId, userId) {
-  const idleMs = Number(config.groupWakeIdleMs) || 0
-  if (idleMs <= 0) return false
-  const last = groupLastMsgAt.get(wakeKey(groupId, userId)) ?? 0
-  if (!last) return false
-  return Date.now() - last > idleMs
-}
-
-/** 当场关窗：人已经停下来了，别再等着接下一句。 */
-function closeWake(groupId, userId) {
-  const key = wakeKey(groupId, userId)
-  groupWakeUntil.delete(key)
-  groupReplies.delete(key)
-}
-
-function refreshWake(config, groupId, userId) {
-  const key = wakeKey(groupId, userId)
-  const ms = Number(config.groupWakeMs) || 0
-  if (ms <= 0) {
-    groupWakeUntil.delete(key)
-    groupReplies.delete(key)
-    return
-  }
-  const now = Date.now()
-  const isNewWindow = (groupWakeUntil.get(key) ?? 0) <= now
-  if (isNewWindow) groupReplies.set(key, { startedAt: now, count: 0 })
-  groupWakeUntil.set(key, now + ms)
-  // 顺手清掉过期的，别让 Map 越攒越大
-  if (groupWakeUntil.size > 200) {
-    for (const [k, v] of groupWakeUntil) {
-      if (v <= now) {
-        groupWakeUntil.delete(k)
-        groupReplies.delete(k)
-      }
-    }
-  }
-}
-
-/** 这个窗口里还剩几次回复额度（0 = 不限）。用户 2026-10-24 转述群友方案：
- *  「@ 之后保活一分钟…群友在限定时间内均匀的拆成固定回几次」—— 别一被点亮就连珠炮。 */
-function repliesLeft(config, groupId, userId) {
-  const max = Number(config.groupRepliesPerWindow) || 0
-  if (max <= 0) return Infinity
-  const rs = groupReplies.get(wakeKey(groupId, userId))
-  if (!rs) return max
-  if ((groupWakeUntil.get(wakeKey(groupId, userId)) ?? 0) <= Date.now()) return max
-  return Math.max(0, max - rs.count)
-}
-
-function countReply(groupId, userId) {
-  const key = wakeKey(groupId, userId)
-  const rs = groupReplies.get(key)
-  if (rs) rs.count += 1
-  else groupReplies.set(key, { startedAt: Date.now(), count: 1 })
 }
 
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
@@ -258,21 +154,18 @@ function historyTime(d = new Date()) {
  * 这一轮「必须回」还是「可以沉默」。
  *
  * - 私聊：默认回应。
- * - 群里被 @ / 被引用 / 被叫名字点名（addressedBy）：默认必须回；
+ * - 群里被协议消息段 @：默认回应；
  *   `addressedMaySilent` 打开后，被叫也允许沉默。
- * - 群里没被叫（概率唤醒 / 保活窗路过）：可以沉默。
+ * - 其他群消息只作为背景，或在免 @ 模式下定时处理并允许沉默。
  * - 补发和分类器放行不改变原消息的回复要求。
  */
 export function mustReplyFor({
   isGroup,
   atMe = false,
-  quotedMe = false,
-  addressedBy = null,
   addressedMaySilent = false,
 } = {}) {
   if (!isGroup) return true
-  const addressed = Boolean(atMe || quotedMe || addressedBy)
-  return addressed && addressedMaySilent !== true
+  return atMe && addressedMaySilent !== true
 }
 
 // 信封用 ⟨⟩：普通输入法打不出来，只可能是插件拼的。
@@ -474,6 +367,8 @@ async function pruneCache(cacheDir, protectedPaths, keepFiles = 200) {
  * 触发规则全部走配置，插件自己不做「猜你还想聊」这种自作聪明的事。
  */
 export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, addressClassifier }) {
+  if (listOf(config.groupFree).length) config.groupMentionOverrides = migrateGroupSettings(config).groupMentionOverrides
+  addressClassifier ??= createAddressClassifier({ config, logger })
   // 没配 imageCacheDir 时落在工作目录下的「图片缓存」；每个会话再各占一层子目录（见下）
   const baseCacheDir =
     String(config.imageCacheDir ?? '').trim() ||
@@ -486,8 +381,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
   // 连发合并：同一个 peer 的几条消息攒在一起回。
   // 键是「谁发的」，值是正在等的这一批（bodies 是各自已经拼好的正文）。
   const mergeBatches = new Map()
-  // 被回复间隔压住的消息，到点重放；卸载时与合并定时器一起取消。
-  const gapReplayTimers = new Map()
+  const groupTimers = new Map()
+  let triggerVersion = null
   const ingressQueues = new Map()
   const preparingSources = new Set()
   const preparingAttachments = new Set()
@@ -506,6 +401,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
           onRejected?.()
           return
         }
+        if (isGroup) await record.agent.whenIdle?.()
+        if (disposed || (canDeliver && !canDeliver())) { onRejected?.(); return }
         const text = typeof body === 'function' ? body() : body
         const message = createUserMessage({
           content: [{ type: 'text', text }],
@@ -534,15 +431,16 @@ export function createInbound({ config, manager, logger, client, send, approval,
         })
 
         if (outcome === 'timeout') {
-          // 只放开队列，不打断 Agent —— 它跑完的回复照样会从 outbound 发出去
+          // 不打断 Agent；群聊继续等本轮结束，避免下一批与它重叠。
           const seconds = Math.round((Date.now() - startedAt) / 1000)
-          logger.warn(`[dsh-qq] ${label} 本轮已跑 ${seconds}s 仍未结束，先放开队列`)
+          logger.warn(`[dsh-qq] ${label} 本轮已跑 ${seconds}s 仍未结束，${isGroup ? '继续等待本轮结束' : '先放开队列'}`)
           if (typeof send === 'function') {
             await send(
               record,
               `（这轮我还在弄，已经跑了 ${seconds} 秒，你先忙别的，好了我叫你）`,
             ).catch(() => {})
           }
+          if (isGroup) await record.agent.whenIdle?.()
         }
       } catch (err) {
         onRejected?.(err)
@@ -574,29 +472,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
   const processEvent = async (event, attachments) => {
     if (disposed) return
     if (event?.post_type !== 'message') return
-    // 补回：这条是「被间隔压住、到点自己醒过来」的重放，不是新消息。
-    // 重放要跳过所有前置闸（@/保活/间隔/额度），否则又会被压一轮，永远出不来。
-    const isReplay = event?.__replay === true
-
-    // 到点自己醒一次：间隔一过就把压住的那句补回去（否则就是永久沉默）。
-    const scheduleGapReplay = (evt, gid, uid) => {
-      const key = wakeKey(gid, uid)
-      const gap = Number(config.groupReplyGapMs) || 0
-      const last = groupLastReplyAt.get(key) ?? 0
-      const wait = Math.max(800, gap - (Date.now() - last) + 400)
-      const prev = gapReplayTimers.get(key)
-      if (prev) clearTimeout(prev)
-      const timer = setTimeout(() => {
-        gapReplayTimers.delete(key)
-        // 这期间要是有新消息把 backlog 取走了，重放自己会 no-op（拿不到正文）。
-        Promise.resolve(onEvent({ ...evt, __replay: true })).catch((err) => {
-          logger.debug?.(`[dsh-qq] 补回被压住的消息失败: ${err?.message || err}`)
-        })
-      }, wait)
-      timer.unref?.()
-      gapReplayTimers.set(key, timer)
-    }
-
     const selfId = String(event.self_id ?? manager.selfId ?? '')
     if (event.self_name) manager.selfName = String(event.self_name)
     if (event.user_id !== undefined && String(event.user_id) === selfId) return
@@ -605,6 +480,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const scope = isGroup ? 'group' : 'private'
     const peerId = String(isGroup ? event.group_id : event.user_id)
     const classified = Boolean(config.addressClassifierEnabled && addressClassifier)
+    const queued = classified || isGroup || Boolean(event.__classifierId)
     const sender = event.sender ?? {}
     const senderName = sender.card || sender.nickname || peerId
     const label = isGroup ? `群 ${peerId}` : `私聊 ${senderName}(${peerId})`
@@ -615,7 +491,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (peerBot) ownerInfo.isBot = true
 
     const allowed = isGroup ? allowGroup(config, peerId) : allowPrivate(config, peerId)
-    if (!isReplay && !event.__classifierRecovery && event.message_id !== undefined && event.message_id !== null) {
+    if (!event.__classifierRecovery && event.message_id !== undefined && event.message_id !== null) {
       const now = Date.now()
       for (const [key, expires] of seenMessages) {
         if (expires <= now) seenMessages.delete(key)
@@ -653,7 +529,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 聊天流水：跳过的消息也先记下来——「它怎么突然接不上话」全靠这段回查。
     // 只落盘、不参与投递，写失败也不影响聊天。
     // 白名单外的落到 `聊天记录/_未开通/`（2026-10-26 姐姐定的）：留痕，不投递。
-    if (config.chatLog !== false && !isReplay && !event.__classifierRecovery) {
+    if (config.chatLog !== false && !event.__classifierRecovery) {
       const logDir = resolvePeerWorkspace(config, scope, peerId)
       const who = `${senderName}(${event.user_id})`
       appendChatLog(
@@ -670,10 +546,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }
 
     const senderId = String(event.user_id ?? '')
-
-    // 先用「上一条的时间」判断停没停，再把这条记进去 —— 连着聊才续期。
-    const idleExceeded = isGroup && wakeIdleExceeded(config, peerId, senderId)
-    if (isGroup) groupLastMsgAt.set(wakeKey(peerId, senderId), Date.now())
 
     // ── 引用：先查一次「这句在接谁的话」。
     // 一次 get_msg 同时干两件事：判断这条是不是在跟我说话（下面），以及给正文加引用提示（再下面）。
@@ -701,19 +573,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
         quoteInfo = { userId: '', name: '', text: '', ok: false }
       }
     }
-    // 引用的是我自己 → 等于在叫我（qq-bridge 的 quoteTargetIsSelf）
-    const quotedMe = Boolean(quoteInfo?.ok && quoteInfo.userId && quoteInfo.userId === selfId)
-
-    // 补回时：这一句自己还躺在 backlog 里，先摘掉，免得同一句在上下文里出现两次。
-    // 按「结尾正文」匹配，不按整行 —— 行首带秒级时间戳，重放时早就对不上了。
-    if (isReplay) {
-      const myText = `] ${info.text || '[图片]'}`
-      const arr = drainBacklog(peerId)
-      const idx = arr.findLastIndex((line) => line.endsWith(myText))
-      if (idx >= 0) arr.splice(idx, 1)
-      for (const line of arr) keepBacklog(peerId, line)
-    }
-
     // 同类机器人（群里另一个机器人）：开关关着就完全不接，连 @ 也不接。
     // 用户 2026-10-24：「吵架功能单独做个开关，这个开关控制它要不要和同类聊天，以及对比较冲的同类回怼」。
     // 关着的时候它说什么都跟我们无关 —— 同类之间的帐先不算。
@@ -728,10 +587,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 为什么要这一层：私聊里两只鲸鲸互相回话没有天然终点——A 回 B，B 又回 A，
     // 每轮都算「有人跟我说话」，出站限流只能把它压慢。真人一开口就清零（下面的 else），
     // 所以有人在场时不受这个上限管，只有它们自己转圈时才刹车。
-    if (peerBot && !classified) {
-      // 冷启动补历史（isReplay）不算连聊：那不是它们在聊，是我们在补记录，
-      // 记进轮次会把「补三条」误算成「连聊三轮」，第 5 条就被拦掉。
-      const maxTurns = isReplay ? 0 : Number(config.peerChatMaxTurns) || 0
+    if (peerBot && !queued) {
+      const maxTurns = Number(config.peerChatMaxTurns) || 0
       if (maxTurns > 0) {
         const now = Date.now()
         const prev = peerChatTurns.get(peerId)
@@ -748,101 +605,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
       peerChatTurns.clear()
     }
 
-    // 群聊：默认要 @ 才理；@ 过一次之后有一小段「保活期」，不用再 @
-    // addressedBy：没 @ 但被「叫名字 / 点名提问 / 关键词」叫住的理由（2026-10-25）。
-    // 这种算「有人冲它来了」，必须回，不给 [SILENT] 出口。
-    const freeGroup = isGroup && listOf(config.groupFree).includes(peerId)
-    let addressedBy = isReplay ? event.__addressedBy ?? null : null
-    if (!classified && isGroup && config.requireMention && !freeGroup && !info.atMe && !isReplay) {
-      // 没 @ 我、却 @ 了别人（包括群里另一个机器人）：那明显不是跟我说话，
-      // 保活期也不算 —— 否则别人一句「@ 那个谁 来帮我测一下」它也会冲上去接。
-      if (info.atNames.length > 0) {
-        logger.debug?.(`[dsh-qq] 群 ${peerId} @ 的是别人，跳过`)
-        keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-        return
-      }
-
-      // ── 非 @ 叫醒（学 qq-bridge 的 evaluateWakeTriggerV2）──
-      // 「@」只是叫人的一种方式：群里叫名字、点名问它、催一句「在不在」，
-      // 都是在叫它，不该因为少个 @ 就装没听见。
-      // 只拿本条消息自己的文字判，不拿带引用原文的拼接文本 —— 否则引用一条
-      // 恰好提到昵称的旧消息，也会被当成在叫它。
-      addressedBy = evaluateWakeTrigger({
-        plainText: info.text || '',
-        atMe: info.atMe,
-        quotedMe,
-        names: [manager.selfName, event?.self_name, ...(config.groupWakeNames ?? [])].filter(Boolean),
-        triggers: {
-          nameMention: config.groupWakeNameMention,
-          question: config.groupWakeQuestion,
-          keywords: config.groupWakeKeywords,
-        },
-      })
-      if (addressedBy) {
-        logger.debug?.(`[dsh-qq] 群 ${peerId} 没 @ 但命中 ${addressedBy}，按叫我处理`)
-      }
-
-      // 保活窗口只认「当初 @ 我的那个人」：别人说话既不能续期、也不能蹭用。
-      // 2026-10-24 取消了「主人永久免 @」—— 试完反馈「只回我确实看着怪」：
-      // 群友要 @ 才理，主人却随时都接，一是不公平，二是「唤醒一次后超时也没停」。
-      // 现在主人也走窗口，只是窗口是 60 秒（群友提的方案），窗口内说话照样续期。
-      if (!quotedMe && !addressedBy) {
-        // 停太久：窗里也当没窗了 —— 「5 秒内没接话就关」（2026-10-25 姐姐定）。
-        if (idleExceeded) {
-          closeWake(peerId, senderId)
-          logger.debug?.(`[dsh-qq] 群 ${peerId} 保活窗里停太久（>${config.groupWakeIdleMs}ms），窗关掉，跳过`)
-          keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-          return
-        }
-        if (!wakeAlive(peerId, senderId)) {
-          // 概率唤醒：没人叫它，但有很小概率顺带看一眼。
-          // 这种「路过」不强制回 —— 下面 mustReply 会是 false，自动带上 [SILENT] 出口。
-          if (rollWakeProbability(config.groupWakeProbability)) {
-            logger.debug?.(
-              `[dsh-qq] 群 ${peerId} 概率唤醒（${config.groupWakeProbability}），顺带看一眼`,
-            )
-          } else {
-            logger.debug?.(`[dsh-qq] 群 ${peerId} 未 @ 且不在保活期，跳过`)
-            // 这句没叫我们，但它是上下文的一部分：下一句很可能就在接它。
-            keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-            return
-          }
-        }
-      }
-      if (quotedMe) logger.debug?.(`[dsh-qq] 群 ${peerId} 引用了我，按叫我处理`)
-    }
-    // 均匀回应：距上次回复太近就先攒着（消息进 backlog，下次一起看见），别连珠炮。
-    // 但「攒着」得有兜底：间隔一过就自己醒一次，不然这句就永远躺在 backlog 里。
-    if (!classified && isGroup && !isReplay && !gapReady(config, peerId, senderId)) {
-      logger.debug?.(
-        `[dsh-qq] 群 ${peerId} 距上次回复不到 ${config.groupReplyGapMs}ms，先攒着（到点补回）`,
-      )
-      keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-      scheduleGapReplay({ ...event, __addressedBy: addressedBy }, peerId, senderId)
-      return
-    }
-
-    // 窗口内回复额度（可选，默认 0 = 不限；和「续期」一起用要注意，别设太小）
-    if (!classified && isGroup && !isReplay && !freeGroup && repliesLeft(config, peerId, senderId) <= 0) {
-      logger.debug?.(
-        `[dsh-qq] 群 ${peerId} 这个保活窗口已经回过 ${config.groupRepliesPerWindow} 次，先歇着`,
-      )
-      keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-      return
-    }
-
-    // 通过额度检查后才续期，耗尽额度的消息不能无限延长旧窗口。
-    // 窗口续期（QLark 的 touch()）：@ 我、引用我、或者本来就在窗口里接着说话，都续上。
-    // 但只有窗口的「正主」能续 —— 别人说话不续期也不蹭用，这条一松就变成群里谁说话都接。
-    if (!classified && isGroup && (info.atMe || quotedMe || addressedBy || wakeAlive(peerId, senderId))) {
-      refreshWake(config, peerId, senderId)
-    }
-
     let record = await manager.obtain({ scope, peerId, label })
     // 有人说话了：冷场计时要清零，主动说话那层也知道「这会儿不缺人」
-    if (!classified) wake?.noteInbound?.(record)
+    if (!queued) wake?.noteInbound?.(record)
 
-    if (!classified && isGroup && sleep?.shouldHold?.(record)) return
 
     // 这个会话自己的缓存目录（隔离模式下一会话一目录；关掉隔离就共用 baseCacheDir）
     const cacheDir = record.dir ? join(record.dir, '图片缓存') : baseCacheDir
@@ -906,8 +672,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
       return
     }
 
+    if (!classified && isGroup && sleep?.shouldHold?.(record)) return
+
     // 给互动工具留线索：戳谁、给哪条消息贴表情、撤回哪条
-    if (!classified) {
+    if (!queued) {
       record.lastSenderId = Number(event.user_id) || record.lastSenderId || null
       record.lastSenderName = senderName
       record.lastMessageId = Number(event.message_id) || record.lastMessageId || null
@@ -996,7 +764,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // ── 组装交给 agent 的那段文字 ──
     const parts = []
     // 当前时间：每条消息都带在最前面，跟着正文走 —— 会话压缩、历史被裁掉，这行也不会丢
-    parts.push(classified ? `[收到消息的时间：${humanTime(new Date(event.__classifierReceivedAt ?? Date.now()))}]` : `[现在是 ${humanTime()}]`)
+    parts.push(queued ? `[收到消息的时间：${humanTime(new Date(event.__classifierReceivedAt ?? Date.now()))}]` : `[现在是 ${humanTime()}]`)
     if (quoteLine) {
       parts.push(quoteLine, QUOTE_DIRECTION_HINT)
     }
@@ -1009,8 +777,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const mustReply = mustReplyFor({
       isGroup,
       atMe: info.atMe,
-      quotedMe,
-      addressedBy,
       addressedMaySilent: config.addressedMaySilent,
     })
 
@@ -1045,13 +811,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
       )
     }
 
-    // 之前跳过的群消息补进来（只说给它听，不叫醒它）：
-    // 这一句是在接前一句，不补的话它只能凭空接。
-    if (!classified && isGroup) {
-      const backlog = drainBacklog(peerId)
-      for (const line of backlog) pushHistory(record, line, config.historyLimit)
-    }
-
     if (isGroup && config.historyLimit > 0 && record.history.length > 0) {
       const recent = record.history.slice(-config.historyLimit)
       parts.unshift(
@@ -1063,37 +822,42 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，
     // tick 的提醒就白丢了。等真的有人说话时补一句，塞进这一轮的提示词里，不多开一轮。
-    const lateBed = !classified && sleep?.takeLateBedtime?.(record)
+    const lateBed = !queued && sleep?.takeLateBedtime?.(record)
     if (lateBed) parts.unshift(lateBed, '')
 
     // 通道回执：桥断过 / 上一句话没送出去，得让她知道。
     // 放在最前面 —— 不然她会把「没收到回应」读成对方的态度。
-    const bridgeLines = classified ? [] : bridge?.take?.(record) ?? []
+    const bridgeLines = queued ? [] : bridge?.take?.(record) ?? []
     if (bridgeLines.length > 0) parts.unshift(...bridgeLines, '')
 
     // 门口：大姐鲸鲸捎的话。只报「有几封、在哪」，内容她自己 read 才看。
     // 2026-10-26 姐姐定的：不敲门、不占主动额度，只在她本来就要开口的这一轮里多一行。
-    const doorNotice = !classified && doorLine(config)
+    const doorNotice = !queued && doorLine(config)
     if (doorNotice) parts.unshift(doorNotice, '')
 
     const body = parts.join('\n')
 
-    if (classified) {
-      const session = record.agent.session
-      const header = session.requestHeader?.()
+    if (queued) {
+      const session = classified ? record.agent.session : null
+      const header = session?.requestHeader?.()
       const systemSnapshot = manager.systemPrompts?.get(record.sessionId)
+      const meta = { selfId, scope, peerId, label }
       await addressClassifier.accept({
         id: event.__classifierId ?? (event.message_id == null ? randomUUID() : String(event.message_id)),
-        meta: { selfId, scope, peerId, label },
+        meta,
         body, source: event, attachmentPaths: [...attachments],
         robotName: manager.selfName || event.self_name || '机器人',
-        mainContext: { header: systemSnapshot ? { ...header, system: systemSnapshot.text } : header,
-          messages: session.deriveMessages(), runtimeContext: manager.runtimeContext?.(record) ?? '' },
+        mainContext: classified ? { header: systemSnapshot ? { ...header, system: systemSnapshot.text } : header,
+          messages: session.deriveMessages(), runtimeContext: manager.runtimeContext?.(record) ?? '' } : undefined,
         background: isGroup ? [...(groupBacklog.get(peerId) ?? [])] : [],
         message: { senderId, senderName, text: info.text || '[非文字消息]',
           atMe: info.atMe, atOthers: info.atNames, quote: quoteInfo, time: event.time,
           voiceTranscripts: voiceTexts, imageCount: info.images.length, fileNames: filePaths.map(f => f.name) },
-      }, deliverClassified)
+      }, deliverBatch, { classify: classified })
+      if (!config.addressClassifierEnabled) {
+        if (isGroup) await scheduleGroup(meta)
+        else await addressClassifier.resume(meta, deliverBatch, { classify: false })
+      }
       return
     }
 
@@ -1102,11 +866,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 先记历史（下一条能看到这一条），再投递
     const historyEntry = historyLine(sender, info.text || '[图片]', ownerInfo)
     if (isGroup) pushHistory(record, historyEntry, config.historyLimit)
-    // 记一笔「这个窗口回过一次」，额度用完就停（见上面 repliesLeft）
-    if (isGroup) {
-      countReply(peerId, senderId)
-      groupLastReplyAt.set(wakeKey(peerId, senderId), Date.now())
-    }
     // 私聊也留一份最近聊天：换会话时靠它给新会话接话
     record.recent.push(historyEntry)
     const recentKeep = Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3)
@@ -1161,12 +920,14 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
   function permitted(meta) {
     const selfId = String(manager.selfId || config.selfId || '')
-    return config.addressClassifierEnabled && meta.selfId === selfId &&
+    return meta.selfId === selfId &&
       (meta.scope === 'group' ? allowGroup(config, meta.peerId) : allowPrivate(config, meta.peerId))
   }
 
-  async function deliverClassified(batch, meta) {
+  async function deliverBatch(queuedBatch, meta) {
     if (disposed || !permitted(meta)) return false
+    const batch = queuedBatch.filter(item => !isPeerBot(config, item.source?.user_id, item.source) || config.botChatEnabled)
+    if (!batch.length) return false
     const last = batch.at(-1)
     const peerBot = isPeerBot(config, last.source?.user_id, last.source)
     if (peerBot && !config.botChatEnabled) return false
@@ -1179,27 +940,18 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const isGroup = meta.scope === 'group'
     const mergeMs = Math.max(0, Number(config.mergeWindowMs ?? 5000))
     if (!isGroup && Date.now() - last.receivedAt < mergeMs) return false
-    const senderId = String(last.source?.user_id ?? '')
-    const freeGroup = isGroup && listOf(config.groupFree).includes(meta.peerId)
-    const canDeliver = () => !disposed && permitted(meta) && !record.quietRound && !sleep?.shouldHold?.(record) &&
-      (!isGroup || (gapReady(config, meta.peerId, senderId) &&
-        (freeGroup || repliesLeft(config, meta.peerId, senderId) > 0)))
+    const version = syncTriggers()
+    const eligible = () => !isGroup || !requiresGroupMention(config, meta.peerId) ||
+      batch.some(item => item.message.atMe && (!config.addressClassifierEnabled || item.decision === 'yes'))
+    const canDeliver = () => !disposed && syncTriggers() === version && permitted(meta) && eligible() &&
+      !record.quietRound && !sleep?.shouldHold?.(record) &&
+      batch.every(item => !isPeerBot(config, item.source?.user_id, item.source) || config.botChatEnabled)
     if (!canDeliver()) return false
     const batchAttachments = new Set(batch.flatMap(item => item.attachmentPaths ?? []))
     return new Promise((resolve, reject) => runTurn({
       record, label: meta.label, peerId: meta.peerId, isGroup, client,
-      mustReply: batch.some(({ message, source }) => mustReplyFor({
-        isGroup,
-        atMe: message.atMe,
-        quotedMe: Boolean(message.quote?.ok && String(message.quote.userId) === meta.selfId),
-        addressedBy: isGroup && !message.atOthers?.length ? evaluateWakeTrigger({
-          plainText: message.text,
-          names: [manager.selfName, source?.self_name, ...(config.groupWakeNames ?? [])].filter(Boolean),
-          triggers: { nameMention: config.groupWakeNameMention, question: config.groupWakeQuestion,
-            keywords: config.groupWakeKeywords },
-        }) : null,
-        addressedMaySilent: config.addressedMaySilent,
-      })),
+      mustReply: batch.some(({ message }) => mustReplyFor({ isGroup, atMe: message.atMe,
+        addressedMaySilent: config.addressedMaySilent })),
       body: () => {
         const backlog = isGroup ? [...(groupBacklog.get(meta.peerId) ?? [])] : []
         return [
@@ -1229,17 +981,15 @@ export function createInbound({ config, manager, logger, client, send, approval,
           peerChatTurns.set(meta.peerId, { count, at: Date.now() })
         }
         for (const item of batch) {
-          const line = historyLine(item.source?.sender ?? {}, item.message.text)
+          const line = historyLine(item.source?.sender ?? {}, item.message.text, {
+            isOwner: ownerIds.has(item.message.senderId), ownerLabel,
+            isBot: isPeerBot(config, item.source?.user_id, item.source),
+          })
           if (isGroup) pushHistory(record, line, config.historyLimit)
           record.recent.push(line)
         }
         record.recent = record.recent.slice(-Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3))
         sleep?.noteText?.(record, last.message.text)
-        if (isGroup) {
-          refreshWake(config, meta.peerId, senderId)
-          countReply(meta.peerId, senderId)
-          groupLastReplyAt.set(wakeKey(meta.peerId, senderId), Date.now())
-        }
         resolve(true)
       },
       onRejected: err => {
@@ -1250,9 +1000,58 @@ export function createInbound({ config, manager, logger, client, send, approval,
     }))
   }
 
+  // 配置变化后废弃旧等待；回调执行前再次核对，避免旧定时器绕过新设置。
+  function syncTriggers() {
+    const version = JSON.stringify([manager.selfId || config.selfId, config.requireMention,
+      config.groupMentionOverrides, config.groupMessageIntervalMs, config.groupTriggerWords, config.addressClassifierEnabled,
+      config.groupMode, config.groupAllow, config.botChatEnabled, config.peerBots])
+    if (version !== triggerVersion) {
+      for (const timer of groupTimers.values()) clearTimeout(timer)
+      groupTimers.clear()
+      triggerVersion = version
+    }
+    return version
+  }
+
+  async function scheduleGroup(meta) {
+    const version = syncTriggers()
+    if (disposed || config.addressClassifierEnabled || !permitted(meta)) return
+    const key = JSON.stringify([meta.selfId, meta.scope, meta.peerId])
+    const pending = addressClassifier.pending(meta)
+    if (!pending.length || pending.some(item => item.body === null)) return
+    const mentioned = pending.some(item => item.message.atMe)
+    if (requiresGroupMention(config, meta.peerId) && !mentioned) return
+    const immediate = mentioned || pending.some(item => matchesGroupTrigger(config, item.source?.message))
+    if (groupTimers.has(key)) {
+      if (!immediate) return
+      clearTimeout(groupTimers.get(key))
+      groupTimers.delete(key)
+    }
+    const due = immediate ? Date.now() : pending[0].receivedAt + groupMessageInterval(config)
+    if (due <= Date.now()) return addressClassifier.resume(meta, deliverBatch, { classify: false })
+    const timer = setTimeout(async () => {
+      groupTimers.delete(key)
+      if (disposed || syncTriggers() !== version || config.addressClassifierEnabled) return
+      try { await addressClassifier.resume(meta, deliverBatch, { classify: false }) }
+      catch (err) { logger.warn?.('处理待交付群消息失败:', err) }
+    }, Math.max(0, due - Date.now()))
+    timer.unref?.()
+    groupTimers.set(key, timer)
+  }
+
   const onEvent = async event => {
     if (disposed) return
-    if (!config.addressClassifierEnabled || !addressClassifier) return handleEvent(event)
+    syncTriggers()
+    if (event?.post_type !== 'message') return handleEvent(event)
+    const scope = event.message_type === 'group' ? 'group' : 'private'
+    const selfId = String(event.self_id ?? manager.selfId ?? '')
+    const peerId = String(scope === 'group' ? event.group_id : event.user_id)
+    const key = JSON.stringify([selfId, scope, peerId])
+    // 关闭分类器后，旧私聊与随后到来的消息共用原队列，清空后再走普通入口。
+    if (scope !== 'group' && !config.addressClassifierEnabled && !ingressQueues.has(key) &&
+      !addressClassifier.pendingChats().some(meta => meta.selfId === selfId && meta.scope === scope && meta.peerId === peerId)) {
+      return handleEvent(event)
+    }
     // 审批/问答走控制通道，不等待正在执行的分类请求。
     if (event?.post_type === 'message') {
       const scope = event.message_type === 'group' ? 'group' : 'private'
@@ -1268,11 +1067,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
         if (eventKey) seenMessages.set(eventKey, Date.now() + 10 * 60_000)
         return Promise.resolve()
       }
+      // 控制命令不等待同聊天的分类请求或普通消息等待。
+      if (allowed && botAllowed && commandOf(event.message, selfId, scope === 'group')) return handleEvent(event)
     }
-    const scope = event?.message_type === 'group' ? 'group' : 'private'
-    const selfId = String(event?.self_id ?? manager.selfId ?? '')
-    const peerId = String(scope === 'group' ? event?.group_id : event?.user_id)
-    const key = JSON.stringify([selfId, scope, peerId])
     const meta = { selfId, scope, peerId, label: scope === 'group' ? `群 ${peerId}` : `私聊 ${peerId}` }
     let sourceKey, sourceId
     if (event?.post_type === 'message' && String(event.user_id) !== selfId && permitted(meta) &&
@@ -1295,10 +1092,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
         preparingSources.add(sourceKey)
       }
     }
-    const task = (ingressQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(() => {
-      if (sourceKey && !config.addressClassifierEnabled) return
-      return handleEvent(event)
-    }).then(result => {
+    const task = (ingressQueues.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const result = await handleEvent(event)
       if (sourceKey && !disposed && permitted(meta)) addressClassifier.discardUnprepared(meta, sourceId)
       return result
     }).finally(() => { if (sourceKey) preparingSources.delete(sourceKey) })
@@ -1306,17 +1101,20 @@ export function createInbound({ config, manager, logger, client, send, approval,
     task.finally(() => { if (ingressQueues.get(key) === task) ingressQueues.delete(key) }).catch(() => {})
     return task
   }
-  const resumeTimer = addressClassifier && setInterval(() => {
-    if (disposed || !config.addressClassifierEnabled) return
+  const resumeTimer = setInterval(() => {
+    if (disposed) return
+    syncTriggers()
     try {
       for (const item of addressClassifier.unprepared()) {
         if (!permitted(item.meta)) continue
         onEvent({ ...item.source, __classifierId: item.id, __classifierRecovery: true })
           .catch(err => logger.warn?.('恢复源消息失败:', err))
       }
-      for (const meta of addressClassifier.list()) {
+      for (const meta of addressClassifier.pendingChats()) {
         if (!permitted(meta)) continue
-        addressClassifier.resume(meta, deliverClassified).catch(err => logger.warn?.('恢复待回复消息失败:', err))
+        if (config.addressClassifierEnabled) addressClassifier.resume(meta, deliverBatch).catch(err => logger.warn?.('恢复待回复消息失败:', err))
+        else if (meta.scope === 'group') scheduleGroup(meta).catch(err => logger.warn?.('安排群消息失败:', err))
+        else addressClassifier.resume(meta, deliverBatch, { classify: false }).catch(err => logger.warn?.('恢复待交付私聊失败:', err))
       }
     } catch (err) {
       logger.warn?.('读取待回复消息失败:', err)
@@ -1328,9 +1126,9 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (resumeTimer) clearInterval(resumeTimer)
     addressClassifier?.stop()
     for (const batch of mergeBatches.values()) clearTimeout(batch.timer)
-    for (const timer of gapReplayTimers.values()) clearTimeout(timer)
+    for (const timer of groupTimers.values()) clearTimeout(timer)
     mergeBatches.clear()
-    gapReplayTimers.clear()
+    groupTimers.clear()
     seenMessages.clear()
   }
   return onEvent

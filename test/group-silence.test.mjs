@@ -4,21 +4,21 @@ import { createInbound } from '../src/inbound.js'
 import { waitFor, textOf } from './mock-dsh.mjs'
 
 const cases = [
-  { name: '保活期里的普通消息', text: '这只是后续闲聊', atMe: false, addressedMaySilent: false, maySilent: true },
+  { name: '定时合并的普通消息', text: '这只是后续闲聊', atMe: false, addressedMaySilent: false, maySilent: true },
   { name: '真实点名', text: '第二条消息', atMe: true, addressedMaySilent: false, maySilent: false },
   { name: '允许沉默的点名', text: '第二条消息', atMe: true, addressedMaySilent: true, maySilent: true },
-  { name: '叫名字', text: '测试机器人，看看这里', atMe: false, addressedMaySilent: false, maySilent: false },
+  { name: '叫名字仍可沉默', text: '测试机器人，看看这里', atMe: false, addressedMaySilent: false, maySilent: true },
 ]
 
 for (const [i, scenario] of cases.entries()) {
-  test(`回复间隔补发保留回复要求：${scenario.name}`, async t => {
+  test(`群聊合并保留本轮沉默要求：${scenario.name}`, async t => {
     const delivered = [], warnings = []
     const record = { scope: 'group', peerId: String(73001 + i), sessionId: `silence-${i}`,
       history: [], recent: [], queue: Promise.resolve(), initialContextDelivered: true,
       agent: { followup: message => delivered.push(message), whenIdle: async () => {} } }
     const manager = { selfId: '9', selfName: '测试机器人', findByPeer: () => record,
       obtain: async () => record, enqueue: (_record, task) => { record.queue = record.queue.then(task); return record.queue } }
-    const config = { groupMode: 'open', requireMention: true, groupWakeMs: 10000, groupReplyGapMs: 100,
+    const config = { groupMode: 'open', requireMention: false, groupMessageIntervalMs: 20,
       groupWakeQuestion: false, mergeWindowMs: 0, historyLimit: 0, chatLog: false,
       addressedMaySilent: scenario.addressedMaySilent }
     const inbound = createInbound({ config, manager, client: { call: async () => ({}) },
@@ -31,7 +31,7 @@ for (const [i, scenario] of cases.entries()) {
     await record.queue
     assert.equal(delivered.length, 1)
     await inbound(event(2, scenario.text, scenario.atMe))
-    assert.equal(delivered.length, 1, '第二条先等待回复间隔')
+    assert.equal(delivered.length, scenario.atMe ? 2 : 1, '仅自身 @ 提前处理')
     await waitFor(() => delivered.length === 2)
     await record.queue
     assert.equal(delivered[1].source.qqMaySilent, scenario.maySilent)

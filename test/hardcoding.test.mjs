@@ -9,7 +9,6 @@ import { ensurePeerWorkspace } from '../src/workspace.js'
 import { doorLine, doorList, markDoorRead } from '../src/door.js'
 import { buildChatPrompt, proactiveRule, readingAskRule } from '../src/prompts.js'
 import { createOutbound, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
-import { isDirectedAtAi, evaluateWakeTrigger } from '../src/wake-trigger.js'
 import { installSettingsApi } from '../src/settings.js'
 import { waitFor } from './mock-dsh.mjs'
 
@@ -77,14 +76,6 @@ test('自定义称呼用于上下文回显和收尾过滤，正常话不丢失',
     { type: 'text', text: '[组长[甲]] 今天忙吗\n今天有空，可以聊聊。' },
   ] } } })
   assert.deepEqual(sent, ['今天有空，可以聊聊。'])
-})
-
-test('私人别名不再默认触发提问唤醒，配置后的名字仍有效', () => {
-  assert.equal(isDirectedAtAi('鲸鲸强吗'), false)
-  assert.equal(isDirectedAtAi('鲸鲸强吗', ['鲸鲸']), true)
-  assert.equal(evaluateWakeTrigger({ plainText: '小助手强吗', names: ['小助手'], triggers: { nameMention: false } }), 'question')
-  assert.equal(evaluateWakeTrigger({ plainText: '鲸鲸强吗', names: ['小助手'], triggers: { nameMention: false } }), null)
-  assert.equal(isDirectedAtAi('deepseek 行不行'), true)
 })
 
 async function unusedPort() {

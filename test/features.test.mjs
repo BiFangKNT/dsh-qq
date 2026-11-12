@@ -30,7 +30,7 @@ function inboundHarness(extra = {}, sleep) {
   const config = {
     groupMode: 'open', privateMode: 'open', replyToPrivate: true, requireMention: true,
     groupWakeMs: 60000, groupWakeIdleMs: 0, groupWakeNameMention: false, groupWakeQuestion: false,
-    groupReplyGapMs: 0, groupWakeProbability: 0, mergeWindowMs: 0, chatLog: false,
+    groupMessageIntervalMs: 1, groupReplyGapMs: 0, groupWakeProbability: 0, mergeWindowMs: 0, chatLog: false,
     historyLimit: 0, isolateByPeer: false, ...extra,
   }
   const manager = {
@@ -50,15 +50,15 @@ function inboundHarness(extra = {}, sleep) {
     post_type: 'message', message_type: 'group', self_id: 9, user_id: 10001,
     group_id: group, message_id: id, time: 1, sender: { nickname: '甲', user_id: 10001 }, message, ...extra,
   })
-  return { inbound, delivered, records, config, group, event, flush: () => Promise.all(tasks) }
+  return { inbound, delivered, records, config, group, event, flush: async () => { await new Promise(resolve => setTimeout(resolve, 15)); await Promise.all(tasks) } }
 }
 
 test('新配置可通过设置文件覆盖，字符串名单也可使用', async () => {
   const settings = { groupFree: ['1'], groupImageBlock: ['1:2'], groupSleepFrom: '01:00',
     groupSleepTo: '09:00', privateSleepFrom: '02:00', privateSleepTo: '10:00', holdNightMessages: true, voiceName: '' }
-  assert.deepEqual(sanitizeOverrides(settings), settings)
+  assert.deepEqual(sanitizeOverrides(settings), { ...Object.fromEntries(Object.entries(settings).filter(([key]) => key !== 'groupFree')), groupMentionOverrides: { '1': false } })
   const h = inboundHarness()
-  h.config.groupFree = h.group
+  h.config.groupMentionOverrides = { [h.group]: false }
   await h.inbound(h.event(1)); await h.flush()
   assert.equal(h.delivered.length, 1)
   assert.equal(h.delivered[0].source.qqMaySilent, true)
@@ -72,7 +72,8 @@ test('去重只按会话内的消息 ID，内容相同的新消息仍会投递',
   await h.inbound(h.event(1, '另一群的消息', { group_id: String(++nextGroup) }))
   await h.inbound(h.event(undefined)); await h.inbound(h.event(undefined))
   await h.flush()
-  assert.equal(h.delivered.length, 5)
+  assert.equal((JSON.stringify(h.delivered).match(/普通消息/g) ?? []).length, 4)
+  assert.match(JSON.stringify(h.delivered), /另一群的消息/)
 })
 
 test('被屏蔽图片保留占位符及文字，不向模型提供图片内容', async () => {
@@ -83,15 +84,14 @@ test('被屏蔽图片保留占位符及文字，不向模型提供图片内容',
   assert.equal(h.records.size, 1)
   await h.inbound(h.event(2, [{ type: 'text', data: { text: '保留这句话' } }, image]))
   await h.flush()
-  assert.equal(h.delivered.length, 2)
-  assert.match(JSON.stringify(h.delivered[0]), /\[图片\]/)
-  assert.match(JSON.stringify(h.delivered[1]), /保留这句话\[图片\]/)
+  assert.match(JSON.stringify(h.delivered), /\[图片\]/)
+  assert.match(JSON.stringify(h.delivered), /保留这句话\[图片\]/)
   assert.doesNotMatch(JSON.stringify(h.delivered), /example.invalid/)
 })
 
-test('免 @ 群仍受访问控制，群聊休息不进入历史或消耗回复额度', async () => {
+test('免 @ 群仍受访问控制，休息时不提交群消息', async () => {
   const denied = inboundHarness({ groupMode: 'disabled' })
-  denied.config.groupFree = [denied.group]
+  denied.config.groupMentionOverrides = { [denied.group]: false }
   await denied.inbound(denied.event(1))
   assert.equal(denied.records.size, 0)
   let asleep = true
@@ -101,19 +101,6 @@ test('免 @ 群仍受访问控制，群聊休息不进入历史或消耗回复�
   asleep = false
   await h.inbound(h.event(2)); await h.flush()
   assert.equal(h.delivered.length, 1)
-})
-
-test('窗口额度耗尽后不会被后续消息不断续期', async t => {
-  let now = 1_000_000
-  t.mock.method(Date, 'now', () => now)
-  const h = inboundHarness({ groupWakeMs: 1000, groupRepliesPerWindow: 1 })
-  const mention = [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '你好' } }]
-  await h.inbound(h.event(1, mention))
-  now += 500
-  await h.inbound(h.event(2, mention))
-  now += 600
-  await h.inbound(h.event(3, mention)); await h.flush()
-  assert.equal(h.delivered.length, 2)
 })
 
 test('群与私聊作息独立，私聊按专用结束时间交付，群不排队', async () => {
