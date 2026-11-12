@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { createSystemPromptStore, pendingSystemPrompts } from './system-prompt.js'
 import { applyOverrides, loadOverrides, resolvePersonaFile } from './settings.js'
+import { clearRuntimeContext } from './runtime-context.js'
 
 /** 设置进程只投递操作；会话的拥有者执行。两种部署共用这条路径。 */
 export function createPromptSync({ ctx, home, config, manager, logger }) {
@@ -44,6 +45,7 @@ export function createPromptSync({ ctx, home, config, manager, logger }) {
       else {
         const compaction = ctx.get('compaction')
         if (!compaction?.compactNow) throw new Error('宿主未启用手动压缩服务')
+        clearRuntimeContext(record.agent)
         const result = await compaction.compactNow(record.agent, controller.signal)
         if (!result) throw new Error('没有可压缩的历史，system 尚未同步；可选择创建新会话')
         await record.agent.ctx.get('systemPrompt').assemble(assembleContextFor(record.agent))

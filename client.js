@@ -23,6 +23,7 @@ window.__ModuleLoader__.load({
   id: 'dsh-qq-onebot',
   factory: (require) => {
     const React = require('react')
+    const { RiskConfirmation } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
     const { useState, useEffect, useCallback } = React
 
@@ -148,6 +149,49 @@ window.__ModuleLoader__.load({
           : p.fromCache
             ? `⚠️ 这个文件读不到（${p.error || '文件不存在'}），用的是上次读到的那份缓存（${p.chars} 字）`
             : `⚠️ 这个文件读不到（${p.error || '文件不存在'}），现在用的是上面的文本框`)
+    }
+
+    function CompatibilityDialog() {
+      const [status, setStatus] = useState(null)
+      const [acknowledged, setAcknowledged] = useState(false)
+      const [dismissed, setDismissed] = useState('')
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const fingerprint = JSON.stringify(status?.versions)
+      useEffect(() => {
+        let active = true
+        const refresh = async () => {
+          try { const result = await jget('/status'); if (active) setStatus(result.compatibility) }
+          catch (err) { if (active) setError(err.message) }
+        }
+        refresh()
+        const timer = setInterval(refresh, 3000)
+        return () => { active = false; clearInterval(timer) }
+      }, [])
+      useEffect(() => { setAcknowledged(false); setError('') }, [fingerprint])
+      useEffect(() => {
+        const show = () => setDismissed('')
+        window.addEventListener('dsh-qq:show-compatibility', show)
+        return () => window.removeEventListener('dsh-qq:show-compatibility', show)
+      }, [])
+      return h(RiskConfirmation, {
+        open: Boolean(status?.pending && dismissed !== fingerprint),
+        title: '当前 DSH 版本未经验证',
+        description: `QQ 暂未启用。已验证版本：${status?.verifiedVersion ?? ''}。当前核心包：${Object.entries(status?.versions ?? {}).map(([name, version]) => `${name.replace('@deepseek-ai/', '')} ${version}`).join('；')}。继续使用可能导致状态未清理、旧状态进入压缩或会话运行失败。${error ? `操作失败：${error}` : ''}`,
+        acknowledgeLabel: '我了解风险，仍要在这些版本上启用 QQ',
+        cancelLabel: '暂不启用', closeLabel: '暂不启用', confirmLabel: busy ? '启用中…' : '仍然启用',
+        acknowledged, disabled: busy, onAcknowledgedChange: setAcknowledged,
+        onCancel: () => { if (!busy) setDismissed(fingerprint) },
+        onConfirm: async () => {
+          if (!acknowledged || busy) return
+          setBusy(true); setError('')
+          try {
+            const result = await jpost('/compatibility', { versions: status.versions })
+            setStatus(result.compatibility)
+          } catch (err) { setError(err.message) }
+          finally { setBusy(false) }
+        },
+      })
     }
 
     function Panel() {
@@ -333,6 +377,11 @@ window.__ModuleLoader__.load({
 
       return h('div', { 'data-qq-page': '' },
         localConnection,
+        st?.compatibility?.pending ? h('div', { 'data-qq-msg': '', 'data-warn': '' },
+          '当前 DSH 版本未经验证，QQ 暂未启用。',
+          h('button', { 'data-qq-btn': '', onClick: () => window.dispatchEvent(new Event('dsh-qq:show-compatibility')) }, '查看风险并选择')) : null,
+        st?.compatibility?.accepted ? h('div', { 'data-qq-msg': '', 'data-warn': '' }, '你已接受当前 DSH 版本的运行风险。版本变化后需要重新确认。') : null,
+        st?.compatibility?.error ? h('div', { 'data-qq-msg': '', 'data-warn': '' }, `QQ 启用失败：${st.compatibility.error}`) : null,
         /* ── 状态 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-row': '' },
@@ -415,7 +464,13 @@ window.__ModuleLoader__.load({
           }),
           boolField('isolateByPeer', '每个会话各自一个目录与记忆区', '关掉的话所有群聊共用宿主的工作目录，别关。改完要重启宿主。')),
 
-        /* ── 群里怎么说话 ── */
+        /* ── 当前事项与记忆 ── */
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '当前事项与记忆'),
+          textField('memoryProvider', '记忆维护 provider', { hint: '留空沿用主会话路由；独立调用，不修改主会话参数。' }),
+          textField('memoryModel', '记忆维护模型', { hint: '留空沿用主会话模型。' }),
+          textField('memoryTimeoutMs', '维护最长等待（毫秒）', { type: 'number', hint: '默认 30000；失败保留待处理工作，状态显示尚未核实。' }),
+          textField('memoryTaskTtlHours', '无明确期限事项的核实间隔（小时）', { type: 'number', hint: '默认 24；无新证据则收起待核实，不等于认定完成。' })),
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '先判断是不是在和我说话'),
           boolField('addressClassifierEnabled', '启用前置判断（群聊与私聊）', '独立会话判断；跳过的消息保留，下次放行时一起提供。开启后由它替代群聊的 @、名字和概率判断，访问控制与作息仍有效。'),
@@ -525,6 +580,10 @@ window.__ModuleLoader__.load({
         slots.inject('settings.section', () => slots.register(
           { name: 'settings.section', id: 'dsh-qq', order: 40, label: 'QQ' },
           () => h(Panel),
+        ))
+        slots.inject('shell.overlay', () => slots.register(
+          { name: 'shell.overlay', id: 'dsh-qq:host-compatibility', order: 40 },
+          CompatibilityDialog,
         ))
       },
     }

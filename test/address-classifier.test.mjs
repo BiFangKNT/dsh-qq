@@ -492,7 +492,7 @@ test('审批和问答快速通道保留同类机器人开关，群聊与私聊�
   }
 })
 
-test('no 不修改主会话提示和交接，关闭分类器后的正式首轮仍交付便签', async t => {
+test('no 不修改主会话；正式轮不再交付旧便签', async t => {
   const home = await directory(t), config = configOf(), llm = model('no')
   let swaps = 0, marked = 0
   const gate = createAddressClassifier({ home, config, llm, logger })
@@ -518,13 +518,13 @@ test('no 不修改主会话提示和交接，关闭分类器后的正式首轮�
   assert.equal(h.delivered.length, 1)
   const body = textOf(h.delivered[0])
   assert.doesNotMatch(body, /测试人设_首轮必须存在/)
-  assert.match(body, /保留交接内容/)
+  assert.doesNotMatch(body, /保留交接内容/)
   assert.match(body, /此前没有回应的群背景/)
-  assert.equal(record.initialContextDelivered, true)
-  assert.equal(marked, 1)
+  assert.equal(record.initialContextDelivered, false)
+  assert.equal(marked, 0)
 })
 
-test('yes 投递失败不消费交接，成功接纳后才记录一次性交付', async t => {
+test('yes 投递失败保留待处理消息，成功后不恢复旧便签', async t => {
   const home = await directory(t), config = configOf(), llm = model('no', 'yes', 'yes')
   const gate = createAddressClassifier({ home, config, llm, logger })
   const h = inboundHarness(t, gate, { config: { persona: '测试人设_不得重复注入' } })
@@ -542,11 +542,11 @@ test('yes 投递失败不消费交接，成功接纳后才记录一次性交付'
   await gate.resume(meta, async () => false)
   await h.inbound(h.event(903))
   assert.equal(h.delivered.length, 1)
-  assert.equal(record.initialContextDelivered, true)
-  assert.equal(record.swapSeed, null)
+  assert.equal(record.initialContextDelivered, false)
+  assert.deepEqual(record.swapSeed, ['未交付的交接'])
   const body = textOf(h.delivered[0])
   assert.doesNotMatch(body, /测试人设_不得重复注入/)
-  assert.match(body, /未交付的交接/)
+  assert.doesNotMatch(body, /未交付的交接/)
   assert.match(body, /消息901[\s\S]*消息902[\s\S]*消息903/)
 })
 
@@ -561,10 +561,12 @@ test('分类只读完整主会话和全部待处理消息，压缩后读取当�
   const header = Object.freeze({ system: '主会话系统提示_仅作为背景', tools: [{ name: '主会话工具_不可执行' }] })
   record.agent.session.deriveMessages = () => messages
   record.agent.session.requestHeader = () => header
+  h.manager.runtimeContext = () => '最新有效事项_只读'
   const before = JSON.stringify({ messages, header })
   await h.inbound(h.event(1001))
   const first = JSON.parse(textOf(llm.calls[0].messages[0]))
   assert.equal(first.mainContext.messages.length, 65)
+  assert.equal(first.mainContext.runtimeContext, '最新有效事项_只读')
   assert.deepEqual(first.mainContext.header, header)
   assert.equal(JSON.stringify({ messages, header }), before)
   assert.deepEqual(llm.calls[0].tools, [])

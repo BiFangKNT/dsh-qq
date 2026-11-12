@@ -29,7 +29,7 @@ test('会话模板保持在会话内，仅在启用共享记忆后提示工具',
     assert.doesNotMatch(text, /鲸鲸|姐姐|2710586329|[A-Z]:[\\/]|\.\.\/私人|谁也看不见/)
     assert.match(text, /管理员读取/)
     assert.match(text, /\.\/记忆区\/随笔/)
-    assert.equal(text.includes('qq_memo'), name === 'shared')
+    assert.equal(/\bqq_memo\b/.test(text), name === 'shared')
   }
 })
 
@@ -131,7 +131,7 @@ test('两个独立设置服务可用不同端口，客户端手动选择后读�
     fetch, console, setTimeout, setInterval, clearInterval,
     document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { appendChild() {} } } })
   vm.runInContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'), context)
-  bundle.factory(() => React).apply({ effect() {}, slots: { inject: (_name, fn) => fn(), register: (_meta, render) => { renderPanel = render } } })
+  bundle.factory(() => React).apply({ effect() {}, slots: { inject: (_name, fn) => fn(), register: (meta, render) => { if (meta.name === 'settings.section') renderPanel = render } } })
   const Panel = renderPanel().type
   const render = () => { cursor = 0; return Panel() }
   const flatten = element => !element || typeof element !== 'object' ? [] : [element, ...element.children.flat(Infinity).flatMap(flatten)]

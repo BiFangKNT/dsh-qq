@@ -71,14 +71,15 @@ t('personaInSystem：人设在系统提示里时，消息里不再重复一份',
   assert.ok(!p.includes(SELF_KNOWN_RULE), 'SELF_KNOWN_RULE 说的是「上面那段」，这里上面没有人设')
 })
 
-t('事实卡在人设之前（事在协议后面、性格前面）', () => {
+t('固定规则不包含可变事实', () => {
   const p = buildChatPrompt(
     { persona: PERSONA },
     { isGroup: false, facts: '她喜欢大白饭', factsFile: '事实卡.md' },
   )
   const iFacts = p.indexOf('她喜欢大白饭')
   const iPersona = p.indexOf(PERSONA)
-  assert.ok(iFacts > 0 && iPersona > iFacts)
+  assert.equal(iFacts, -1)
+  assert.ok(iPersona > 0)
 })
 
 t('表情包在最后', () => {
@@ -124,16 +125,13 @@ t('空 / null 不炸', () => {
 })
 
 console.log('两层提示词 · 场景差异')
-t('私聊有便签规矩、群聊没有', () => {
-  assert.ok(buildChatPrompt({}, { isGroup: false }).includes('【便签'))
-  assert.ok(!buildChatPrompt({}, { isGroup: true }).includes('【便签'))
-})
-
-t('便签规矩说清了「不是遗书」，并给了旧名兜底', () => {
-  const p = buildChatPrompt({}, { isGroup: false })
-  assert.ok(p.includes('不是遗书'), '得把「这不是遗书」说出口')
-  assert.ok(p.includes('便签.md'), '新文件名要写对')
-  assert.ok(!p.includes('【交接（换会话时用）】'), '旧标题不该再出现')
+t('私聊和群聊统一使用当前记忆，不要求更新旧便签', () => {
+  for (const isGroup of [false, true]) {
+    const p = buildChatPrompt({}, { isGroup })
+    assert.ok(p.includes('qq_memory'))
+    assert.ok(p.includes('不再读写或重新导入'))
+    assert.ok(!p.includes('【便签（换会话时用）】'))
+  }
 })
 
 t('群聊有身份规矩，私聊没有', () => {

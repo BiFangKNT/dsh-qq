@@ -119,12 +119,11 @@ test('骨架本身是合法的一本空词典', () => {
   assert.ok(GLOSSARY_SKELETON.includes('| 词 / 说法 | 意思 | 谁说的 | 日期 |'))
 })
 
-test('接线：工具参数里只有群号，没有路径 —— 笔只有这一个落点', () => {
+test('旧词典工具退役；统一记忆工具不接受跨聊天路径', () => {
   const src = readFileSync(new URL('../src/tools.js', import.meta.url), 'utf8')
-  const start = src.indexOf("name: 'qq_glossary'")
-  assert.ok(start > 0, 'tools.js 里要注册 qq_glossary')
-  const block = src.slice(start, start + 1400)
-  assert.ok(block.includes('group:'), '得有群号参数')
-  assert.ok(!/\bpath\b|\bfile\b.*type: 'string', description: '写到哪/.test(block), '不许出现「写到哪」这种参数')
-  assert.ok(block.includes('upsertGlossaryTerm('), '得走那个窄函数')
+  assert.ok(src.includes('registerMemoryTool('))
+  assert.ok(!src.includes("name: 'qq_glossary'"))
+  const tool = readFileSync(new URL('../src/memory-tools.js', import.meta.url), 'utf8')
+  assert.ok(!tool.includes("path: {"))
+  assert.ok(!tool.includes("group: {"))
 })

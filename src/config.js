@@ -47,6 +47,8 @@ export const ConfigSchema = Schema.object({
   localApiPort: Schema.number().min(0).max(65535).step(1)
     .default(34569)
     .description('独立设置服务的回环端口；0 = 关闭独立服务，仍可使用宿主设置路由。多实例请用不同端口，修改后重启宿主'),
+  acceptedDshVersions: Schema.dict(Schema.string()).default({})
+    .description('明确接受风险的 DSH 核心包版本。通常由确认弹窗填写；版本变化后重新确认。无界面部署可复制运行端 host-compatibility.json 的 versions 对象'),
 
   // ── Agent ──
   provider: Schema.string().description('LLM provider 名称；留空跟随宿主默认'),
@@ -418,24 +420,17 @@ export const ConfigSchema = Schema.object({
   // ── 上下文管理 ──
   contextGuard: Schema.boolean()
     .default(true)
-    .description('上下文守卫：DSH 自动压缩后补回聊天规矩；接近窗口上限时主动换新会话'),
-  contextSwapRatio: Schema.number()
-    .default(0.7)
-    .description(
-      '最近一次请求的 token 数超过窗口的这个比例就主动换新会话（0 = 不主动换，交给 DSH 自己的压缩）；DSH 默认在 0.8 自动压缩',
-    ),
-  contextSwapMinTokens: Schema.number()
-    .default(200000)
-    .description('主动换会话的 token 上限；已知模型窗口时与窗口比例取较小值，未知窗口时单独使用'),
-  contextMemoryKeep: Schema.number()
-    .default(30)
-    .description('换会话前把最近多少条聊天记进 记忆区/压缩记忆/，给新会话接话用'),
+    .description('记录上下文使用与压缩情况；正常长聊由 DSH 自动压缩，不主动换会话'),
+  memoryProvider: Schema.string().default('').description('记忆维护 provider；留空沿用当前主会话模型路由'),
+  memoryModel: Schema.string().default('').description('记忆维护模型；留空沿用当前主会话模型'),
+  memoryTimeoutMs: Schema.number().min(1).default(30000).description('记忆维护最长等待毫秒数'),
+  memoryTaskTtlHours: Schema.number().min(1).default(24).description('没有明确期限的事项多久无新证据转为待核实（小时）'),
 
   // ── 聊天流水 ──
   chatLog: Schema.boolean()
     .default(true)
     .description(
-      '把收到的消息和它自己说的话记进会话目录的 聊天记录/<日期>.md。关掉也能用，但那就会「聊完就忘」',
+      '把收发原文额外记进会话目录的 聊天记录/<日期>.md；不控制宿主历史和统一记忆',
     ),
 
   // ── 生命周期 ──

@@ -112,7 +112,7 @@ function makeConfig(over = {}) {
   check('投递的是对象不是字符串', typeof delivered, 'object')
   check('消息带 content[0].text', typeof delivered?.content?.[0]?.text, 'string')
   check('消息里能读出「安静了」', delivered?.content?.[0]?.text?.includes('安静了'), true)
-  check('消息带 source.kind', delivered?.source?.kind, 'user')
+  check('消息带 source.kind', delivered?.source?.kind, 'plugin')
   // 紧接着再 tick：1.5 倍间隔没到，不该再发
   w.tick()
   check('刚开口过不连发', m.fired, ['冷场群'])

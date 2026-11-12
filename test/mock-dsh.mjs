@@ -3,19 +3,22 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join, resolve, relative, dirname, isAbsolute } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { SystemPrompt, renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
+import { SystemPrompt, renderPrompt, renderContextSnapshot, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
+import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 
 /** 使用真实 systemPrompt 注册/组装器，其余宿主能力仍由模拟器提供。 */
 export function createMockPromptScope(base, cwd, scopedTools = new Map()) {
   const promptCtx = new Context()
   const prompt = new SystemPrompt(promptCtx, {})
-  return { ...base, cwd,
+  const scope = { ...base, cwd,
     get: name => name === 'systemPrompt' ? prompt : name === 'tools'
       ? { register: tool => scopedTools.set(tool.name, tool) } : base.get?.(name),
     on: (name, fn, options) => name.startsWith('system-prompt/')
-      ? promptCtx.on(name, fn, options) : base.on(name, fn, options),
+      ? promptCtx.on(name, fn, options) : base.on(name, (payload, next) =>
+        name.startsWith('agent/') && payload.agent?.ctx !== scope ? next?.() : fn(payload, next), options),
   }
+  return scope
 }
 
 export const textOf = message => (message?.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('')
@@ -42,6 +45,12 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
   }]))
   const services = {
     llm,
+    sessionProjections: {
+      async register(definition) {
+        return { readerFor: session => () => session.events.reduce((state, event) => definition.apply(state, event), definition.init(session.header)),
+          async dispose() {} }
+      },
+    },
     tools: { register(tool) { if (tools.has(tool.name)) throw new Error(`工具重复注册：${tool.name}`); tools.set(tool.name, tool) } },
     dshHomePath: name => join(home, name), approval: {}, webServer,
     agentPresets: {
@@ -83,18 +92,23 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
       return () => { const index = list.indexOf(fn); if (index >= 0) list.splice(index, 1) }
     },
     async emit(name, ...args) { for (const fn of [...(listeners.get(name) ?? [])]) await fn(...args) },
-    async waterfall(name, request) {
+    async waterfall(name, request, fallback = () => undefined) {
       const list = [...(listeners.get(name) ?? [])]
-      const next = index => index < list.length ? list[index](request, () => next(index + 1)) : undefined
+      const next = index => index < list.length ? list[index](request, () => next(index + 1)) : fallback()
       return next(0)
     },
     inject(names, callback) { if (names.every(name => services[name])) return callback(ctx) },
     effect(setup) { const cleanup = setup(); if (typeof cleanup === 'function') effects.push(cleanup); return cleanup },
   }
-  async function event(agent, type, data = {}, surface = {}) {
+  function appendEvent(agent, type, data = {}, surface = {}) {
     const raw = { type, sessionId: agent.id, seq: agent.session.events.length, data, ...surface }
     agent.session.events.push(raw); save(agent)
+    return raw
+  }
+  async function event(agent, type, data = {}, surface = {}) {
+    const raw = appendEvent(agent, type, data, surface)
     await ctx.emit('session/event', agent.session, raw)
+    return raw
   }
   async function invoke(agent, name, args) {
     const tool = agent.scopedTools.get(name) ?? tools.get(name)
@@ -113,15 +127,21 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
   async function run(agent, message) {
     const plan = plans.shift() ?? (autoReply ? [{ type: 'text', text: '模拟回复：已收到这条消息。' }] : [])
     await event(agent, 'turn/start')
-    await event(agent, 'user/message', { message })
+    await event(agent, 'user/message', message, { surfaceOp: 'append' })
     let reason = { kind: 'completed' }
     try {
       await request(agent)
       for (const step of plan) {
         switch (step.type) {
-          case 'text': await event(agent, 'assistant/message', { message: { content: [{ type: 'text', text: step.text }] }, usage: step.usage }); break
+          case 'text': {
+            const landed = await event(agent, 'assistant/message', { message: { content: [{ type: 'text', text: step.text }] }, usage: step.usage }, { surfaceOp: 'append' })
+            await ctx.emit('agent/assistant-stream', { agent, frame: { type: 'end', outcome: { kind: 'committed', eventType: 'assistant/message', seq: landed.seq } } })
+            break
+          }
           case 'chunk': await event(agent, 'assistant/chunk', { chunk: { type: 'text-delta', text: step.text } }); break
-          case 'tool': await invoke(agent, step.name, step.args ?? {}); await request(agent); break
+          case 'tool':
+            await ctx.emit('agent/assistant-stream', { agent, frame: { type: 'end', outcome: { kind: 'committed', eventType: 'assistant/message' } } })
+            await invoke(agent, step.name, step.args ?? {}); await request(agent); break
           case 'context': await event(agent, 'request/context', { contextWindow: step.window }); break
           case 'compact': await event(agent, 'compaction/end'); await request(agent); break
           case 'error': reason = { kind: 'error', error: { message: step.message } }; return
@@ -139,23 +159,35 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
         }
       }
     } catch (err) { logger.warn(err); reason = { kind: 'error', error: { message: err.message } } }
-    finally { await event(agent, 'turn/end', { reason }) }
+    finally { await event(agent, 'turn/end', { reason }); await ctx.emit('agent/status', { agent, status: 'idle' }) }
   }
   async function request(agent) {
     const assembly = await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))
+    await ctx.waterfall('agent/pre-step', { agent }, () => ({ kind: 'enter', messages: [] }))
+    const prompt = agent.ctx.get('systemPrompt')
+    const current = prompt.refreshContext(assembly, assembleContextFor(agent))
     const header = { system: renderPrompt(assembly), tools: assembly.tools }
-    agent.requests.push({ ...header, context: renderContextSnapshot(assembly) })
-    await event(agent, 'request/header', { header })
+    const nodes = agent.session.surface.nodes
+    const systemSeq = nodes.find(seq => agent.session.events[seq].type === 'system/message')
+    if (systemSeq === undefined || textOf(agent.session.events[systemSeq].data.message) !== header.system) {
+      await event(agent, 'system/message', { turn: 0, step: 0, message: createSystemMessage(header.system) },
+        systemSeq === undefined ? { surfaceOp: 'append' } : { surfaceOp: { op: 'replace', startSeq: systemSeq, endSeq: systemSeq }, sourceEventSeqs: [systemSeq] })
+    }
+    const sections = renderContextSections(current)
+    if (sections.length) await event(agent, 'user/message', createUserMessage({ content: [{ type: 'text', text: renderContextSnapshot(current) }],
+      source: { kind: 'runtime-context', form: 'snapshot', sections } }), { surfaceOp: 'append' })
+    agent.requests.push({ ...header, context: renderContextSnapshot(current), messages: agent.session.deriveMessages() })
+    await event(agent, 'request/header', { header: { config: {}, tools: assembly.tools } })
   }
   services.compaction = {
     compactNow(agent, signal) {
       return agent.runMaintenance(async () => {
         signal.throwIfAborted()
-        const shadowed = agent.session.events.filter(raw => ['user/message', 'assistant/message'].includes(raw.type)).map(raw => raw.seq)
+        const shadowed = agent.session.surface.nodes.filter(seq => agent.session.events[seq].type !== 'system/message')
         if (!shadowed.length) return null
         await event(agent, 'compaction/start')
-        await event(agent, 'user/message', { message: { content: [{ type: 'text', text: '模拟压缩摘要' }] } },
-          { surfaceOp: 'replace', sourceEventSeqs: shadowed })
+        await event(agent, 'user/message', { content: [{ type: 'text', text: '模拟压缩摘要' }], source: { kind: 'compact-checkpoint' } },
+          { surfaceOp: { op: 'replace', startSeq: shadowed[0], endSeq: shadowed.at(-1) }, sourceEventSeqs: shadowed })
         await event(agent, 'compaction/end')
         return { endSeq: agent.session.events.length - 1 }
       })
@@ -166,15 +198,28 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     const header = saved?.header ?? { id, meta: options.meta ?? {} }
     const scopedTools = new Map()
     const agentCtx = createMockPromptScope(ctx, header.meta?.cwd, scopedTools)
-    if (options.setup) { const commit = await options.setup(agentCtx); commit?.commit?.() }
     const agent = {
       id, ctx: agentCtx, scopedTools, results: [], requests: [],
       session: { id, header, events: saved?.events ?? [],
+        snapshotEvents() { return [...this.events] },
+        get seq() { return this.events.length },
+        get surface() {
+          const nodes = []
+          for (const event of this.events) {
+            if (event.surfaceOp?.op === 'replace') {
+              const start = nodes.indexOf(event.surfaceOp.startSeq), end = nodes.indexOf(event.surfaceOp.endSeq)
+              if (start >= 0) nodes.splice(start, end - start + 1, event.seq)
+            } else if (['system/message', 'developer/message', 'user/message', 'assistant/message', 'tool/result'].includes(event.type)) nodes.push(event.seq)
+          }
+          return { nodes }
+        },
+        append(type, data, surface) { return appendEvent(agent, type, data, surface) },
         requestHeader() { return this.events.findLast(raw => raw.type === 'request/header')?.data.header },
         deriveMessages() {
-          const shadowed = new Set(this.events.flatMap(raw => raw.surfaceOp === 'replace' ? raw.sourceEventSeqs : []))
-          return structuredClone(this.events.filter(raw => !shadowed.has(raw.seq) && ['user/message', 'assistant/message'].includes(raw.type))
-            .map(raw => ({ role: raw.type === 'user/message' ? 'user' : 'assistant', ...raw.data.message })))
+          return structuredClone(this.surface.nodes.map(seq => this.events[seq]).filter(raw =>
+            ['system/message', 'developer/message', 'user/message', 'assistant/message'].includes(raw.type))
+            .map(raw => ({ role: raw.type.split('/')[0], ...(raw.data.message ?? raw.data) }))
+            .filter(message => message.content?.length))
         },
       },
       received: saved?.received ?? [], injected: saved?.injected ?? [],
@@ -194,6 +239,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
         return run
       },
     }
+    if (options.setup) { const commit = await options.setup(agentCtx, agent); commit?.commit?.() }
     live.set(id, agent); save(agent)
     return { agent, async dispose() { disposed = true; live.delete(id) } }
   }

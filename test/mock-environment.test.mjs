@@ -125,7 +125,7 @@ test('空间发布和私聊历史工具走真实实现，NapCat 记录可见范�
   assert.equal(JSON.parse(await readFile(join(env.root, 'dsh-qq', 'qzone-state.json'), 'utf8')).count, 1)
 })
 
-test('重载恢复会话和预设，后续一条消息只处理一次；上下文超限会换代', async t => {
+test('重载恢复会话和预设，后续一条消息只处理一次；上下文超限保留会话', async t => {
   const env = await setup(t)
   env.emitMessage({ text: '重载前' })
   await waitFor(() => sent(env).length === 1); await idle(env)
@@ -140,9 +140,10 @@ test('重载恢复会话和预设，后续一条消息只处理一次；上下�
   env.host.queueTurn([{ type: 'error', message: 'CONTEXT_WINDOW_EXCEEDED' }])
   env.emitMessage({ text: '触发超限' })
   await waitFor(() => sent(env).length === 3)
-  env.emitMessage({ text: '新会话继续' })
+  env.emitMessage({ text: '原会话继续' })
   await waitFor(() => sent(env).length === 4)
-  assert.notEqual([...env.host.agents.keys()][0], id)
+  assert.equal([...env.host.agents.keys()][0], id)
+  assert.match(JSON.stringify(agent.received), /触发超限/)
 })
 
 test('断线重连与 API 失败可控，模拟地址不能通过设置改成真实地址', async t => {

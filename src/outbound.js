@@ -935,10 +935,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
           reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
         logger.warn?.(`[dsh-qq] ${record.label} 本轮出错: ${message}`)
         if (/CONTEXT_WINDOW_EXCEEDED|maximum context length/i.test(String(message))) {
-          const seed = await contextGuard?.maybeSwap(record, { force: true })
-          await emit(record, seed
-            ? '这轮上下文已满，已保留话头并重置会话，请再发一次。'
-            : '这轮上下文已满，请用 /reset 重置会话后重发。')
+          await emit(record, '这轮上下文处理失败，当前会话和原消息已保留。请尝试压缩会话，或明确选择 /new 新建会话。')
           return
         }
         await emit(record, `⚠️ ${message}`)

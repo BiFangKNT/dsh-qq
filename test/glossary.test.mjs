@@ -74,10 +74,10 @@ test('loadGlossaryFor：文件在就读得到，文件不在返回空串', () =>
   assert.equal(loadGlossaryFor({}), '')
 })
 
-test('buildChatPrompt：群里会带上群词典，私聊不带', () => {
+test('buildChatPrompt：旧群词典不再注入固定规则', () => {
   const inGroup = buildChatPrompt({}, { isGroup: true, glossary: '## 待确认\n- [ ] 某某：啥意思', glossaryFile: 'x/群词典.md' })
-  assert.ok(inGroup.includes('【群词典'), '群里应该注入')
-  assert.ok(inGroup.includes('你自己记的笔记'), '别让它以为是别人塞的规矩')
+  assert.ok(!inGroup.includes('【群词典'), '可变资料不进入固定 system')
+  assert.ok(!inGroup.includes('某某：啥意思'))
 
   const inPrivate = buildChatPrompt({}, { isGroup: false, glossary: '## 待确认\n- [ ] 某某：啥意思' })
   assert.ok(!inPrivate.includes('【群词典'), '私聊不该把某个群的词带进来')

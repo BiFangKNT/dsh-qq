@@ -136,21 +136,20 @@ test('群与私聊作息独立，私聊按专用结束时间交付，群不排�
   } finally { s.stop() }
 })
 
-test('未知窗口使用配置阈值；上下文错误沿用同一交接恢复路径', async () => {
+test('上下文超限保留原会话和消息，提示压缩或明确新建', async () => {
   const record = { scope: 'private', sessionId: 's', label: '测试', busy: 0, recent: ['需要保留的话'] }
   const resets = []
   const manager = { find: () => record, reset: (r, seed) => { resets.push(seed); return true } }
   const guard = createContextGuard({ manager, logger, config: { contextSwapMinTokens: 1000 } })
-  record.promptTokens = 999; assert.equal(await guard.maybeSwap(record), null)
-  record.promptTokens = 1000; assert.ok(await guard.maybeSwap(record))
+  assert.equal(guard.maybeSwap, undefined)
   record.busy = 1; record.promptTokens = 0
   const sent = []
   const outbound = createOutbound({ manager, logger, config: { streamReply: false }, contextGuard: guard,
     send: async (_r, text) => sent.push(text) })
   await outbound({ id: 's' }, { type: 'turn/end', data: { reason: { kind: 'error', error: { message: 'maximum context length exceeded' } } } })
-  assert.equal(resets.length, 2)
-  assert.match(resets[1].join('\n'), /需要保留的话/)
-  assert.match(sent[0], /请再发一次/)
+  assert.deepEqual(resets, [])
+  assert.deepEqual(record.recent, ['需要保留的话'])
+  assert.match(sent[0], /已保留.*压缩会话/)
 })
 
 test('语音工具抑制后续正文重复；包装标签统一清理，颜文字保留', async () => {
@@ -167,11 +166,14 @@ test('语音工具抑制后续正文重复；包装标签统一清理，颜文�
 test('preset 在 create 和 resume 的 setup 中挂载，缺服务显式报错', async () => {
   for (const restore of [false, true]) {
     const mounted = []
-    const agentCtx = createMockPromptScope({ get() {} })
+    const agentCtx = createMockPromptScope({ get: name => name === 'sessionProjections' ? {
+      async register(definition) { return { readerFor: () => () => definition.init() } },
+    } : undefined })
     const handle = async options => {
-      await options.setup(agentCtx)
       const id = options.sessionId ?? options.resumeSessionId
-      return { agent: { id, ctx: agentCtx, session: { id, events: [], requestHeader() {} } }, dispose() {} }
+      const agent = { id, ctx: agentCtx, session: { id, events: [], requestHeader() {} } }
+      await options.setup(agentCtx, agent)
+      return { agent, dispose() {} }
     }
     const agents = {
       async resume(options) { if (!restore) throw new Error('不存在'); return handle(options) },

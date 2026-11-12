@@ -47,11 +47,12 @@ function createFakeCtx() {
     },
     create: async ({ sessionId, setup, meta }) => {
       const agentCtx = createMockPromptScope(ctx, meta?.cwd)
-      await setup?.(agentCtx)
       let idle = Promise.resolve()
       const agent = {
         id: sessionId, ctx: agentCtx,
         session: { id: sessionId, header: { id: sessionId }, events: [],
+          append(type, data, surface) { this.events.push({ type, data, seq: this.events.length, ...surface }) },
+          snapshotEvents() { return [...this.events] },
           requestHeader() { return this.events.findLast(event => event.type === 'request/header')?.data.header },
         },
         system: '',
@@ -69,12 +70,18 @@ function createFakeCtx() {
         },
         whenIdle() { return idle },
       }
+      await setup?.(agentCtx, agent)
       created.push(agent)
       return { agent, dispose: async () => {} }
     },
   }
   const ctx = {
     agents,
+    get: name => name === 'sessionProjections' ? {
+      async register(definition) {
+        return { readerFor: session => () => session.events.reduce((state, event) => definition.apply(state, event), definition.init(session.header)) }
+      },
+    } : undefined,
     logger: { info() {}, warn() {}, error() {}, debug() {} },
     on(name, fn) {
       if (!handlers.has(name)) handlers.set(name, new Set())
@@ -117,7 +124,6 @@ const config = Config({
   persona: '你叫小满，是个住在电脑里的助手。',
   ownerIds: ['11001'],
   peerBots: ['10002'], // 测试里把「另一个机器人」登记成同类，才测得了「开关关着不接」
-  contextSwapMinTokens: 1000,
 })
 
 apply(ctx, config)
@@ -620,7 +626,7 @@ console.log('✓ 私聊白名单：陌生人拦下、自己人放行')
 // —— 上下文守卫：压缩后补回聊天规矩 ——
 ctx.emit('session/event', privateAgent.session, { type: 'compaction/end', data: {} })
 await sleep(100)
-assert.equal(privateAgent.injected.length, 1, '压缩后应该 inject 一张记忆卡')
+assert.equal(privateAgent.injected.length, 0, '压缩后不持久追加状态卡')
 mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '刚才说到哪了', messageId: 401 })
 // 别盯死某一个 agent、也别数条数：
 //   - 压缩之后 record 可能已经被换过（新 record → 新 agent），看「谁收到了」比看「第几个」稳；
@@ -635,7 +641,7 @@ const afterCompact = created
   .flatMap((a) => a.received.map(textOf))
   .find((t) => /刚才说到哪了/.test(t))
 assert.doesNotMatch(afterCompact, /你正在用 QQ 跟人聊天/, '压缩后不再把固定规则写入用户消息')
-console.log('✓ 压缩后重注入聊天规矩 + 记忆卡')
+console.log('✓ 压缩后不追加旧状态卡')
 
 // —— 上下文守卫：压力超过阈值主动换会话 ——
 ctx.emit('session/event', privateAgent.session, {
@@ -655,14 +661,15 @@ mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '聊点别的', 
 // 前面白名单那段的「陌生人」消息也会进这个 open 实例，created 里可能多出别的会话，
 // 所以按内容找，不按序号找
 const gotIt = (agent) => agent.received.some((m) => textOf(m).includes('聊点别的'))
-await waitFor(() => created.some(gotIt), { what: '压力超限换新会话' })
+await waitFor(() => created.some(gotIt), { what: '压力超限仍可在原会话继续' })
 const swapped = created.find(gotIt)
-const swappedText = textOf(swapped.received[0])
+const swappedText = textOf(swapped.received.find(m => textOf(m).includes('聊点别的')))
 assert.match(swappedText, /聊点别的/)
 await swapped.whenIdle()
 assert.match(swapped.system, /你正在用 QQ 跟人聊天/, '新会话应该使用 system 聊天规矩')
-assert.match(swappedText, /刚才那段聊到这里/, '新会话应该带上上一段聊天的尾巴')
-console.log('✓ 压力超限自动换新会话（带 seed 接话）')
+assert.equal(swapped, privateAgent, '不按 token 阈值换会话')
+assert.doesNotMatch(swappedText, /刚才那段聊到这里/)
+console.log('✓ 压力超限仍保留原会话')
 
 // —— 连发合并：一口气发三条，只回一轮 ——
 const { ctx: ctx3, created: created3 } = createFakeCtx()

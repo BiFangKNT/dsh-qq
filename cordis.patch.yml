@@ -26,6 +26,7 @@
         accessToken: ''
         selfId: ''
         reconnectMs: 5000
+        acceptedDshVersions: {}
 
         # ── Agent ──
         # provider/model/preset/cwd 留空 = 跟随宿主默认
@@ -39,6 +40,10 @@
         addressClassifierModel: ''
         addressClassifierReasoningEffort: low
         addressClassifierTimeoutMs: 30000
+        memoryProvider: ''
+        memoryModel: ''
+        memoryTimeoutMs: 30000
+        memoryTaskTtlHours: 24
         requireMention: true
         replyToPrivate: true
         groupMode: open

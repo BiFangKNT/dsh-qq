@@ -63,6 +63,7 @@ function scalar(v) {
   if (s === 'false') return false
   if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s)
   if (s === '[]') return []
+  if (s === '{}') return {}
   return s
 }
 

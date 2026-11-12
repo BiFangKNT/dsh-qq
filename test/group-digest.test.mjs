@@ -127,12 +127,10 @@ test('多群按群号排；没记录 / 目录不存在 → 空串', () => {
   assert.equal(loadGroupDigest({ workspaceRoot: join(root, 'nope'), today: DAY }), '')
 })
 
-test('buildChatPrompt：纸条只进私聊，群聊不塞', () => {
+test('buildChatPrompt：群近况不进入固定 system', () => {
   const digest = '· 群 123456789：最后 00:08:57 某人 说「随便说的一句」'
   const priv = buildChatPrompt({}, { isGroup: false, groupDigest: digest })
-  assert.ok(priv.includes('【今天群里发生过'), '私聊该有纸条')
-  assert.ok(priv.includes('这不是你翻出来的'), '得点明这是插件递的，不是她翻的本子')
-  assert.ok(priv.includes('照实说不知道'), '纸条上没有的别编')
+  assert.ok(!priv.includes(digest))
 
   const grp = buildChatPrompt({}, { isGroup: true, groupDigest: digest })
   assert.ok(!grp.includes('【今天群里发生过'), '她在那个群里，用不着替她讲')

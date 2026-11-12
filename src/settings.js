@@ -37,6 +37,7 @@ export const OVERRIDABLE = [
   'selfId',
   'reconnectMs',
   'localApiPort',
+  'acceptedDshVersions',
   'doorReplyPrefix',
   'doorSenderLabel',
   // 人设 / 称呼
@@ -49,6 +50,10 @@ export const OVERRIDABLE = [
   // 工作区与记忆
   'workspaceRoot',
   'isolateByPeer',
+  'memoryProvider',
+  'memoryModel',
+  'memoryTimeoutMs',
+  'memoryTaskTtlHours',
   'imageCacheDir',
   // 触发与节奏
   'addressClassifierEnabled',
@@ -312,7 +317,7 @@ export function settingsInfo(ctx, logger) {
  * @param {object} opts.overridesRef `{ current: {} }`，设置页存下来的覆盖
  * @returns {boolean} 是否挂上
  */
-export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef, promptSync }) {
+export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef, promptSync, compatibility, getRuntime }) {
   // 自证：这次到底有没有把路由挂上（排查「设置页 404」时不用靠猜）
   const noteApiState = (ok, detail) => {
     try {
@@ -351,14 +356,15 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
   }
 
   const statusOf = () => {
+    const { client: liveClient = client, manager: liveManager = manager, promptSync: liveSync = promptSync } = getRuntime?.() ?? {}
     const info = settingsInfo(ctx, logger)
     return {
       ok: true,
       uiOnly: Boolean(config.uiOnly),
-      connected: Boolean(client?.connected),
+      connected: Boolean(liveClient?.connected),
       wsUrl: config.wsUrl,
-      selfId: (manager?.selfId || String(config.selfId ?? '')) || '',
-      selfName: manager?.selfName || '',
+      selfId: (liveManager?.selfId || String(config.selfId ?? '')) || '',
+      selfName: liveManager?.selfName || '',
       persona: {
         ok: Boolean(personaRef?.current?.ok),
         fromFile: Boolean(personaRef?.current?.ok),
@@ -371,11 +377,13 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       settingsFile: info.file,
       settingsExists: info.exists,
       overrides: Object.keys(overridesRef?.current ?? {}).length,
-      promptSync: promptSync?.status() ?? { pending: [], operations: [] },
+      promptSync: liveSync?.status() ?? { pending: [], operations: [] },
+      compatibility: compatibility?.status() ?? null,
     }
   }
 
   const handleApi = async (req, res) => {
+    const { client: runtimeClient = client, promptSync: runtimeSync = promptSync } = getRuntime?.() ?? {}
     const url = new URL(req.url, 'http://127.0.0.1')
     // ⚠️ 宿主给 prefix 路由的 req.url 有两种形态：完整路径（/api/dsh-qq/status），
     //    或者已经被剥掉前缀的（/status）。两种都认，不然会一直 404。
@@ -388,11 +396,25 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       return sendJson(res, 200, statusOf())
     }
 
+    if (req.method === 'POST' && path === '/api/dsh-qq/compatibility') {
+      if (!compatibility) return sendJson(res, 503, { ok: false, error: '宿主版本确认服务未启动' })
+      const body = await readJsonBody(req)
+      try { compatibility.validate(body.versions) }
+      catch (err) { return sendJson(res, 409, { ok: false, error: err.message }) }
+      const accepted = { ...body.versions }
+      const saved = saveOverrides(ctx, { ...loadOverrides(ctx, logger), acceptedDshVersions: accepted }, logger)
+      if (!saved.ok) return sendJson(res, 500, { ok: false, error: saved.error })
+      config.acceptedDshVersions = accepted
+      if (overridesRef) overridesRef.current = saved.overrides
+      compatibility.sync()
+      return sendJson(res, 200, { ok: true, compatibility: compatibility.status() })
+    }
+
     if (req.method === 'POST' && path === '/api/dsh-qq/prompt-sync') {
-      if (!promptSync) return sendJson(res, 503, { ok: false, error: '提示词同步服务未启动' })
+      if (!runtimeSync) return sendJson(res, 503, { ok: false, error: '提示词同步服务未启动' })
       const body = await readJsonBody(req)
       try {
-        return sendJson(res, 202, { ok: true, operation: promptSync.request(body.action, body.sessionIds) })
+        return sendJson(res, 202, { ok: true, operation: runtimeSync.request(body.action, body.sessionIds) })
       } catch (err) { return sendJson(res, 400, { ok: false, error: err?.message ?? String(err) }) }
     }
 
@@ -410,12 +432,22 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const body = await readJsonBody(req)
       const patch = body?.patch && typeof body.patch === 'object' ? body.patch : body
       if (!patch || typeof patch !== 'object') return sendJson(res, 400, { ok: false, error: '要一个对象' })
+      if (patch.acceptedDshVersions != null && (typeof patch.acceptedDshVersions !== 'object' || Array.isArray(patch.acceptedDshVersions) ||
+        Object.values(patch.acceptedDshVersions).some(value => typeof value !== 'string'))) {
+        return sendJson(res, 400, { ok: false, error: 'acceptedDshVersions 必须是包名到版本号的对象' })
+      }
 
       if (patch.addressClassifierEnabled != null && typeof patch.addressClassifierEnabled !== 'boolean') {
         return sendJson(res, 400, { ok: false, error: 'addressClassifierEnabled 必须为布尔值' })
       }
       if (patch.addressClassifierTimeoutMs != null && (!Number.isFinite(patch.addressClassifierTimeoutMs) || patch.addressClassifierTimeoutMs <= 0)) {
         return sendJson(res, 400, { ok: false, error: 'addressClassifierTimeoutMs 必须为正数' })
+      }
+      for (const key of ['memoryTimeoutMs', 'memoryTaskTtlHours']) {
+        if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] <= 0)) return sendJson(res, 400, { ok: false, error: `${key} 必须为正数` })
+      }
+      for (const key of ['memoryProvider', 'memoryModel']) {
+        if (patch[key] != null && typeof patch[key] !== 'string') return sendJson(res, 400, { ok: false, error: `${key} 必须为字符串` })
       }
       for (const key of ['addressClassifierProvider', 'addressClassifierModel', 'addressClassifierReasoningEffort']) {
         if (patch[key] != null && typeof patch[key] !== 'string') {
@@ -431,7 +463,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       }
 
       // 值是 null = 清掉这条覆盖，回到 cordis 里的默认值
-      const systemBefore = JSON.stringify(promptSync?.status().pending ?? [])
+      const systemBefore = JSON.stringify(runtimeSync?.status().pending ?? [])
       const next = { ...(overridesRef?.current ?? {}) }
       for (const [key, value] of Object.entries(patch)) {
         if (!OVERRIDABLE.includes(key)) continue
@@ -448,13 +480,14 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
         Object.assign(overridesRef.current, saved.overrides)
       }
       applyOverrides(config, saved.overrides, logger)
+      compatibility?.sync()
       const personaNow = resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) })
       if (personaRef) personaRef.current = personaNow
 
       const touched = (key) => Object.prototype.hasOwnProperty.call(patch, key)
       const needReconnect = ['wsUrl', 'accessToken'].some(touched)
       const needRestart = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'asrPython'].some(touched)
-      const promptStatus = promptSync?.status() ?? { pending: [], operations: [] }
+      const promptStatus = (getRuntime?.().promptSync ?? runtimeSync)?.status() ?? { pending: [], operations: [] }
 
       return sendJson(res, 200, {
         ok: true,
@@ -470,13 +503,14 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
     // 改了 wsUrl / token 之后不用重启整个宿主，把客户端重开一次就行
     if (req.method === 'POST' && path === '/api/dsh-qq/reconnect') {
-      if (!client) return sendJson(res, 400, { ok: false, error: '这一份只提供设置页（uiOnly），QQ 连接在另一个进程里；去那边重启' })
+      if (compatibility?.status().pending) return sendJson(res, 409, { ok: false, error: '请先确认 DSH 版本风险，再启用 QQ' })
+      if (!runtimeClient) return sendJson(res, 400, { ok: false, error: 'QQ 尚未启用，或此实例只提供设置页；请检查运行端状态' })
       try {
-        client.stop()
-        client.url = config.wsUrl
-        client.token = config.accessToken
-        client.start()
-        return sendJson(res, 200, { ok: true, wsUrl: client.url })
+        runtimeClient.stop()
+        runtimeClient.url = config.wsUrl
+        runtimeClient.token = config.accessToken
+        runtimeClient.start()
+        return sendJson(res, 200, { ok: true, wsUrl: runtimeClient.url })
       } catch (err) {
         return sendJson(res, 500, { ok: false, error: err?.message ?? String(err) })
       }
@@ -726,7 +760,7 @@ function tailLinesFromChat(text, { gid = '', me = '', tailCount = 2, limit = 240
  * @param {{ workspaceRoot?: string, today?: string, selfId?: string }} opts
  * @returns {string} 多行文本；没有群、没有记录时返回 ''
  */
-export function loadGroupDigest({ workspaceRoot, today, selfId = '' } = {}, { limit = 240, tailCount = 2 } = {}) {
+export function loadGroupDigest({ workspaceRoot, today, selfId = '', allowedGroups } = {}, { limit = 240, tailCount = 2 } = {}) {
   const root = String(workspaceRoot ?? '').trim()
   const day = String(today ?? '').trim()
   if (!root || !day) return ''
@@ -734,6 +768,7 @@ export function loadGroupDigest({ workspaceRoot, today, selfId = '' } = {}, { li
   try {
     names = readdirSync(root, { withFileTypes: true })
       .filter((d) => d.isDirectory() && /^群_/.test(d.name))
+      .filter(d => !allowedGroups || allowedGroups.includes(d.name.replace(/^群_/, '')))
       .map((d) => d.name)
       .sort()
   } catch {

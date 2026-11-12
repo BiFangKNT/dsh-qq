@@ -189,7 +189,7 @@ export function createSleep({ config, manager, logger }) {
         record.agent.followup(
           createUserMessage({
             content: [{ type: 'text', text }],
-            source: { kind: 'user' },
+            source: { kind: 'plugin', plugin: 'dsh-qq', form: 'sleep' },
           }),
         )
         await Promise.race([

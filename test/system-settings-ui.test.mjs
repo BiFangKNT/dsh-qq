@@ -33,7 +33,7 @@ async function panel() {
     document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { appendChild() {} } } })
   vm.runInContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'), context)
   bundle.factory(() => React).apply({ effect() {}, slots: {
-    inject: (_slot, fn) => fn(), register: (_meta, render) => { renderPanel = render },
+    inject: (_slot, fn) => fn(), register: (meta, render) => { if (meta.name === 'settings.section') renderPanel = render },
   } })
   const Panel = renderPanel().type
   const flatten = element => !element || typeof element !== 'object' ? [] :

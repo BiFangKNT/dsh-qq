@@ -146,7 +146,7 @@ export function appendPending(file, hits, { limit = 10 } = {}) {
  * @param {object} [opts.logger]
  * @returns {number} 总新增条数
  */
-export function scanOnce({ workspaceRoot, selfId, today, logger } = {}) {
+export function scanOnce({ workspaceRoot, selfId, today, logger, onHits } = {}) {
   const root = String(workspaceRoot ?? '').trim()
   if (!root || !existsSync(root)) return 0
   const day = today || new Date().toISOString().slice(0, 10)
@@ -178,7 +178,7 @@ export function scanOnce({ workspaceRoot, selfId, today, logger } = {}) {
     }
     if (!hits.length) continue
     const file = join(dir, '记忆区', '群词典.md')
-    const n = appendPending(file, hits)
+    const n = onHits ? onHits({ selfId: String(selfId), scope: 'group', peerId: name.replace(/^群_/, ''), dir }, hits) : appendPending(file, hits)
     if (n > 0) {
       total += n
       logger?.info?.(`群词典：${name} 新增 ${n} 条待确认`)
@@ -192,13 +192,13 @@ export function scanOnce({ workspaceRoot, selfId, today, logger } = {}) {
  * selfId 可以传函数：登录前拿不到、连接后才知道，每次 tick 现取。
  * @returns {() => void} dispose
  */
-export function startLearning({ workspaceRoot, selfId, everyMs = 20 * 60_000, logger } = {}) {
+export function startLearning({ workspaceRoot, selfId, everyMs = 20 * 60_000, logger, onHits } = {}) {
   let timer = null
   const tick = () => {
     try {
       const sid = typeof selfId === 'function' ? selfId() : selfId
       if (!sid) return // 还没登录，认不出哪条是自己发的
-      scanOnce({ workspaceRoot, selfId: sid, logger })
+      scanOnce({ workspaceRoot, selfId: sid, logger, onHits })
     } catch (err) {
       logger?.warn?.(`群词典扫描失败：${err?.message ?? err}`)
     }

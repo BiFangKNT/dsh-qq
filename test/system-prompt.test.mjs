@@ -21,10 +21,11 @@ async function directory(t) {
   return root
 }
 const meta = { selfId: '10001', scope: 'private', peerId: '11001', label: '测试私聊' }
-function fixture({ config = { persona: '初始人设 {{literal_text}}', ownerIds: [] }, store = createSystemPromptStore(''), events = [], header, id = 'fixture', peer = meta } = {}) {
-  const ctx = createMockPromptScope({ get() {} })
+async function fixture({ config = { persona: '初始人设 {{literal_text}}', ownerIds: [] }, store = createSystemPromptStore(''), events = [], header, id = 'fixture', peer = meta } = {}) {
+  const ctx = createMockPromptScope({ get: name => name === 'sessionProjections' ? { async register(definition) { return { readerFor: session => () => session.events.reduce((state, event) => definition.apply(state, event), definition.init()) } } } : undefined })
   const agent = { id, ctx, session: { id, events, requestHeader: () => header } }
-  const dispose = installChatSystem({ agentCtx: ctx, config, meta: peer, store })
+  if (header?.system !== undefined) events.unshift({ type: 'system/message', seq: -1, data: { message: { content: [{ type: 'text', text: header.system }] } } })
+  const dispose = await installChatSystem({ agentCtx: ctx, agent, config, meta: peer, store })
   const request = async () => {
     const assembly = await ctx.get('systemPrompt').assemble(assembleContextFor(agent))
     const system = renderPrompt(assembly)
@@ -37,7 +38,7 @@ function fixture({ config = { persona: '初始人设 {{literal_text}}', ownerIds
 }
 
 test('每次请求锁定完整 system，工具续调和动态资料变化不改变前缀', async () => {
-  const h = fixture()
+  const h = await fixture()
   let hostVariable = '宿主初值'
   h.agent.ctx.get('systemPrompt').variable('host_value', () => hostVariable)
   h.agent.ctx.get('systemPrompt').section({ name: 'host', order: 20, text: '{{host_value}}' })
@@ -58,7 +59,7 @@ test('每次请求锁定完整 system，工具续调和动态资料变化不改�
 })
 
 test('成功压缩后同轮下一请求同步；失败的结束事件不能解锁', async () => {
-  const h = fixture()
+  const h = await fixture()
   const first = await h.request()
   h.config.persona = '压缩后的新设定'
   h.compact({ error: 'summary failed' })
@@ -74,12 +75,12 @@ test('成功压缩后同轮下一请求同步；失败的结束事件不能解�
 
 test('重启和闲置恢复沿用磁盘快照，尚未请求也锁定创建时的配置', async t => {
   const root = await directory(t)
-  const first = fixture({ store: createSystemPromptStore(root) })
+  const first = await fixture({ store: createSystemPromptStore(root) })
   first.config.persona = '创建后才改的配置'
   const original = await first.request()
   assert.match(original.system, /初始人设/)
   first.dispose()
-  const resumed = fixture({ config: { persona: '重启后新配置' }, events: first.events,
+  const resumed = await fixture({ config: { persona: '重启后新配置' }, events: first.events,
     store: createSystemPromptStore(root) })
   assert.equal((await resumed.request()).system, original.system)
   resumed.compact()
@@ -88,7 +89,7 @@ test('重启和闲置恢复沿用磁盘快照，尚未请求也锁定创建时�
 })
 
 test('旧版本会话先沿用原请求头，成功压缩才迁移固定规则', async () => {
-  const h = fixture({ header: { system: '旧版本完整 system' },
+  const h = await fixture({ header: { system: '旧版本完整 system' },
     events: [{ type: 'request/header', seq: 0 }] })
   assert.equal((await h.request()).system, '旧版本完整 system')
   h.compact()
@@ -97,13 +98,13 @@ test('旧版本会话先沿用原请求头，成功压缩才迁移固定规则',
 })
 
 test('压缩完成后尚未来得及请求就重启，也会同步最新配置', async () => {
-  const h = fixture({ config: { persona: '最新设定' }, header: { system: '旧版本 system' },
+  const h = await fixture({ config: { persona: '最新设定' }, header: { system: '旧版本 system' },
     events: [{ type: 'request/header', seq: 0 }, { type: 'compaction/end', seq: 1, data: {} }] })
   assert.match((await h.request()).system, /最新设定/)
   h.dispose()
 })
 
-test('群词典按当前会话动态读取；私聊摘要按本地日期读取，资料不进入 system', async t => {
+test('旧词典与群近况不再经持久动态 context 注入', async t => {
   const root = await directory(t), groupDir = join(root, '群_22001')
   await mkdir(join(groupDir, '记忆区'), { recursive: true })
   await mkdir(join(groupDir, '聊天记录'), { recursive: true })
@@ -113,18 +114,18 @@ test('群词典按当前会话动态读取；私聊摘要按本地日期读取�
   const day = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`
   await writeFile(join(groupDir, '聊天记录', `${day}.md`), '- 12:00:00 · 群友(11001)：今天的群聊尾巴\n')
   const config = { persona: '相同角色', workspaceRoot: root }
-  const group = fixture({ config, peer: { ...meta, scope: 'group', peerId: '22001', dir: groupDir } })
+  const group = await fixture({ config, peer: { ...meta, scope: 'group', peerId: '22001', dir: groupDir } })
   const original = await group.request()
-  assert.match(original.context, /本群专属词条/)
+  assert.doesNotMatch(original.context, /本群专属词条/)
   assert.doesNotMatch(original.context, /今天群里发生过/)
   await writeFile(glossary, '词条更新后立即可见')
   const updated = await group.request()
-  assert.match(updated.context, /词条更新后立即可见/)
+  assert.doesNotMatch(updated.context, /词条更新后立即可见/)
   assert.equal(updated.system, original.system)
-  const privateChat = fixture({ config, peer: { ...meta, dir: join(root, '私聊_11001') } })
+  const privateChat = await fixture({ config, peer: { ...meta, dir: join(root, '私聊_11001') } })
   const other = await privateChat.request()
   assert.doesNotMatch(other.context, /本群专属词条|词条更新后/)
-  assert.match(other.context, /今天的群聊尾巴/)
+  assert.doesNotMatch(other.context, /今天的群聊尾巴/)
   assert.doesNotMatch(other.system, /词条|今天的群聊尾巴/)
   group.dispose(); privateChat.dispose()
 })
@@ -238,7 +239,7 @@ test('跨设置进程强制同步等待回复结束，保留完整历史并重�
   h.config.persona = '尚未同步的下一版'
   const assembly = await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))
   assert.equal(renderPrompt(assembly), updated)
-  const resumed = fixture({ id: oldId, config: h.config, events: agent.session.events,
+  const resumed = await fixture({ id: oldId, config: h.config, events: agent.session.events,
     store: createSystemPromptStore(h.home) })
   assert.equal((await resumed.request()).system, updated)
   resumed.dispose()
@@ -329,6 +330,36 @@ test('等待新建会话时收到的消息，切换后仍交付且保留本条�
   assert.equal(h.record.lastMessageId, 42)
   assert.equal(h.record.lastSenderId, 11001)
 })
+
+for (const command of ['/new', '#new', '/reset', '#reset']) {
+  test(`${command} 等待旧回复结束时，后续排队消息进入新会话`, async t => {
+    const h = await runtime(t), oldId = h.record.sessionId, oldAgent = h.record.agent
+    Object.assign(h.config, { privateMode: 'open', mergeWindowMs: 0, chatLog: false })
+    let release, waiting = false
+    const gate = new Promise(resolve => { release = resolve })
+    t.after(() => release())
+    oldAgent.whenIdle = () => { waiting = true; return gate }
+    const inbound = createInbound({ config: h.config, manager: h.manager, logger,
+      send: async () => {}, client: { call: async () => ({}) } })
+    t.after(() => inbound.dispose())
+    const event = (message, messageId) => ({ post_type: 'message', message_type: 'private', self_id: 10001,
+      user_id: 11001, message_id: messageId, sender: { user_id: 11001, nickname: '测试用户' }, message })
+    const resetting = inbound(event(command, 41))
+    await waitFor(() => waiting)
+    await inbound(event('新会话中的消息', 42))
+    release()
+    await resetting
+    await h.record.queue
+    assert.notEqual(h.record.sessionId, oldId)
+    assert.notEqual(h.record.agent, oldAgent)
+    assert.equal(await h.manager.obtain(meta), h.record)
+    assert.equal(oldAgent.received.length, 0)
+    assert.equal(h.record.agent.received.length, 1)
+    assert.match(JSON.stringify(h.record.agent.received), /新会话中的消息/)
+    assert.equal(h.record.lastMessageId, 42)
+    assert.equal(h.record.lastSenderId, 11001)
+  })
+}
 
 test('账号身份在登录后才确定，也能识别上次中断的操作且不自动重放', async t => {
   const h = await runtime(t)

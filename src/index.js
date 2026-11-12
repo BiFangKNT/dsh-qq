@@ -11,12 +11,14 @@ import { appendChatLog } from './chatlog.js'
 import { SILENT_MARKER, personaLeaks, stripSilentMark } from './prompts.js'
 import { createOutbound } from './outbound.js'
 import { createBridge } from './bridge.js'
-import { createPin } from './pin.js'
 import { createWake } from './wake.js'
 import { createSleep } from './sleep.js'
 import { createReading } from './reading.js'
 import { startLearning } from './learning.js'
 import { createContextGuard } from './context-guard.js'
+import { createMemory } from './memory.js'
+import { buildRuntimeContext } from './runtime-context.js'
+import { createHostCompatibility } from './host-compatibility.js'
 import { auditOutbound } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
@@ -124,7 +126,7 @@ function safeJson(v) {
  * 用 `watchFile`（轮询）而不是 `fs.watch`，因为它**容忍文件不存在**（首次还没有
  * settings.json 时 watch 会直接报错），而且跨进程写盘在 Windows 上事件不可靠。
  */
-export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef = null) {
+export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef = null, onReload = null) {
   let file = ''
   try {
     file = settingsFileOf(ctx, logger)
@@ -158,6 +160,7 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
           /* ignore */
         }
       }
+      onReload?.()
       logger.info(
         applied.length > 0
           ? `settings.json 变了，已就地应用: ${applied.join(', ')}（不用重启）`
@@ -244,7 +247,11 @@ export function apply(ctx, config) {
   // 另一个进程（设置面板）改了 settings.json 时，这边自己跟上，不用重启宿主。
   // clientRef 先占位：client 要到下面才建，热更新回调得能拿到它（填 wsUrl 后要自动接上）。
   const clientRef = { current: null }
-  watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef)
+  const runtime = {}
+  const compatibility = createHostCompatibility({ config, home: homeDirOf(ctx, logger), logger,
+    start: () => Object.assign(runtime, startRuntime({ ctx, config, logger, agents, clientRef })) })
+  ctx.on('dispose', () => compatibility.stop())
+  watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef, () => compatibility.sync())
 
   // 设置页接口：**运行时注入** webServer，而不是写进顶层 `export const inject`。
   // 有网页服务的宿主（Desktop / Web GUI）才会回调进来；headless 的 qqbot 永远不回调，
@@ -258,22 +265,27 @@ export function apply(ctx, config) {
     // 测试桩 / 极简宿主可能没有 ctx.inject，这时候跳过就好，别让整个插件崩
     if (typeof ctx.inject !== 'function') return
     ctx.inject(['webServer'], (sub) =>
-      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, ...extra }),
+      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, compatibility, getRuntime: () => runtime, ...extra }),
     )
   }
 
   // 只当「设置面板」用：桌面 / Web GUI 那份只提供这一页，不去连 NapCat。
   // 不然同一个 QQ 号在两处同时登录，消息会互相抢。
   if (config.uiOnly) {
-    const promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, logger })
-    mountSettingsApi({ personaRef, overridesRef, promptSync })
+    runtime.promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, logger })
+    mountSettingsApi({ personaRef, overridesRef })
     logger.info('uiOnly：只提供设置页，不连接 NapCat')
     return
   }
 
+  mountSettingsApi({ personaRef, overridesRef })
+  compatibility.sync()
+  if (compatibility.status().pending) logger.warn('DSH 核心包版本未经验证，QQ 暂未启用。请在 QQ 设置中确认风险，或配置 acceptedDshVersions 后启用。')
+}
+
+function startRuntime({ ctx, config, logger, agents, clientRef }) {
   if (!agents) {
-    logger.warn('宿主没有 agents 服务，dsh-qq 不启动')
-    return
+    throw new Error('宿主没有 agents 服务，dsh-qq 不启动')
   }
 
   // 没配地址就别去连——空 url 会让 `new WebSocket('')` 抛 Invalid URL，然后静默重连到天荒地老；
@@ -297,13 +309,14 @@ export function apply(ctx, config) {
 
   let selfId = String(config.selfId ?? '')
   const manager = new SessionManager({ ctx, agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
+  manager.memory = createMemory({ home: homeDirOf(ctx, logger), config, getLlm: () => ctx.get('llm'), logger })
+  manager.runtimeContext = record => buildRuntimeContext({ memory: manager.memory, config, record })
   manager.start()
   const promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, manager, logger })
   promptSync.start()
 
   // 通道回执：断线 / 发送失败要让她知道（见 bridge.js 顶部那段起因）
   const bridge = createBridge({ config, logger, manager })
-const pin = createPin({ config, logger })
 
   // 每个会话最近 60 秒的发消息时间戳 —— 防「回得太快」被风控
   const sentLog = new Map()
@@ -423,6 +436,7 @@ const pin = createPin({ config, logger })
         // 记下自己发的消息 id，撤回工具要用
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
+        manager.memory.noteSent(record, chunks[index], sentId)
         sentAny = true
         // 真发出去了才算用掉一次主动开口的额度（回复不受影响：pending 只在主动轮有）
         wake.noteProactiveDelivered(record)
@@ -458,14 +472,14 @@ const pin = createPin({ config, logger })
   questions.install(ctx)
 
   const contextGuard = createContextGuard({ manager, config, logger })
-  const wake = createWake({ config, manager, logger, bridge, pin })
+  const wake = createWake({ config, manager, logger, bridge })
   const bedtime = createSleep({ config, manager, logger })
   // 夜里的读书问询：默认关，本地 profile 打开才有（见 config.js 的 reading* 一组）
   const reading = createReading({ config, manager, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
   const addressClassifier = createAddressClassifier({ config, home: homeDirOf(ctx, logger), llm: ctx.get?.('llm'), logger })
-  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, pin, addressClassifier })
+  const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, addressClassifier })
   const outbound = createOutbound({ manager, config, logger, send, wake, contextGuard })
 
   // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方
@@ -473,10 +487,20 @@ const pin = createPin({ config, logger })
   const disposeLearning = startLearning({
     workspaceRoot: config.workspaceRoot ?? process.cwd(),
     selfId: () => manager.selfId || config.selfId || '',
+    onHits: (record, hits) => manager.memory.collect(record, hits),
     logger,
   })
 
-  const offSessionEvent = ctx.on('session/event', outbound)
+  const offSessionEvent = ctx.on('session/event', (session, event) => {
+    const record = manager.find(String(session.id ?? session.header?.id ?? ''))
+    if (!record) return
+    // turn/end 的记忆整理等待此前真实发送回执，不能把尚未发送当成成功。
+    record.outputQueue = (record.outputQueue ?? Promise.resolve()).then(async () => {
+      await outbound(session, event)
+      manager.memory.onSessionEvent(record, session, event)
+    }).catch(err => logger.warn('处理出站与记忆事件失败:', err.message))
+    return record.outputQueue
+  })
   const offGuardEvent = ctx.on('session/event', contextGuard.onSessionEvent)
 
   const onInboundEvent = (event) => {
@@ -575,15 +599,10 @@ const pin = createPin({ config, logger })
   reading.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid, home: homeDirOf(ctx, logger) })
+    registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home: homeDirOf(ctx, logger) })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
   }
-
-  // ── 设置页接口：/api/dsh-qq/* ─────────────────────────────────────────────
-  // DSH 设置界面里那一页（client.js）打的就是这几个口。
-  mountSettingsApi({ client, manager, personaRef, overridesRef, promptSync })
-
 
   ctx.on('dispose', () => {
     try {
@@ -600,8 +619,10 @@ const pin = createPin({ config, logger })
     bedtime.stop()
     reading.stop()
     promptSync.stop()
+    manager.memory.stop()
     manager.stop()
     approval.cancelAll()
     questions.cancelAll()
   })
+  return { client, manager, promptSync }
 }

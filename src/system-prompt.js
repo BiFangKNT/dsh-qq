@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import { buildChatPrompt, buildChatContext } from './prompts.js'
-import { facesForPrompt } from './faces.js'
+import { buildChatPrompt } from './prompts.js'
 import { listOf } from './config.js'
-import { factsFileFor, glossaryFileFor, loadFactsFor, loadGlossaryFor, loadGroupDigest } from './settings.js'
+import { installRuntimeContext } from './runtime-context.js'
+import { prepareSessionView } from './session-view.js'
 
 const digest = text => createHash('sha256').update(text).digest('hex')
 
@@ -49,52 +49,45 @@ export function createSystemPromptStore(home) {
 }
 
 /** 保存整个已渲染的 system；动态 context 和工具注册仍交给宿主。 */
-export function installChatSystem({ agentCtx, config, meta, store }) {
+const installations = new WeakMap()
+
+export async function installChatSystem({ agentCtx, agent, config, meta, store, runtimeContext = null }) {
+  if (installations.has(agent)) return installations.get(agent)
+  const pending = install({ agentCtx, agent, config, meta, store, runtimeContext })
+  installations.set(agent, pending)
+  pending.catch(() => installations.delete(agent))
+  return pending
+}
+
+async function install({ agentCtx, agent, config, meta, store, runtimeContext }) {
+  const view = await prepareSessionView(agentCtx, agent, config)
   const prompt = agentCtx.get('systemPrompt')
   if (!prompt?.section || !prompt?.context || !prompt?.variable) {
     throw new Error('QQ 会话需要宿主 systemPrompt 的 section/context/variable 接口')
   }
   let creationRules = chatSystemRules(config, meta)
-  let scanned = 0, compactSeq = -1
   const disposers = []
   try {
     disposers.push(prompt.variable('qq_chat_rules', () => chatSystemRules(config, meta)))
     disposers.push(prompt.section({ name: 'dsh-qq:rules', order: 90, text: '{{qq_chat_rules}}' }))
     disposers.push(prompt.section({ name: 'dsh-qq:locked-system', order: 1000,
       text: '{{qq_locked_system}}', complete: true }))
-    disposers.push(prompt.variable('qq_chat_context', () => {
-      const isGroup = meta.scope === 'group'
-      const now = new Date()
-      const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
-      return buildChatContext(config, { isGroup, faces: facesForPrompt(config, 12),
-        facts: loadFactsFor(meta), factsFile: factsFileFor(meta),
-        glossary: isGroup ? loadGlossaryFor(meta) : '', glossaryFile: glossaryFileFor(meta),
-        groupDigest: isGroup ? '' : loadGroupDigest({ workspaceRoot: String(config.workspaceRoot ?? '').trim() ||
-          join(String(config.cwd ?? '').trim() || process.cwd(), '会话'), today: day, selfId: meta.selfId }),
-      })
-    }))
-    disposers.push(prompt.context({ name: 'dsh-qq:chat', order: 100, text: '{{qq_chat_context}}' }))
+    if (runtimeContext) disposers.push(installRuntimeContext(agentCtx, agent, runtimeContext, view))
     disposers.push(agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
       const assembled = await next()
       const agent = context.agent
       if (!agent) return assembled
       const session = agent.session
       const id = String(agent.id ?? session.id)
-      const events = session.events
-      for (; scanned < events.length; scanned++) {
-        const event = events[scanned]
-        if (event.type === 'compaction/end' && !Object.hasOwn(event.data ?? {}, 'error')) compactSeq = event.seq
-      }
+      const { compactSeq, lastHeaderSeq, systems } = view()
       const current = { ...assembled, sections: assembled.sections.filter(section => section.name !== 'dsh-qq:locked-system') }
       let snapshot = store.get(id)
       if (!snapshot) {
-        // 升级/接回旧会话时沿用请求头；已有历史不因安装新版本而改变前缀。
-        const header = session.requestHeader()
-        const lastHeader = events.findLast(event => event.type === 'request/header')
-        const compactedAfterRequest = compactSeq > (lastHeader?.seq ?? -1)
-        const preserve = header && !compactedAfterRequest
+        // 新版 system 是消息节点；空 system 也是已锁定的有效值。
+        const compactedAfterRequest = compactSeq > lastHeaderSeq
+        const preserve = systems.length > 0 && !compactedAfterRequest
         const rules = compactedAfterRequest ? assembled.variables.qq_chat_rules : creationRules
-        const text = preserve ? (header.system ?? '') : renderPrompt({ ...current,
+        const text = preserve ? (systems.findLast(node => node.text !== '')?.text ?? '') : renderPrompt({ ...current,
           variables: { ...assembled.variables, qq_chat_rules: rules } })
         snapshot = { sessionId: id, meta, text, rules: preserve ? null : digest(rules), compactSeq, retired: true,
           at: new Date().toISOString() }
@@ -112,7 +105,13 @@ export function installChatSystem({ agentCtx, config, meta, store }) {
     for (const dispose of disposers.reverse()) dispose()
     throw err
   }
-  return () => { for (const dispose of disposers.reverse()) dispose() }
+  let disposed = false
+  return () => {
+    if (disposed) return
+    for (const dispose of disposers.toReversed()) dispose()
+    disposed = true
+    installations.delete(agent)
+  }
 }
 
 export function pendingSystemPrompts(store, config, selfId = '') {

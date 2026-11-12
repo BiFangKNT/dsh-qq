@@ -71,7 +71,7 @@ ${sharedBriefingSection(config)}
 
 ### 记忆规矩
 
-1. 重要的事做完就写进日记：第一视角，写具体——时间、涉及的文件名、做了什么、结论是什么。
+1. 当前事项与事实通过 \`qq_memory\` 查询、更正和标记完成，不写旧便签、话头、事实卡或群词典。日记和项目记录按需写，不要求每轮维护。
 2. 写之前先看 \`记忆区/大纲/索引.md\` 和最近的日记；细节记不清就回日记原文里查，不要凭印象编。
 3. 记忆区只属于这个会话。不要读写别的会话目录，也不要往宿主自己的记忆区里写东西。
 4. 「没人接话」就写没人接话：别人隔很久才回、突然不说了，都照实记发生了什么，不要写成被冷落、被抛下 ——
@@ -102,7 +102,6 @@ export async function ensurePeerWorkspace(dir, info, config = {}) {
   await mkdir(join(dir, '记忆区', '项目'), { recursive: true })
   await mkdir(join(dir, '记忆区', '大纲'), { recursive: true })
   await mkdir(join(dir, '记忆区', '收藏'), { recursive: true })
-  await mkdir(join(dir, '记忆区', '压缩记忆'), { recursive: true })
 
   const agentsPath = join(dir, 'AGENTS.md')
   if (!(await exists(agentsPath))) {

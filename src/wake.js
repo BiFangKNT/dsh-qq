@@ -189,7 +189,7 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
         record.agent.followup(
           createUserMessage({
             content: [{ type: 'text', text }],
-            source: { kind: 'user' },
+            source: { kind: 'plugin', plugin: 'dsh-qq', form: 'proactive' },
           }),
         )
         await Promise.race([

@@ -5,7 +5,7 @@
  * 我们拦住属于 QQ 会话的请求，发一条消息问用户，然后挂起 Promise 等回复。
  * 用户下一条消息如果是「通过 / 拒绝 / 取消」，就被这里吃掉，不投给 Agent。
  *
- * 注意：审批请求本身不带命令原文，要去 session.events 里按 callId 反查。
+ * 注意：审批请求本身不带命令原文，要去会话事件里按 callId 反查。
  */
 
 const COMMAND_CLIP = 500
@@ -18,13 +18,13 @@ const CANCEL_RE = /^(取消|cancel|算了)$/i
 /**
  * 从会话事件流里按 callId 找回被 gate 的那次调用。
  *
- * 坑：审批请求本身只带 callId，不带工具名和参数，必须回去翻 session.events。
+ * 坑：审批请求本身只带 callId，不带工具名和参数，必须回去翻会话事件。
  * 而且不能只认 `command` —— 写文件、访问网络、跑子进程，各自的参数名字都不一样。
  * @returns {{ tool: string, detail: string } | undefined}
  */
 function describeOf(req) {
   if (req?.callId === undefined) return undefined
-  const events = req?.agent?.session?.events
+  const events = req?.agent?.session?.snapshotEvents()
   if (!Array.isArray(events)) return undefined
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i]

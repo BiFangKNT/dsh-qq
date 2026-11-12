@@ -2,8 +2,6 @@ import { join } from 'node:path'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { deriveSessionId, sessionKey } from './shared/session-id.js'
 import { ensurePeerWorkspace, resolvePeerWorkspace } from './workspace.js'
-import { loadHandoffFor } from './settings.js'
-import { createInjectState } from './inject-state.js'
 import { createSessionState } from './session-state.js'
 import { createSystemPromptStore, installChatSystem, pendingSystemPrompts } from './system-prompt.js'
 
@@ -22,7 +20,6 @@ export class SessionManager {
   #records = new Map() // sessionId -> record
   #byPeer = new Map() // peerKey -> sessionId
   #gens = new Map() // basePeerKey -> 代数（/reset 一次 +1，换一个全新 sessionId）
-  #seedByKey = new Map() // basePeerKey -> 下一代的交接 seed（换会话时留下）
   #ready = new Map() // 已铺好的会话目录（避免每次 attach 都 mkdir）
   #sweeper = null
   #obtaining = new Map()
@@ -35,9 +32,6 @@ export class SessionManager {
     this.logger = logger
     this.closed = false
     this.systemPrompts = createSystemPromptStore(home)
-    // 旧账本只用于兼容已有会话的一次性交接，固定规则已迁到 system。
-    this.injectState = createInjectState(home ? join(String(home), 'inject-state.json') : '', logger)
-    this.initialContextState = createInjectState(home ? join(String(home), 'initial-context.json') : '', logger)
     // 「reset 到第几代 / 这一代落在哪个 sessionId」的账本：也落盘。
     // 不落盘的后果见 session-state.js 顶上那段 —— 重启即退回 reset 前的老会话 + 每次多一个空壳。
     this.sessionState = createSessionState(home ? join(String(home), 'session-state.json') : '', logger)
@@ -115,15 +109,14 @@ export class SessionManager {
    * 重置一个 QQ 会话：扔掉当前代理与上下文，下一次消息会开一个全新的会话。
    * 历史记录留在磁盘上但不再被 resume（换了 sessionId）。
    */
-  reset(record, seed = null) {
+  reset(record) {
     const current = this.#records.get(record.sessionId)
     if (!current) return false
+    if (current.memoryError) throw new Error('记忆维护进度未能保存，请修复存储后再新建会话；当前会话已保留')
     const snapshot = this.systemPrompts.get(current.sessionId)
     if (snapshot) this.systemPrompts.save({ ...snapshot, retired: true })
     current.promptDispose?.()
     const baseKey = this.#baseKey(current.scope, current.peerId)
-    // ⭐ 2026-10-25：换会话时把「交接」留给下一代（姐姐/NapCat 触发 /reset 时也能接上话）。
-    if (Array.isArray(seed) && seed.length > 0) this.#seedByKey.set(baseKey, seed)
     // 代数读内存优先、盘兜底：宿主重启后内存空了，靠盘记住「已经 reset 过一次」
     const next = (this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)) + 1
     this.#gens.set(baseKey, next)
@@ -138,17 +131,9 @@ export class SessionManager {
     this.#records.delete(current.sessionId)
     if (this.#byPeer.get(current.key) === current.sessionId) this.#byPeer.delete(current.key)
     // 上一代那笔账划掉：reset 之后是全新的 sessionId，老 sessions 记录也不会再用上
-    this.injectState.forget(current.sessionId)
     this.sessionState.forgetSession(current.key)
     this.logger.info?.(`[dsh-qq] 重置会话 ${current.label}（gen → ${this.#gens.get(baseKey) ?? 0}）`)
     return true
-  }
-
-  /** 交接便签和首轮话头已被接纳，与固定 system 的同步独立。 */
-  markInitialContextDelivered(record) {
-    if (!record) return
-    record.initialContextDelivered = true
-    this.initialContextState.mark(record.sessionId)
   }
 
   /** 按 scope + peerId 拿一个可用的会话记录，必要时新建。 */
@@ -203,6 +188,7 @@ export class SessionManager {
     if (actualId !== derived) this.sessionState.setSessionId(key, actualId)
     const record = {
       sessionId: actualId,
+      selfId: String(this.selfId),
       key,
       scope,
       peerId,
@@ -217,16 +203,7 @@ export class SessionManager {
       queue: Promise.resolve(),
       history: [],
       recent: [],
-      // ⭐ 2026-10-25：交接优先从内存拿（/reset 当场存的）；内存没有、又是换过代的会话，
-      // 就从磁盘的 `便签.md`（旧名 `交接.md` 兜底）再读一次 —— 这样「reset 完宿主刚好重启」也不会丢。
-      // ⭐ 2026-10-25 20:52：`#attach` 因为磁盘上留了恢复不出来的空壳而换了 id 时，也算「换过代」
-      // ——不然新会话永远是个空壳，把交接卡漏掉（今晚就是这么漏的）。
-      swapSeed: this.#seedByKey.get(baseKey)
-        ?? ((gen > 0 || actualId !== sessionId) ? loadHandoffFor({ dir: attached.cwd }) || null : null),
-      // 按 sessionId 记录一次性交接；兼容旧会话已交付的便签。
-      initialContextDelivered: this.initialContextState.has(actualId) || this.injectState.has(actualId),
     }
-    this.#seedByKey.delete(baseKey)
     this.#records.set(actualId, record)
     this.#byPeer.set(key, actualId)
     const snapshot = this.systemPrompts.get(actualId)
@@ -241,6 +218,9 @@ export class SessionManager {
 
   /** 先准备新会话，成功后才切换；排队中的消息继续通过同一个 record 投递。 */
   async replaceSession(record) {
+    await record.agent.whenIdle()
+    await record.outputQueue
+    await this.memory?.prepare(record)
     const info = { scope: record.scope, peerId: record.peerId, label: record.label }
     const baseKey = this.#baseKey(record.scope, record.peerId)
     const gen = (this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)) + 1
@@ -291,12 +271,18 @@ export class SessionManager {
     }
     const cwd = await this.#peerDir(info)
     const metaInfo = { ...info, selfId: String(this.selfId), dir: cwd || this.config.cwd || null }
-    const installPrompt = agentCtx => installChatSystem({ agentCtx, config: this.config, meta: metaInfo, store: this.systemPrompts })
+    // attach 也被只读分类器使用；此处只迁移，不发起维护调用。
+    if (this.memory) {
+      try { this.memory.store.migrate(metaInfo) }
+      catch (err) { this.logger.warn?.('记忆迁移未完成，原文件保留:', err.message) }
+    }
+    const installPrompt = (agentCtx, agent) => installChatSystem({ agentCtx, agent, config: this.config, meta: metaInfo, store: this.systemPrompts,
+      runtimeContext: this.memory ? () => this.runtimeContext(this.findByPeer(info.scope, info.peerId) ?? metaInfo) : null })
     let setupError
-    const setup = async agentCtx => {
+    const setup = async (agentCtx, agent) => {
       try {
         if (preset) await this.ctx.get('agentPresets').mount(agentCtx, preset)
-        installPrompt(agentCtx)
+        await installPrompt(agentCtx, agent)
       } catch (err) {
         setupError = err
         throw err
@@ -316,7 +302,7 @@ export class SessionManager {
       /* get 不可用就往下走 */
     }
     if (live && typeof live.followup === 'function') {
-      return { agent: live, dispose: null, owned: false, cwd, promptDispose: installPrompt(live.ctx) }
+      return { agent: live, dispose: null, owned: false, cwd, promptDispose: await installPrompt(live.ctx, live) }
     }
 
     // 2) 恢复持久化的历史会话
@@ -428,6 +414,8 @@ export class SessionManager {
       record.busy += 1
       record.lastActive = Date.now()
       try {
+        await record.outputQueue
+        await this.memory?.prepare(record)
         return await task()
       } finally {
         record.busy -= 1

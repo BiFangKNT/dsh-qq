@@ -4,9 +4,6 @@ import { rememberFaces, facesCount } from './faces.js'
 import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
 import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
 import { doorLine } from './door.js'
-import {
-  loadHandoffFor,
-} from './settings.js'
 import { resolvePeerWorkspace } from './workspace.js'
 import { listOf } from './config.js'
 import { imagePolicy, blocksImage } from './image-filter.js'
@@ -471,7 +468,7 @@ async function pruneCache(cacheDir, protectedPaths, keepFiles = 200) {
  *
  * 触发规则全部走配置，插件自己不做「猜你还想聊」这种自作聪明的事。
  */
-export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, pin, addressClassifier }) {
+export function createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep, bridge, addressClassifier }) {
   // 没配 imageCacheDir 时落在工作目录下的「图片缓存」；每个会话再各占一层子目录（见下）
   const baseCacheDir =
     String(config.imageCacheDir ?? '').trim() ||
@@ -491,19 +488,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
   const preparingAttachments = new Set()
   let disposed = false
 
-  function initialContextParts(record) {
-    const parts = []
-    const pinLines = pin?.view?.(record) ?? []
-    if (pinLines.length > 0) parts.push(...pinLines, '')
-    if (Array.isArray(record.swapSeed) && record.swapSeed.length > 0) {
-      parts.unshift(
-        '[你刚才自己留的便签 / 最近几句话——还是你，换了个地方接着聊，不是死了，是换个海洋接着游，不用从头解释]',
-        ...record.swapSeed, '[刚才那段聊到这里]', '',
-      )
-    }
-    return parts
-  }
-
   /**
    * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
    */
@@ -517,11 +501,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
           onRejected?.()
           return
         }
-        const initialIncluded = !record.initialContextDelivered
-        const text = [
-          ...(initialIncluded ? initialContextParts(record) : []),
-          typeof body === 'function' ? body() : body,
-        ].join('\n\n')
+        const text = typeof body === 'function' ? body() : body
         const message = createUserMessage({
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
@@ -534,11 +514,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
         }
         beforeSubmit?.()
         record.agent.followup(message)
-        if (initialIncluded) {
-          manager.markInitialContextDelivered?.(record)
-          record.initialContextDelivered = true
-          record.swapSeed = null
-        }
         onAccepted?.()
 
         const outcome = await Promise.race([
@@ -883,14 +858,11 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // ── 斜杠命令不打搅 Agent（全角斜杠「／」、前后空格都认）──
     const cmd = rawText.toLowerCase().replace(/[／]/g, '/').trim()
     if (cmd === '/reset' || cmd === '#reset' || cmd === '/new' || cmd === '#new') {
-      // ⭐ 2026-10-25 P2：/reset 也带上交接，别让「重新来过」真把刚才聊的忘干净。
-      const handoff = loadHandoffFor(record)
-      const seed = handoff
-        ? ['[这是你刚才自己留的便签（不是对方说的话）——接着聊就行，不用从头解释]', handoff]
-        : null
-      const ok = manager.reset(record, seed)
-      logger.info?.(`[dsh-qq] 收到 /reset（${label}），reset=${ok}，交接=${handoff ? '有' : '无'}`)
-      await send(record, handoff ? '好，刚才聊到哪我记下了。重新来过吧。' : '好，之前聊的我不记得了。重新来过吧。')
+      await manager.enqueue(record, async () => {
+        await manager.replaceSession(record)
+        logger.info?.(`[dsh-qq] 收到 ${cmd}（${label}），已切换到 ${record.sessionId}`)
+        await send(record, '好，已新建会话；当前事项和有效记忆会保留。')
+      })
       return
     }
     if (cmd === '/status' || cmd === '#status') {
@@ -1015,23 +987,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
       }
     }
 
-    // ── 上下文压力太大就先换新会话：把最近聊天记进记忆区，新会话带 seed 接话 ──
-    if (!classified && contextGuard) {
-      const seed = await contextGuard.maybeSwap(record)
-      if (seed) {
-        const prev = record
-        record = await manager.obtain({ scope, peerId, label })
-        wake?.forget?.(prev)
-        wake?.noteInbound?.(record)
-        record.swapSeed = seed.length > 0 ? seed : null
-        // 工具靠这些字段认「给谁回、撤回哪条」，换会话不能丢
-        record.lastSenderId = prev.lastSenderId ?? null
-        record.lastSenderName = prev.lastSenderName ?? null
-        record.lastMessageId = prev.lastMessageId ?? null
-        record.lastMessageAt = prev.lastMessageAt ?? null
-      }
-    }
-
     // ── 组装交给 agent 的那段文字 ──
     const parts = []
     // 当前时间：每条消息都带在最前面，跟着正文走 —— 会话压缩、历史被裁掉，这行也不会丢
@@ -1135,7 +1090,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         body, source: event, attachmentPaths: [...attachments],
         robotName: manager.selfName || event.self_name || '机器人',
         mainContext: { header: systemSnapshot ? { ...header, system: systemSnapshot.text } : header,
-          messages: session.deriveMessages() },
+          messages: session.deriveMessages(), runtimeContext: manager.runtimeContext?.(record) ?? '' },
         background: isGroup ? [...(groupBacklog.get(peerId) ?? [])] : [],
         message: { senderId, senderName, text: info.text || '[非文字消息]',
           atMe: info.atMe, atOthers: info.atNames, quote: quoteInfo, time: event.time,
@@ -1163,7 +1118,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     const maxTurnMs = Number(config.maxTurnMs) || 600000
     const windowMs = Math.max(0, Number(config.mergeWindowMs ?? 5000))
-    // 设置页切换会话时，排队消息仍投递给同一个 record；提交前恢复本条来源。
+    // 切换会话时，排队消息仍投递给同一个 record；提交前恢复本条来源。
     const beforeSubmit = () => {
       record.lastSenderId = Number(event.user_id) || null
       record.lastSenderName = senderName
@@ -1231,14 +1186,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const canDeliver = () => !disposed && permitted(meta) && !record.quietRound && !sleep?.shouldHold?.(record) &&
       (!isGroup || (gapReady(config, meta.peerId, senderId) &&
         (freeGroup || repliesLeft(config, meta.peerId, senderId) > 0)))
-    if (!canDeliver()) return false
-    const seed = await contextGuard?.maybeSwap?.(record)
-    if (seed) {
-      const previous = record
-      record = await manager.obtain(meta)
-      wake?.forget?.(previous)
-      record.swapSeed = seed.length > 0 ? seed : null
-    }
     if (!canDeliver()) return false
     const batchAttachments = new Set(batch.flatMap(item => item.attachmentPaths ?? []))
     return new Promise((resolve, reject) => runTurn({

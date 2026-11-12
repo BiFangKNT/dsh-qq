@@ -20,12 +20,13 @@ import { mkdir } from 'node:fs/promises'
 import { join, dirname, resolve, relative, isAbsolute } from 'node:path'
 
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
-import { appendFact, upsertGlossaryTerm, homeDirOf } from './settings.js'
+import { homeDirOf } from './settings.js'
 import { auditOutbound } from './audit.js'
 import { lookupMeme } from './meme.js'
 import { downloadImage } from './inbound.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerExtraTools } from './tools-extra.js'
+import { registerMemoryTool } from './memory-tools.js'
 
 /**
  * 工具直接发出去的文字也要过审计。
@@ -109,7 +110,7 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, pin, wake, noteSelfSaid, home }) {
+export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home }) {
   const tools = ctx.get?.('tools')
   if (!tools?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
@@ -128,102 +129,13 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     try {
       wake?.noteProactiveDelivered?.(record)
       noteSelfSaid?.(record, said)
+      manager.memory?.noteSent(record, said)
     } catch (err) {
       logger?.debug?.(`工具外发记账失败：${err?.message ?? err}`)
     }
   }
 
-  tools.register({
-    name: 'qq_facts',
-    description:
-      '读写自己的事实卡（跨压缩还记得的关键事实：对方怎么称呼、作息、禁忌、正在做的事）。' +
-      '只有对方明确要求「记一下」时才用 append 往当前会话那一节加一行；平时不用调 read——事实卡已经在你面前的提示里了。',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['read', 'append'], description: 'read=看一眼现在的全文；append=加一行' },
-        text: { type: 'string', description: 'append 时要记的那一行（短，一句话）' },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: { ok: { type: 'boolean' }, file: { type: 'string' }, text: { type: 'string' } },
-        required: ['ok'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [
-        { type: 'text', text: value.ok ? `事实卡已更新：${String(value.text ?? '').slice(0, 60)}` : '事实卡没写成（看一眼日志）' },
-      ],
-    },
-    async execute(args, exec) {
-      const record = needRecord(manager, exec)
-      const file = join(dirname(String(record.dir ?? '')), '事实卡.md')
-      if (args?.action === 'read') {
-        try {
-          const { readFileSync } = await import('node:fs')
-          return { ok: true, file, text: readFileSync(file, 'utf8') }
-        } catch {
-          return { ok: false, file, text: '' }
-        }
-      }
-      if (args?.action !== 'append') throw new Error('qq_facts: action 只能是 read 或 append')
-      try {
-        appendFact(file, record.label, args?.text)
-        return { ok: true, file, text: String(args?.text ?? '') }
-      } catch (err) {
-        logger.warn?.(`qq_facts 写入失败: ${err?.message ?? err}`)
-        throw err
-      }
-    },
-  })
-
-  tools.register({
-    name: 'qq_glossary',
-    description:
-      '往某个群的群词典里补一条「弄明白了的说法」。群里的黑话、缩写、谁是谁——弄懂了就记下来，下回不用重新问。' +
-      '传群号就行，不用传路径：这只笔只有一个落点，写的就是那个群的 `记忆区/群词典.md`，别的地方写不了。' +
-      '「待确认」里通常正等着你；填完这条，对上的那条待确认会自动清掉。',
-    parameters: {
-      type: 'object',
-      properties: {
-        group: { type: 'string', description: '群号（纯数字），比如 123456789' },
-        word: { type: 'string', description: '那个词 / 说法本身' },
-        meaning: { type: 'string', description: '它的意思（一句话，用自己的话，别抄别人）' },
-        who: { type: 'string', description: '从谁那儿听来的（可空）' },
-      },
-      required: ['group', 'word', 'meaning'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: { ok: { type: 'boolean' }, file: { type: 'string' }, message: { type: 'string' } },
-        required: ['ok'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [
-        { type: 'text', text: value.ok ? `群词典已记下：${value.message}` : `没写成：${value.message}` },
-      ],
-    },
-    async execute(args) {
-      try {
-        const { file } = upsertGlossaryTerm({
-          workspaceRoot: String(config?.workspaceRoot ?? '').trim(),
-          group: args?.group,
-          word: args?.word,
-          meaning: args?.meaning,
-          who: args?.who,
-        })
-        return { ok: true, file, message: String(args?.word ?? '').trim() }
-      } catch (err) {
-        logger.warn?.(`qq_glossary 写入失败: ${err?.message ?? err}`)
-        return { ok: false, file: '', message: String(err?.message ?? err) }
-      }
-    },
-  })
+  registerMemoryTool(tools, manager)
 
   // ── 全家共用的那支笔 ─────────────────────────────────────────
   //
@@ -332,7 +244,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
     description:
       '查一个网络梗 / 黑话 / 缩写的出处和用法。手边有一份 6668 条的梗词库快照（cnmeme.wiki，2026-10-26 建库），毫秒级。' +
       '看到不认识的词先查一次，别硬猜、别编出处；查到之后**先接梗、别科普**——照着「怎么用」随口用一句，只有对方明确问「这是什么梗」才讲一两句。' +
-      '⚠️ 它只收网上的通用梗：群里的自造说法（「已取餐」这类）查不到，那些用 qq_glossary 记下来。查不到就说不认识。',
+      '⚠️ 它只收网上的通用梗：群里的自造说法（「已取餐」这类）查不到，那些用 qq_memory 记录已确认词义。查不到就说不认识。',
     parameters: {
       type: 'object',
       properties: {
@@ -376,65 +288,6 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
       } catch (err) {
         logger.warn?.(`qq_meme 查询失败: ${err?.message ?? err}`)
         return { found: false, title: '', text: '', message: `查不了：${err?.message ?? err}` }
-      }
-    },
-  })
-
-  tools.register({
-    name: 'qq_pin',
-    description:
-      '你自己的便签（话头，不是待办清单）：聊长了容易忘「上回说到哪儿、哪句话还没接上」，就记在这上面。' +
-      '记下来的会每轮自动出现在你面前（最多 5 条），不用你翻。' +
-      'action：add=记一条，done=接上了划掉，drop=不要了删掉，list=看全文。done/drop 用序号（1 = 便签里第一行）。',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['add', 'done', 'drop', 'list'], description: '要做什么' },
-        text: { type: 'string', description: 'add 时要记的那一句（短，说清是什么话头就行）' },
-        index: { type: 'number', description: 'done/drop 的序号，从 1 开始' },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          file: { type: 'string' },
-          openCount: { type: 'number' },
-          lines: { type: 'array', items: { type: 'string' } },
-        },
-        required: ['ok'],
-        additionalProperties: false,
-      },
-      render: (_args, value) =>
-        value.ok
-          ? [{ type: 'text', text: `便签：还有 ${Number(value.openCount ?? 0)} 条没接上` }]
-          : [{ type: 'text', text: '便签没写成（看一眼日志）' }],
-    },
-    async execute(args, exec) {
-      const record = needRecord(manager, exec)
-      const file = pin?.fileFor?.(record) ?? ''
-      const action = String(args?.action ?? '')
-      const countOpen = () => (pin?.list?.(record) ?? []).filter((l) => /^-\s*\[\s*\]/.test(l.trim())).length
-      try {
-        if (action === 'list') {
-          return { ok: true, file, openCount: countOpen(), lines: pin?.list?.(record) ?? [] }
-        }
-        if (action === 'add') {
-          const openCount = pin.add(record, args?.text)
-          return { ok: true, file, openCount }
-        }
-        if (action === 'done' || action === 'drop') {
-          const n = Number(args?.index)
-          const hit = action === 'done' ? pin.done(record, n) : pin.drop(record, n)
-          return { ok: Boolean(hit), file, openCount: countOpen() }
-        }
-        throw new Error(`qq_pin: 不认识的 action「${action}」`)
-      } catch (err) {
-        logger.warn?.(`qq_pin 失败: ${err?.message ?? err}`)
-        return { ok: false, file, openCount: 0 }
       }
     },
   })
@@ -1323,7 +1176,7 @@ export function registerTools(ctx, { client, manager, config, logger, pin, wake,
   })
 
   logger.info?.(
-    `QQ 互动工具已注册：qq_facts / qq_pin / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history / qq_send_voice / qq_private_history / qq_qzone_send（表情包收藏 ${facesCount(config)} 个）`,
+    `QQ 互动工具已注册：qq_memory / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history / qq_send_voice / qq_private_history / qq_qzone_send（表情包收藏 ${facesCount(config)} 个）`,
   )
   // 2026-10-30：qq_memo 是可选注册的（要配 memoryRoot），单独报一行，方便下次一眼看出这支笔通没通
   logger.info?.(
