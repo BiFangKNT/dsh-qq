@@ -121,7 +121,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
       await event(agent, 'tool/result', { name, callId: id, result })
       return result
     } catch (err) {
-      await event(agent, 'tool/result', { name, callId: id, error: { message: err.message } }); throw err
+      await event(agent, 'tool/result', { name, callId: id, error: { message: err.message, code: err.code } }); throw err
     }
   }
   async function run(agent, message) {
@@ -158,7 +158,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
           default: throw new Error(`未知模拟步骤：${step.type}`)
         }
       }
-    } catch (err) { logger.warn(err); reason = { kind: 'error', error: { message: err.message } } }
+    } catch (err) { logger.warn(err); reason = { kind: 'error', error: { message: err.message, code: err.code } } }
     finally { await event(agent, 'turn/end', { reason }); await ctx.emit('agent/status', { agent, status: 'idle' }) }
   }
   async function request(agent) {

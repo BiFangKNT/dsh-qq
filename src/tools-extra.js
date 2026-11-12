@@ -25,7 +25,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
       const record = needRecord(manager, exec)
       assertQuiet(record)
       const text = cleanOutboundText(args.text)
-      assertText(text)
+      await assertText(text, record, 'qq_send_voice')
       let scope = record.scope
       let peerId = record.peerId
       if (args.to) {
@@ -92,7 +92,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
       }
       assertQuiet(record)
       const text = cleanOutboundText(args.text)
-      if (text) assertText(text)
+      if (text) await assertText(text, record, 'qq_qzone_send')
       if (args.images && !Array.isArray(args.images)) throw new Error('images 必须为数组')
       if ((args.images?.length ?? 0) > 9) throw new Error('最多九张图片')
       const images = []

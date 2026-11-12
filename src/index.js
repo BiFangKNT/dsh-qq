@@ -19,7 +19,7 @@ import { createContextGuard } from './context-guard.js'
 import { createMemory } from './memory.js'
 import { buildRuntimeContext } from './runtime-context.js'
 import { createHostCompatibility } from './host-compatibility.js'
-import { auditOutbound } from './audit.js'
+import { checkOutboundText, sensitiveContentNotice } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerTools } from './tools.js'
@@ -361,12 +361,12 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     }
   }
 
-  async function send(record, text) {
+  async function send(record, text, { sensitiveNotice = false } = {}) {
     // 夜里的读书问询：这一轮是给她自己待着的，不是给对话用的。
     // 提示词里已经写了「发不出去」，但光靠说会漏，这里硬拦一道。
     if (record?.quietRound) {
       logger.info(`[dsh-qq] ${record.label} 读书问询轮，这段不往外发`)
-      return
+      return { ok: false, reason: 'quiet' }
     }
     // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
     // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
@@ -375,31 +375,22 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     // 2026-10-27 21:4x 修：原来只认「整条恰好就是 [SILENT]」，
     // 她要是写成「结束这轮，不再说话。[SILENT]」，标记根本不生效，前半句照发。
     // 现在先把标记剥掉：剥完只剩空白＝她选了潜水；还剩话＝照发剩下的。
-    const spoken = stripSilentMark(trimmed)
+    let spoken = stripSilentMark(trimmed)
     if (!spoken) {
       if (trimmed.includes(SILENT_MARKER)) {
         logger.info(`[dsh-qq] ${record.label} 选择不接话（${SILENT_MARKER}）`)
         // 沉默不该扣主动开口的额度：机会白给，她想开口的话下次还有（2026-10-26）
         wake.noteProactiveSilent(record)
       }
-      return
+      return { ok: false, reason: 'empty' }
     }
+    // 固定提示仍走正常发送、限流和记账，但不重复检查，避免自定义规则拦住提示。
+    const verdict = sensitiveNotice ? { ok: true } : checkOutboundText(spoken, {
+      config, logger, record, source: 'reply', knownSecrets: [client.token],
+    })
+    if (!verdict.ok) spoken = sensitiveContentNotice
     const chunks = splitText(spoken, config.textChunkLimit)
-    if (chunks.length === 0) return
-
-    // 外发审计：本机路径 / 凭据整条拦下。流式、整段、报错提示都从这里出去，
-    // 所以闸放在 split 之后、真正调 OneBot 之前，一处堵死。
-    if (config.auditOutbound !== false) {
-      const verdict = auditOutbound(spoken, {
-        extraPatterns: config.auditExtraPatterns ?? [],
-      })
-      if (!verdict.ok) {
-        logger.warn(
-          `[dsh-qq] ${record.label} 外发被审计拦下（${verdict.kind}）：${verdict.hit}`,
-        )
-        return
-      }
-    }
+    if (chunks.length === 0) return { ok: false, reason: 'empty' }
     const isGroup = record.scope === 'group'
     const action = isGroup ? 'send_group_msg' : 'send_private_msg'
     const target = isGroup ? { group_id: Number(record.peerId) } : { user_id: Number(record.peerId) }
@@ -463,6 +454,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     if (!isGroup) {
       client.call('set_input_status', { user_id: Number(record.peerId), event_type: 0 }, 5000).catch(() => {})
     }
+    return verdict.ok ? { ok: sentAny } : { ok: false, reason: 'sensitive-content', rule: verdict.rule, noticeSent: sentAny }
   }
 
   const approval = new ApprovalChannel({ manager, config, logger, send })
@@ -599,7 +591,8 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   reading.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home: homeDirOf(ctx, logger) })
+    registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home: homeDirOf(ctx, logger),
+      notifyBlocked: record => send(record, sensitiveContentNotice, { sensitiveNotice: true }) })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)
   }

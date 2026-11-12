@@ -16,6 +16,7 @@ import { buildChatPrompt } from '../src/prompts.js'
 import { createMockPromptScope } from './mock-dsh.mjs'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { sensitiveContentNotice } from '../src/audit.js'
 
 // ⭐ 每次跑都换一套干净的「家」和「工作区」。
 // 不隔离的后果（2026-10-27 20:4x 踩到）：e2e 会把会话、注入账本写到仓库里的 `会话/`
@@ -278,8 +279,7 @@ assert.equal(Number(sentGroup.params.group_id), 88888)
 assert.ok(!JSON.stringify(sentGroup.params.message).includes('CQ:at'), '不该把 CQ 码原样发出去')
 console.log('✓ assistant/message → send_group_msg（未泄漏 CQ 码）')
 
-// 外发审计：带本机路径 / 凭据的回复整条不发——
-// 群里顺嘴把 D:\... 念出去，等于把家里的门牌号念给陌生人听。
+// 敏感内容检查：路径正常发送；明确的密钥阻止原文并提示。
 {
   const before = mock.calls.filter((c) => c.action === 'send_group_msg').length
   ctx.emit('session/event', groupAgent.session, {
@@ -292,21 +292,24 @@ console.log('✓ assistant/message → send_group_msg（未泄漏 CQ 码）')
   })
   await sleep(150)
   const after = mock.calls.filter((c) => c.action === 'send_group_msg').length
-  assert.equal(after, before, '带本机路径的回复不该发出去')
+  assert.equal(after, before + 1, '路径讨论应正常发送')
 
   ctx.emit('session/event', groupAgent.session, {
     type: 'assistant/message',
     data: {
       turn: 2,
       step: 2,
-      message: { content: [{ type: 'text', text: 'api_key: sk-abcdefghijklmnopqrstuvwx' }] },
+      message: { content: [{ type: 'text', text: '密钥是 sk-abcdefghijklmnopqrstuvwx，请不要泄漏。' }] },
     },
   })
   await sleep(150)
   const afterSecret = mock.calls.filter((c) => c.action === 'send_group_msg').length
-  assert.equal(afterSecret, before, '带凭据特征的回复不该发出去')
+  assert.equal(afterSecret, before + 2, '凭据原文应替换为固定提示')
+  assert.ok(JSON.stringify(mock.calls.filter(c => c.action === 'send_group_msg').at(-1)).includes(sensitiveContentNotice))
+  assert.ok(!JSON.stringify(mock.calls).includes('sk-abcdefghijklmnopqrstuvwx'))
+  await ctx.emit('session/event', groupAgent.session, { type: 'turn/end', data: { reason: { kind: 'completed' } } })
 }
-console.log('✓ 外发审计：带本机路径 / 凭据的回复整条拦下')
+console.log('✓ 敏感内容检查：路径正常发送，凭据原文被阻止并提示')
 
 // 自己发出去的话要回写进群历史，并标成「你（昵称）」——
 // 不然它下一轮看不见自己说过什么，会把别人的话认领成自己的。

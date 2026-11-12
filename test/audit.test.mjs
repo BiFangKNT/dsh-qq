@@ -1,107 +1,56 @@
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { auditOutbound } from '../src/audit.js'
+import { auditOutbound, checkOutboundText } from '../src/audit.js'
 
-let passed = 0
-function ok(name, fn) {
-  try {
-    fn()
-    passed += 1
-    console.log('  ✓', name)
-  } catch (err) {
-    console.error('  ✗', name)
-    throw err
+test('普通聊天、路径及通用凭据示例默认放行', () => {
+  for (const text of ['', null, '今晚月色真好', 'C:\\Users\\example\\config.json', '/home/example/.config',
+    'file:///C:/tmp/a.png', 'password: hunter2hunter2', 'api_key = abcd1234efgh5678',
+    'Authorization: Bearer example-documentation-token']) {
+    assert.deepEqual(auditOutbound(text), { ok: true }, text)
   }
-}
-
-console.log('auditOutbound')
-
-ok('正常中文聊天放行', () => {
-  assert.deepEqual(auditOutbound('今晚月色真好，本姑娘想多吃一碗大白饭喵'), { ok: true })
 })
 
-ok('正常技术讨论放行（没有路径/密钥）', () => {
-  assert.deepEqual(auditOutbound('这个 bug 是数组越界导致的，改成 < 就好了'), { ok: true })
+test('匹配已知凭据原值，不限制长度，不匹配空配置', () => {
+  assert.deepEqual(auditOutbound('包含 actual-token-value', { knownSecrets: ['', 'actual-token-value'] }),
+    { ok: false, kind: 'credential', rule: 'configured-credential' })
+  assert.equal(auditOutbound('令牌是 abc', { knownSecrets: ['abc'] }).ok, false)
+  assert.equal(auditOutbound('大小写不同 ABC', { knownSecrets: ['abc'] }).ok, true)
+  assert.equal(auditOutbound('普通正文', { knownSecrets: ['', undefined] }).ok, true)
 })
 
-ok('空文本放行', () => {
-  assert.deepEqual(auditOutbound(''), { ok: true })
-  assert.deepEqual(auditOutbound(null), { ok: true })
+test('少量明确的密钥格式仍阻止，结果不包含命中原文', () => {
+  for (const [secret, rule] of [
+    ['sk-abcdefghijklmnopqrstuvwx', 'api-key'],
+    [`ghp_${'a'.repeat(36)}`, 'github-token'],
+    [`github_pat_${'a'.repeat(70)}`, 'github-fine-grained-token'],
+  ]) {
+    const result = auditOutbound(`不要发送 ${secret}`)
+    assert.deepEqual(result, { ok: false, kind: 'credential', rule })
+    assert.ok(!JSON.stringify(result).includes(secret))
+  }
+  assert.equal(auditOutbound('ghp_example sk-placeholder').ok, true)
 })
 
-ok('Windows 路径拦下', () => {
-  const v = auditOutbound('文件在 D:\\鲸鲸的专用文件\\本地记忆区\\日记')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'path')
+test('自定义正则可拦路径，无效规则不妨碍后续规则，返回序号而非规则原文', () => {
+  const result = auditOutbound('位置 /home/example/config', { extraPatterns: ['([invalid', '/home/'] })
+  assert.deepEqual(result, { ok: false, kind: 'custom', rule: 'custom-2' })
+  assert.deepEqual(auditOutbound('普通正文', { extraPatterns: ['([invalid'] }), { ok: true })
 })
 
-ok('Windows 正斜杠路径也拦', () => {
-  const v = auditOutbound('见 C:/Users/xier/AppData 下面')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'path')
+test('正文和工具检查配置一致；日志只有定位信息和规则，不包含凭据及正文', () => {
+  const logs = [], record = { scope: 'private', peerId: '11001', sessionId: 'test-session', lastMessageId: 42 }
+  const config = { accessToken: 'configured-token' }
+  const logger = { warn: (...args) => logs.push(args) }
+  for (const source of ['reply', 'qq_send', 'qq_reply', 'qq_send_voice', 'qq_qzone_send']) {
+    assert.equal(checkOutboundText('机密原文 configured-token', { config, logger, record, source }).ok, false)
+    assert.equal(checkOutboundText('连接仍用 old-token', { config, logger, record, source, knownSecrets: ['old-token'] }).ok, false)
+  }
+  const serialized = JSON.stringify(logs)
+  assert.doesNotMatch(serialized, /configured-token|old-token|机密原文|连接仍用/)
+  assert.match(serialized, /42/)
+  assert.match(serialized, /configured-credential/)
+  config.auditOutbound = false
+  const before = logs.length
+  assert.equal(checkOutboundText(config.accessToken, { config, logger, record }).ok, true)
+  assert.equal(logs.length, before)
 })
-
-ok('Unix 家目录拦下', () => {
-  const v = auditOutbound('配置在 /home/deploy/.config/下面')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'path')
-})
-
-ok('file:// 链接拦下', () => {
-  const v = auditOutbound('点这个 file:///C:/tmp/a.png')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'path')
-})
-
-ok('OpenAI 风格 key 拦下', () => {
-  const v = auditOutbound('key 是 sk-abcdefghijklmnopqrstuvwx')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'credential')
-})
-
-ok('GitHub token 拦下', () => {
-  const v = auditOutbound('用 ghp_abcdefghijklmnopqrstuvwxyz0123456789 拉')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'credential')
-})
-
-ok('Bearer 头拦下', () => {
-  const v = auditOutbound('Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'credential')
-})
-
-ok('password: value 拦下', () => {
-  const v = auditOutbound('password: hunter2hunter2')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'credential')
-})
-
-ok('api_key = value 拦下（带空格）', () => {
-  const v = auditOutbound('api_key = abcd1234efgh5678')
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'credential')
-})
-
-ok('单个盘符不算路径（少误杀）', () => {
-  assert.deepEqual(auditOutbound('选 C: 盘还是 D: 盘'), { ok: true })
-})
-
-ok('额外正则命中', () => {
-  const v = auditOutbound('内部编号 XY-998877', { extraPatterns: ['XY-\\d{6}'] })
-  assert.equal(v.ok, false)
-  assert.equal(v.kind, 'custom')
-})
-
-ok('配错的额外正则被跳过，不影响其他规则', () => {
-  const v = auditOutbound('普通一句话', { extraPatterns: ['([unclosed'] })
-  assert.deepEqual(v, { ok: true })
-})
-
-ok('命中时 hit 不返回整段原文（截断到 120）', () => {
-  const long = `D:\\${'a'.repeat(400)}`
-  const v = auditOutbound(long)
-  assert.equal(v.ok, false)
-  assert.ok(v.hit.length <= 120)
-})
-
-console.log(`\n${passed} 项全部通过`)

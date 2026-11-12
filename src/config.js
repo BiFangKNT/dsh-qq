@@ -318,10 +318,10 @@ export const ConfigSchema = Schema.object({
     .description('每个会话每分钟最多发几条（0 = 关闭）。QQ 对高频回复很敏感，被限流甚至被封往往不是因为说了什么，而是因为回得太多'),
   auditOutbound: Schema.boolean()
     .default(true)
-    .description('外发前审计：回复里带本机路径（C:\\…、/home/…）或凭据特征（sk-…、ghp_…、Bearer …）就整条拦下不发，只记日志'),
+    .description('发送前在本地检查已配置的 NapCat 令牌和少量明确的密钥格式；命中后阻止原文，发送固定提示。默认不拦路径，不调用模型'),
   auditExtraPatterns: Schema.array(Schema.string())
     .default([])
-    .description('额外要拦的正则（字符串形式），命中同样整条不发；配错的正则会跳过'),
+    .description('额外敏感内容正则（字符串形式），命中后阻止原文并发送固定提示；配错的正则会跳过'),
   groupMinGapMs: Schema.number()
     .default(4000)
     .description('群聊里两条回复之间至少隔多久，单位毫秒（0 = 不限制）。群里连着追问时，隔开一点比一口气说完安全得多'),

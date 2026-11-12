@@ -751,6 +751,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
   // 原文是增量的、只会往后长，所以记字符数永远不会错位。
   const streamConsumed = new Map()
   const selfSent = new Set() // sessionId -> 本轮是否已经用「会自己发送」的工具发过话了
+  const sensitiveBlocked = new Set() // 当前轮已提示拦截后，不再转发后续正文。
 
   const streamMax = Number(config.streamMaxChunks ?? 3)
   const streamEnabled = config.streamReply !== false
@@ -760,8 +761,10 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
    * 顺手告诉 wake「刚有活动」——不然主动说话那层会把「自己刚说完」也当成冷场。
    */
   async function emit(record, text) {
+    if (sensitiveBlocked.has(record.sessionId)) return
     try {
-      await send(record, text)
+      const result = await send(record, text)
+      if (result?.reason === 'sensitive-content') sensitiveBlocked.add(record.sessionId)
     } finally {
       wake?.noteOutbound?.(record)
     }
@@ -783,6 +786,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
 
     const type = raw?.type ?? ''
     const data = raw?.data ?? {}
+    if (type === 'turn/start') sensitiveBlocked.delete(sessionId)
 
     // ── 流式：只在私聊开，群聊一口气发完更清爽 ──
     if (type === 'assistant/chunk') {
@@ -924,6 +928,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
     }
 
     if (type === 'turn/end') {
+      const blocked = sensitiveBlocked.delete(sessionId)
       lastSent.delete(sessionId)
       selfSent.delete(sessionId)
       resetStream(sessionId)
@@ -933,6 +938,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
       if (reason?.kind === 'error') {
         const message =
           reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
+        if (blocked || reason.error?.code === 'QQ_SENSITIVE_CONTENT' || reason.failure?.code === 'QQ_SENSITIVE_CONTENT') return
         logger.warn?.(`[dsh-qq] ${record.label} 本轮出错: ${message}`)
         if (/CONTEXT_WINDOW_EXCEEDED|maximum context length/i.test(String(message))) {
           await emit(record, '这轮上下文处理失败，当前会话和原消息已保留。请尝试压缩会话，或明确选择 /new 新建会话。')
@@ -964,6 +970,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
 
     if (type === 'tool/result' && config.showToolResults) {
       const err = data.error
+      if (err?.code === 'QQ_SENSITIVE_CONTENT') return
       if (err) await emit(record, `⚠️ 工具失败: ${err.message ?? err.code ?? err}`)
       return
     }
