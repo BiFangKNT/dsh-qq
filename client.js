@@ -478,7 +478,7 @@ window.__ModuleLoader__.load({
           textField('memoryTaskTtlHours', '无明确期限事项的核实间隔（小时）', { type: 'number', hint: '默认 24；无新证据则收起待核实，不等于认定完成。' })),
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '先判断是不是在和我说话'),
-          boolField('addressClassifierEnabled', '启用前置判断（群聊与私聊）', '独立会话逐条判断；跳过的消息保留。群聊要求 @ 时仍须结构化 @ 且判断放行；不要求 @ 时由判断结果决定何时处理。关闭后不产生判断请求。'),
+          boolField('addressClassifierEnabled', '启用前置判断（群聊与私聊）', '独立会话逐条判断，可看图片，需支持图片输入的模型及宿主附件服务；不受下方成员图片屏蔽限制。跳过的消息保留。群聊要求 @ 时仍须结构化 @ 且判断放行；关闭后不产生判断请求。'),
           textField('addressClassifierProvider', '判断模型的 provider', { hint: '填写宿主注册的 provider 名称；留空使用插件明确配置的 provider。' }),
           textField('addressClassifierModel', '判断模型', { hint: '填写模型名；留空使用插件明确配置的 model。未明确配置模型时会记录错误并保留消息。' }),
           textField('addressClassifierReasoningEffort', '推理强度', { hint: '默认 low，可以填写模型支持的其他值。' }),
@@ -512,7 +512,7 @@ window.__ModuleLoader__.load({
           }),
           listField('groupTriggerWords', '立即处理的触发词', { hint: '默认空，用逗号分隔。仅用于不用 @ 且关闭分类器的群；文字包含任一词即提前处理，区分大小写，不匹配引用、历史或 @他人的昵称。自身 @ 始终可提前处理；触发词不强制回复。' }),
           boolField('addressedMaySilent', '被 @ 也允许沉默', '开启后，群聊被 @ 的这一轮也可选择不回复；不改变触发条件。'),
-          listField('groupImageBlock', '屏蔽成员图片', { hint: '按群号:QQ号屏蔽全部图片；追加:宽x高仅屏蔽指定尺寸。' }),
+          listField('groupImageBlock', '屏蔽成员图片', { hint: '仅约束主会话：按群号:QQ号屏蔽全部图片；追加:宽x高仅屏蔽指定尺寸。分类器不受此限制，开启后仍会接收图片。' }),
           textField('groupMinGapMs', '群里两条消息之间至少隔多久（毫秒）', {
             hint: '默认 4000，防风控。',
             type: 'number',

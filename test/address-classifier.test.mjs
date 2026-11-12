@@ -3,13 +3,18 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, rm, readdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createAddressClassifier } from '../src/address-classifier.js'
+import { createAddressClassifier as createClassifier } from '../src/address-classifier.js'
+import { createMockAttachments } from './mock-attachments.mjs'
 import { createInbound } from '../src/inbound.js'
 import { keepBacklog, drainBacklog } from '../src/inbound.js'
 import { createMockEnvironment } from './mock-environment.mjs'
 import { waitFor, textOf } from './mock-dsh.mjs'
+import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { Context } from '@deepseek-ai/cordis'
 
 const logger = { warn() {} }
+const createAddressClassifier = options => createClassifier({ getAttachments: () => createMockAttachments(options.home), ...options })
+const imageUrl = 'base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHHsAAAAASUVORK5CYII='
 async function directory(t) {
   const dir = await mkdtemp(join(tmpdir(), 'qq-classifier-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
@@ -228,6 +233,124 @@ test('完整消息入口：替代无@规则、保留媒体与来源、隔离判�
   await waitFor(() => env.snapshot().logs.some(l => l.text.includes('未授权')))
   assert.equal(llm.calls.length, 3)
 })
+
+test('真实 DSH llm 服务把图片块交给视觉适配器，文字路由明确拒绝', async t => {
+  const home = await directory(t), ctx = new Context(), llm = new LlmRuntime(ctx)
+  t.after(() => ctx.fiber.dispose())
+  const attachments = createMockAttachments(home), requests = []
+  class Adapter extends LlmAdapter {
+    async resolveModel(provider, model) { return { provider, id: model, name: model,
+      inputModalities: model === 'vision' ? ['text', 'image'] : ['text'], reasoning: { efforts: [{ id: 'low', name: 'Low' }] } } }
+    async *stream(request) {
+      requests.push(request)
+      const images = request.messages[0].content.filter(block => block.type === 'image')
+      assert.equal(images.length, 1)
+      assert.equal((await attachments.readImage(images[0].attachment)).data.length, images[0].attachment.bytes)
+      yield { type: 'text-delta', index: 0, text: 'yes' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+  }
+  llm.registerAdapter(['test'], new Adapter())
+  const config = { ...configOf(), addressClassifierModel: 'vision' }
+  const gate = createAddressClassifier({ home, config, llm, logger, getAttachments: () => attachments })
+  t.after(() => gate.stop())
+  const images = [Buffer.from(imageUrl.slice('base64://'.length), 'base64')]
+  let delivered = 0
+  await gate.accept({ ...input(1), images }, async () => { delivered++; return true })
+  assert.equal(delivered, 1, gate.pending(meta)[0]?.error)
+  assert.equal(requests.length, 1)
+  config.addressClassifierModel = 'text'
+  await gate.accept({ ...input(2), images }, async () => { throw new Error('文字路由不应交付') })
+  assert.equal(requests.length, 1)
+  assert.match(gate.pending(meta)[0].error, /不支持图片/)
+})
+
+for (const mode of ['不屏蔽', '全部屏蔽', '按尺寸屏蔽']) {
+  test(`分类器直接看图并保留待处理图片，主会话独立${mode}`, async t => {
+    const home = await directory(t), config = configOf(), llm = model('no', 'yes')
+    const gate = createAddressClassifier({ home, config, llm, logger })
+    const cache = join(home, '图片缓存')
+    const groupImageBlock = mode === '不屏蔽' ? [] : [mode === '全部屏蔽' ? '70001:10001' : '70001:10001:1x1']
+    const h = inboundHarness(t, gate, { config: { imageCacheDir: cache, groupImageBlock } })
+    await h.inbound(h.event(1, [{ type: 'image', data: { url: imageUrl } }]))
+    const images = llm.calls[0].messages[0].content.filter(block => block.type === 'image')
+    assert.equal(images.length, 1)
+    assert.equal(images[0].attachment.mediaType, 'image/png')
+    assert.deepEqual((await createMockAttachments(home).readImage(images[0].attachment)).data,
+      Buffer.from(imageUrl.slice('base64://'.length), 'base64'))
+    assert.deepEqual(JSON.parse(textOf(llm.calls[0].messages[0])).imageInputs,
+      [{ source: 'current', messageId: '1', imageIndex: 0 }])
+    assert.equal(h.delivered.length, 0)
+    assert.equal((await readdir(cache)).length, mode === '不屏蔽' ? 1 : 0)
+    await h.inbound(h.event(2, '你看刚才这张图呢'))
+    assert.equal(h.delivered.length, 1)
+    assert.equal(llm.calls[1].messages[0].content.filter(block => block.type === 'image').length, 1)
+    assert.deepEqual(JSON.parse(textOf(llm.calls[1].messages[0])).imageInputs,
+      [{ source: 'pending', messageId: '1', imageIndex: 0 }])
+    if (mode === '不屏蔽') assert.match(textOf(h.delivered[0]), /qq-.*\.png/)
+    else assert.doesNotMatch(textOf(h.delivered[0]), /qq-.*\.png|attachmentId|sha256:|mock-attachments/)
+    assert.equal(h.delivered[0].content.some(block => block.type === 'image'), false)
+  })
+}
+
+test('分类器与主会话共用一次图片下载，下载失败不会变成纯文本分类', async t => {
+  const home = await directory(t), config = configOf(), llm = model('no')
+  let downloads = 0
+  t.mock.method(globalThis, 'fetch', async () => {
+    downloads++
+    return downloads === 1 ? new Response(Buffer.from(imageUrl.slice('base64://'.length), 'base64'),
+      { headers: { 'content-type': 'image/png' } }) : new Response('', { status: 503 })
+  })
+  const gate = createAddressClassifier({ home, config, llm, logger })
+  const h = inboundHarness(t, gate, { config: { imageCacheDir: join(home, '图片缓存') } })
+  const image = [{ type: 'image', data: { url: 'https://example.invalid/fixture.png' } }]
+  await h.inbound(h.event(1, image))
+  assert.equal(downloads, 1)
+  assert.equal(llm.calls.length, 1)
+  assert.match(gate.pending(meta)[0].body, /qq-.*\.png/)
+  await h.inbound(h.event(2, image))
+  assert.equal(downloads, 2)
+  assert.equal(llm.calls.length, 1)
+  assert.match(gate.pending(meta)[1].imageError, /503/)
+  assert.equal(h.delivered.length, 0)
+})
+
+test('重启保留分类图片引用，并实际附带主会话已有图片', async t => {
+  const home = await directory(t), config = configOf(), images = [Buffer.from(imageUrl.slice('base64://'.length), 'base64')]
+  const gate = createAddressClassifier({ home, config, llm: model('no'), logger })
+  await gate.accept({ ...input(1), images }, async () => false)
+  const ref = gate.pending(meta)[0].imageAttachments[0]
+  gate.stop()
+  const llm = model('no'), restored = createAddressClassifier({ home, config, llm, logger })
+  t.after(() => restored.stop())
+  await restored.accept({ ...input(2), mainContext: { messages: [{ id: 'history-1', role: 'tool', content: [{ type: 'image', attachment: ref }] }] } }, async () => false)
+  const request = llm.calls[0].messages[0]
+  assert.deepEqual(request.content.filter(block => block.type === 'image').map(block => block.attachment), [ref, ref])
+  assert.deepEqual(JSON.parse(textOf(request)).imageInputs, [
+    { source: 'mainContext', messageId: 'history-1', imageIndex: 0 },
+    { source: 'pending', messageId: '1', imageIndex: 1 },
+  ])
+  const files = await readdir(join(home, 'address-classifier'))
+  const persisted = await readFile(join(home, 'address-classifier', files[0]), 'utf8')
+  assert.ok(persisted.includes(ref.attachmentId))
+  assert.equal(persisted.includes(imageUrl.slice('base64://'.length)), false)
+})
+
+for (const reason of ['缺附件服务', '模型不支持图片', '无效图片']) {
+  test(`分类图片${reason}明确记录错误，不悄悄改成纯文本判断`, async t => {
+    const home = await directory(t), config = configOf(), llm = model('yes'), warnings = []
+    if (reason === '模型不支持图片') llm.resolveModelInfo = async () => ({ inputModalities: ['text'] })
+    const gate = createAddressClassifier({ home, config, llm, logger: { warn: text => warnings.push(text) },
+      ...(reason === '缺附件服务' ? { getAttachments: () => null } : {}) })
+    t.after(() => gate.stop())
+    await gate.accept({ ...input(1), images: [reason === '无效图片' ? Buffer.from('invalid') : Buffer.from(imageUrl.slice('base64://'.length), 'base64')] },
+      async () => { throw new Error('不应交付') })
+    assert.equal(llm.calls.length, 0)
+    assert.equal(gate.hasPending(), true)
+    assert.equal(gate.pending(meta)[0].decision, null)
+    assert.ok(warnings.some(text => text.includes('前置分类失败')))
+  })
+}
 
 test('睡眠中的完整消息重启后交付，关闭开关不会偷偷恢复旧消息', async t => {
   const home = await directory(t), config = configOf(), llm = model('no', 'yes')
@@ -566,7 +689,7 @@ test('共用原图片缓存：重启和关闭期间不误删待交付附件，�
   const h = inboundHarness(t, restored, { config: {
     addressClassifierEnabled: false, requireMention: false, imageCacheDir: cacheDir,
   } })
-  const image = [{ type: 'image', data: { url: 'base64://aW1hZ2U=' } }]
+  const image = [{ type: 'image', data: { url: imageUrl } }]
   await h.inbound(h.event(2, image))
   assert.equal((await readdir(cacheDir)).length, 202)
   assert.ok(paths.every(path => restored.pendingAttachmentPaths().has(path)))
@@ -599,7 +722,7 @@ test('放行后本轮尚未结束时，旧消息里的图片仍可读取', async
   const idle = new Promise(resolve => { finish = resolve })
   t.after(() => finish())
   record.agent.whenIdle = () => h.delivered.length ? idle : Promise.resolve()
-  const image = [{ type: 'image', data: { url: 'base64://aW1hZ2U=' } }]
+  const image = [{ type: 'image', data: { url: imageUrl } }]
   await h.inbound(h.event(2, image))
   assert.equal(h.delivered.length, 1)
   assert.equal(gate.hasPending(), false)

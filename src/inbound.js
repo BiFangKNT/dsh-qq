@@ -307,33 +307,35 @@ export async function expandForwards(client, forwards, { logger } = {}) {
  * export 出去是因为 `qq_images`（tools.js）也要用同一条下载路径：
  * 按消息 id 现取图的时候，落到跟收消息一样的缓存目录里，用完能一起被清。
  */
+async function loadImage(url, maxMB) {
+  let data, ext
+  if (url?.startsWith('base64://')) {
+    data = Buffer.from(url.slice('base64://'.length), 'base64')
+    ext = '.png'
+  } else {
+    if (!/^https?:\/\//i.test(url ?? '')) throw new Error('图片来源必须为 HTTP(S) 或 base64')
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
+    if (!res.ok) throw new Error(`图片下载失败：HTTP ${res.status}`)
+    data = Buffer.from(await res.arrayBuffer())
+    ext = guessExt(url, res.headers.get('content-type') ?? '')
+  }
+  if (data.length > maxMB * 1024 * 1024) throw new Error('图片超过大小限制')
+  return { data, ext }
+}
+
+async function cacheImage(image, cacheDir) {
+  const path = join(cacheDir, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${image.ext}`)
+  await writeFile(path, image.data)
+  return path
+}
+
 export async function downloadImage(url, cacheDir, maxMB, policy) {
   try {
     if (!url || policy?.all) return null
-
-    // base64:// 直接落盘
-    if (url.startsWith('base64://')) {
-      const buf = Buffer.from(url.slice('base64://'.length), 'base64')
-      if (buf.length > maxMB * 1024 * 1024 || blocksImage(buf, policy)) return null
-      const p = join(cacheDir, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`)
-      await writeFile(p, buf)
-      return p
-    }
-
-    if (!/^https?:\/\//i.test(url)) return null
-
-    const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
-    if (!res.ok) return null
-    const buf = Buffer.from(await res.arrayBuffer())
-    if (buf.length > maxMB * 1024 * 1024 || blocksImage(buf, policy)) return null
-
-    const ext = guessExt(url, res.headers.get('content-type') ?? '')
-    const p = join(cacheDir, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`)
-    await writeFile(p, buf)
-    return p
-  } catch {
-    return null
-  }
+    const image = await loadImage(url, maxMB)
+    if (blocksImage(image.data, policy)) return null
+    return await cacheImage(image, cacheDir)
+  } catch { return null }
 }
 
 /** 清掉缓存里太老的图，避免堆成垃圾场。 */
@@ -685,14 +687,29 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     // ── 图片：下载到本地，把路径交给 agent ──
     let imagePaths = []
-    if (info.images.length > 0) {
+    let classifierImages = [], classifierImageError = ''
+    const imageSources = classified ? readMessage(event.message, { selfId }).images : info.images
+    if (imageSources.length > 0) {
       await mkdir(cacheDir, { recursive: true }).catch(() => {})
-      imagePaths = (await Promise.all(info.images.slice(0, 4).map(async u => {
-        const path = await downloadImage(u, cacheDir, maxMB, policy)
-        if (path) attachments.add(path)
-        return path
-      }))).filter(Boolean)
-      if (imagePaths.length === 0 && !policy.sizes.length) logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
+      const prepared = await Promise.all(imageSources.slice(0, 4).map(async url => {
+        let image
+        try { image = await loadImage(url, maxMB) }
+        catch (err) {
+          if (classified) classifierImageError = String(err?.message ?? err)
+          return {}
+        }
+        let path
+        try {
+          if (!policy.all && !blocksImage(image.data, policy)) {
+            path = await cacheImage(image, cacheDir)
+            attachments.add(path)
+          }
+        } catch (err) { logger.debug?.('图片未写入主会话缓存:', err?.message ?? err) }
+        return { image, path }
+      }))
+      imagePaths = prepared.map(item => item.path).filter(Boolean)
+      if (classified) classifierImages = prepared.filter(item => item.image).map(item => item.image.data)
+      if (info.images.length > 0 && imagePaths.length === 0 && !policy.sizes.length) logger.warn?.(`[dsh-qq] 图片下载失败（${info.images.length} 张）`)
     }
 
     // ── 文件：下载到本地，把路径交给 agent ──
@@ -846,13 +863,14 @@ export function createInbound({ config, manager, logger, client, send, approval,
         id: event.__classifierId ?? (event.message_id == null ? randomUUID() : String(event.message_id)),
         meta,
         body, source: event, attachmentPaths: [...attachments],
+        images: classifierImages, imageError: classifierImageError,
         robotName: manager.selfName || event.self_name || '机器人',
         mainContext: classified ? { header: systemSnapshot ? { ...header, system: systemSnapshot.text } : header,
           messages: session.deriveMessages(), runtimeContext: manager.runtimeContext?.(record) ?? '' } : undefined,
         background: isGroup ? [...(groupBacklog.get(peerId) ?? [])] : [],
         message: { senderId, senderName, text: info.text || '[非文字消息]',
           atMe: info.atMe, atOthers: info.atNames, quote: quoteInfo, time: event.time,
-          voiceTranscripts: voiceTexts, imageCount: info.images.length, fileNames: filePaths.map(f => f.name) },
+          voiceTranscripts: voiceTexts, imageCount: imageSources.length, fileNames: filePaths.map(f => f.name) },
       }, deliverBatch, { classify: classified })
       if (!config.addressClassifierEnabled) {
         if (isGroup) await scheduleGroup(meta)

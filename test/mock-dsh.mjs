@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { SystemPrompt, renderPrompt, renderContextSnapshot, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
 import { createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { createMockAttachments } from './mock-attachments.mjs'
 
 /** 使用真实 systemPrompt 注册/组装器，其余宿主能力仍由模拟器提供。 */
 export function createMockPromptScope(base, cwd, scopedTools = new Map()) {
@@ -46,6 +47,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
   const presetBindings = new WeakMap()
   const services = {
     llm,
+    attachments: createMockAttachments(home),
     sessionProjections: {
       async register(definition) {
         return { readerFor: session => () => session.events.reduce((state, event) => definition.apply(state, event), definition.init(session.header)),

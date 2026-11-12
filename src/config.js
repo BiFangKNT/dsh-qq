@@ -155,7 +155,7 @@ export const ConfigSchema = Schema.object({
     .description('已退役：启动时迁移到 groupMentionOverrides'),
   groupImageBlock: Schema.array(Schema.string())
     .default([])
-    .description('按群成员屏蔽图片：「群号:QQ号」屏蔽全部且不下载；「群号:QQ号:宽x高」仅屏蔽指定尺寸（如 123456789:10001:1920x1080，宽高精确匹配）。尺寸过滤需获取图片，命中后不保存，只保留文字和 [图片]，不向模型提供分辨率'),
+    .description('主会话按群成员屏蔽图片：「群号:QQ号」屏蔽全部；「群号:QQ号:宽x高」仅屏蔽指定尺寸（如 123456789:10001:1920x1080，宽高精确匹配）。命中后不写入主会话图片缓存，只保留文字和 [图片]。分类器不受此限制，开启后仍可下载并看图；分类器关闭时全图屏蔽不下载'),
   addressedMaySilent: Schema.boolean()
     .default(false)
     .description(

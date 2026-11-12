@@ -470,7 +470,8 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   const reading = createReading({ config, manager, logger })
   // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
   manager.keeper = (record) => bedtime.isHolding(record)
-  const addressClassifier = createAddressClassifier({ config, home: homeDirOf(ctx, logger), llm: ctx.get?.('llm'), logger })
+  const addressClassifier = createAddressClassifier({ config, home: homeDirOf(ctx, logger), llm: ctx.get?.('llm'),
+    getAttachments: () => ctx.get?.('attachments'), logger })
   const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, addressClassifier })
   const outbound = createOutbound({ manager, config, logger, send, wake, contextGuard })
 
