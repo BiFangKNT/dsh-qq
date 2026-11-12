@@ -1,5 +1,5 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { readMessage } from './onebot/segment.js'
+import { readMessage, readCommandText } from './onebot/segment.js'
 import { rememberFaces, facesCount } from './faces.js'
 import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
 import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
@@ -84,6 +84,12 @@ function allowGroup(config, groupId) {
     return listOf(config.groupAllow).includes(String(groupId))
   }
   return true
+}
+
+function commandOf(message, selfId, isGroup) {
+  const text = readCommandText(message, { selfId, requireMention: isGroup })
+    .toLowerCase().replace(/／/g, '/')
+  return /^[/#](reset|new|status|cwd|help)$/.test(text) ? text : ''
 }
 
 /**
@@ -855,8 +861,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
       return
     }
 
-    // ── 斜杠命令不打搅 Agent（全角斜杠「／」、前后空格都认）──
-    const cmd = rawText.toLowerCase().replace(/[／]/g, '/').trim()
+    // 群命令必须通过协议消息段显式 @ 自身，保活和分类器不代替这个条件。
+    const cmd = commandOf(event.message, selfId, isGroup)
     if (cmd === '/reset' || cmd === '#reset' || cmd === '/new' || cmd === '#new') {
       await manager.enqueue(record, async () => {
         await manager.replaceSession(record)
@@ -895,6 +901,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
           '/status 看看当前会话',
           '/cwd 看这个会话的目录',
           '/help 就是这份说明',
+          ...(isGroup ? ['群聊命令必须在命令前 @我。'] : []),
         ].join('\n'),
       )
       return
@@ -1268,8 +1275,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (event?.post_type === 'message' && String(event.user_id) !== selfId && permitted(meta) &&
       (!isPeerBot(config, event.user_id, event) || config.botChatEnabled)) {
       const info = readMessage(event.message, { selfId })
-      const command = String(info.text || '').toLowerCase().replace(/／/g, '/').trim()
-      const control = ['/reset', '#reset', '/new', '#new', '/status', '#status', '/cwd', '#cwd', '/help', '#help'].includes(command)
+      const control = Boolean(commandOf(event.message, selfId, scope === 'group'))
       if (!control && (info.text || info.images.length || info.records.length || info.files.length || info.mfaces.length || info.forwards.length)) {
         if (!event.__classifierRecovery) {
           for (const item of addressClassifier.unprepared(meta)) {

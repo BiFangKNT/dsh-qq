@@ -75,6 +75,18 @@ function toSegments(message) {
   return []
 }
 
+/** 命令只读取文本及前置的自身 @；昵称文本、其他 @ 和媒体均不能充当命令前缀。 */
+export function readCommandText(message, { selfId, requireMention = false } = {}) {
+  const self = String(selfId ?? '')
+  let text = '', atMe = false
+  for (const seg of toSegments(message)) {
+    if (seg?.type === 'text') text += seg.data?.text ?? ''
+    else if (seg?.type === 'at' && self && String(seg.data?.qq ?? '') === self && !text.trim()) atMe = true
+    else if (seg?.type !== 'reply') return ''
+  }
+  return requireMention && !atMe ? '' : text.trim()
+}
+
 /**
  * 合并转发的 id 是从桥接那头传回来的，不能当可信输入直接塞进 RPC。
  *
