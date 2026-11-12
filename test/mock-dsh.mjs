@@ -43,6 +43,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     const entry = { level, text: args.map(a => a?.message ?? String(a)).join(' ') }; logs.push(entry)
     if (verbose) console.error(`[mock-dsh:${level}]`, entry.text)
   }]))
+  const presetBindings = new WeakMap()
   const services = {
     llm,
     sessionProjections: {
@@ -54,8 +55,19 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     tools: { register(tool) { if (tools.has(tool.name)) throw new Error(`工具重复注册：${tool.name}`); tools.set(tool.name, tool) } },
     dshHomePath: name => join(home, name), approval: {}, webServer,
     agentPresets: {
-      async mount(agentCtx, id) {
+      defaultId: 'mock',
+      async resolve(id = this.defaultId) {
         if (id !== 'mock') throw new Error(`模拟环境只有 mock 预设，没有 ${id}`)
+        return { id }
+      },
+      composedPreset(agentCtx) { return presetBindings.get(agentCtx) },
+      presetForSession(session) {
+        return session.events.findLast(event => event.type === 'agent-preset/selected')?.data.agentPreset
+          ?? session.header.agentPreset ?? session.header.meta?.agentPreset ?? null
+      },
+      async mount(agentCtx, id = this.defaultId) {
+        await this.resolve(id)
+        if (presetBindings.get(agentCtx) === id) return { id }
         const safePath = path => {
           const cwd = agentCtx.cwd
           if (!cwd) throw new Error('预设文件工具需要会话 cwd')
@@ -79,6 +91,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
           const data = await readFile(safePath(args.path ?? args.file_path))
           return { simulated: true, bytes: data.length, header: data.subarray(0, 12).toString('hex'), note: '仅验证图片可读取，不模拟视觉识别' }
         } })
+        presetBindings.set(agentCtx, id)
         return { id }
       },
     },

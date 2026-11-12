@@ -88,3 +88,15 @@ test('普通保存不重复弹出已推迟的提示，执行中的操作禁用�
   h.status.promptSync.operations = [{ id: 'op', status: 'running', sessions: [] }]
   assert.equal(button(h.render(), '创建新会话').props.disabled, true)
 })
+
+test('设置页提供 Agent 工具预设，保存 preset 并说明新会话生效', async () => {
+  const h = await panel(), tree = h.render()
+  const label = tree.find(element => element.children.includes('Agent 工具预设'))
+  assert.ok(label)
+  assert.match(JSON.stringify(tree), /新会话生效/)
+  assert.match(JSON.stringify(tree), /宿主默认预设/)
+  const input = tree.slice(tree.indexOf(label)).find(element => element.type === 'input')
+  input.props.onBlur({ target: { value: 'images' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls.find(call => call.url.endsWith('/settings')).body, { patch: { preset: 'images' } })
+})

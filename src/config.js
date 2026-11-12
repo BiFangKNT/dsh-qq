@@ -53,7 +53,7 @@ export const ConfigSchema = Schema.object({
   // ── Agent ──
   provider: Schema.string().description('LLM provider 名称；留空跟随宿主默认'),
   model: Schema.string().description('模型名；留空跟随宿主默认'),
-  preset: Schema.string().description('Agent preset id；留空使用宿主默认组合（unset = 跟随宿主）'),
+  preset: Schema.string().description('Agent 预设 ID；留空加载宿主默认预设。新会话生效，已有会话恢复原预设；宿主未启用预设服务时留空使用全局组合'),
   cwd: Schema.string().description('Agent 工作目录；留空使用宿主默认'),
   uiOnly: Schema.boolean()
     .default(false)

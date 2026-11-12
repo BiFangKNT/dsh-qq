@@ -103,7 +103,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
 | 私聊 | `privateMode: allowlist`，`privateAllow: []`，不接受任何私聊 |
 | 群聊 | `groupMode: open`，默认需要 @；可改为名单模式或关闭 |
 | 工作目录 | `isolateByPeer: true`，按私聊对象或群组分目录；默认位于 `<cwd>/会话` |
-| 模型与预设 | 未指定 `provider`、`model`、`preset` 时跟随宿主 |
+| 模型与预设 | 未指定时跟随宿主；新会话加载默认预设，已有会话保留原预设。QQ 设置页可填写“Agent 工具预设” |
 | 主动消息 | `proactiveEnabled: true`，受静默时段和次数限制；仅需被动回复时可关闭 |
 | 聊天流水 | `chatLog: true`，保存聊天记录；按部署需要决定是否关闭 |
 

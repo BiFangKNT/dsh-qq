@@ -40,6 +40,8 @@ export const OVERRIDABLE = [
   'acceptedDshVersions',
   'doorReplyPrefix',
   'doorSenderLabel',
+  // Agent 工具预设（现有会话保持原选择，新会话生效）
+  'preset',
   // 人设 / 称呼
   'persona',
   'personaFile',

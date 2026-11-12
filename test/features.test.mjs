@@ -171,7 +171,8 @@ test('preset 在 create 和 resume 的 setup 中挂载，缺服务显式报错',
     } : undefined })
     const handle = async options => {
       const id = options.sessionId ?? options.resumeSessionId
-      const agent = { id, ctx: agentCtx, session: { id, events: [], requestHeader() {} } }
+      const agent = { id, ctx: agentCtx, session: { id, header: options.meta ?? {}, events: [], requestHeader() {},
+        append(type, data) { this.events.push({ type, data }) } } }
       await options.setup(agentCtx, agent)
       return { agent, dispose() {} }
     }
@@ -180,7 +181,11 @@ test('preset 在 create 和 resume 的 setup 中挂载，缺服务显式报错',
       async create(options) { assert.equal(options.meta.agentPreset, 'test-preset'); return handle(options) },
     }
     const manager = new SessionManager({ agents, config: { preset: 'test-preset', isolateByPeer: false }, logger,
-      ctx: { get: () => ({ mount: async (ctx, id) => mounted.push([ctx, id]) }) } })
+      ctx: { get: () => ({
+        resolve: async id => ({ id }), composedPreset: () => undefined,
+        presetForSession: session => session.header.agentPreset ?? null,
+        mount: async (ctx, id) => { mounted.push([ctx, id]); return { id } },
+      }) } })
     await manager.obtain({ scope: 'private', peerId: '10001' })
     assert.deepEqual(mounted, [[agentCtx, 'test-preset']])
     manager.stop()

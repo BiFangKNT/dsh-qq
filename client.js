@@ -457,6 +457,10 @@ window.__ModuleLoader__.load({
         /* ── 记忆区 / 工作区 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '记忆区与工作区'),
+          textField('preset', 'Agent 工具预设', {
+            hint: '填写宿主已有的预设 ID；留空加载宿主默认预设。保存后新会话生效，已有会话保留原预设；可用 /new 创建新会话，原历史不带入。预设中需包含 read_image 才能打开本机图片。',
+            mono: true,
+          }),
           textField('workspaceRoot', '会话目录根（记忆区在这儿）', {
             hint: '每个私聊 / 每个群在这里各有一个子目录（群_123456 / 私聊_10001），里面的「记忆区/」就是这个会话自己的日记和大纲。留空 = <工作目录>/会话。改完要重启宿主。',
             mono: true,

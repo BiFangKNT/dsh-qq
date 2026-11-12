@@ -266,8 +266,12 @@ export class SessionManager {
     if (this.config.model) agentOptions.model = this.config.model
 
     const preset = String(this.config.preset ?? '').trim()
-    if (preset && typeof this.ctx?.get?.('agentPresets')?.mount !== 'function') {
+    const presets = this.ctx?.get?.('agentPresets')
+    if (preset && !presets) {
       throw new Error(`无法加载 preset '${preset}'：宿主未提供 agentPresets`)
+    }
+    if (presets && ['mount', 'resolve', 'composedPreset', 'presetForSession'].some(name => typeof presets[name] !== 'function')) {
+      throw new Error('宿主 agentPresets 缺少预设挂载或会话查询接口')
     }
     const cwd = await this.#peerDir(info)
     const metaInfo = { ...info, selfId: String(this.selfId), dir: cwd || this.config.cwd || null }
@@ -278,10 +282,24 @@ export class SessionManager {
     }
     const installPrompt = (agentCtx, agent) => installChatSystem({ agentCtx, agent, config: this.config, meta: metaInfo, store: this.systemPrompts,
       runtimeContext: this.memory ? () => this.runtimeContext(this.findByPeer(info.scope, info.peerId) ?? metaInfo) : null })
+    const mountPreset = async agent => {
+      if (!presets) {
+        if (agent.session.header?.agentPreset || agent.session.snapshotEvents().some(event => event.type === 'agent-preset/selected')) {
+          throw new Error('恢复已选择预设的 QQ 会话需要宿主 agentPresets 服务')
+        }
+        return
+      }
+      // 已运行的 Agent 保持原来的预设与版本，不因配置或宿主默认值变化重新挂载。
+      if (presets.composedPreset(agent.ctx) !== undefined) return
+      const recorded = presets.presetForSession(agent.session)
+      const selected = await presets.mount(agent.ctx, recorded ?? (preset || undefined))
+      // 修复旧会话未记录预设的情况；重启后仍恢复同一身份，而不是重新选默认值。
+      if (recorded === null) agent.session.append('agent-preset/selected', { agentPreset: selected.id })
+    }
     let setupError
     const setup = async (agentCtx, agent) => {
       try {
-        if (preset) await this.ctx.get('agentPresets').mount(agentCtx, preset)
+        await mountPreset(agent)
         await installPrompt(agentCtx, agent)
       } catch (err) {
         setupError = err
@@ -302,7 +320,18 @@ export class SessionManager {
       /* get 不可用就往下走 */
     }
     if (live && typeof live.followup === 'function') {
-      return { agent: live, dispose: null, owned: false, cwd, promptDispose: await installPrompt(live.ctx, live) }
+      let promptDispose
+      const attachLive = async () => {
+        await mountPreset(live)
+        promptDispose = await installPrompt(live.ctx, live)
+      }
+      if (presets && presets.composedPreset(live.ctx) === undefined) {
+        await live.whenIdle()
+        await live.runMaintenance(attachLive)
+      } else {
+        await attachLive()
+      }
+      return { agent: live, dispose: null, owned: false, cwd, promptDispose }
     }
 
     // 2) 恢复持久化的历史会话
@@ -346,7 +375,7 @@ export class SessionManager {
     const meta = {}
     const workdir = cwd || this.config.cwd
     if (workdir) meta.cwd = workdir
-    if (preset) meta.agentPreset = preset
+    if (presets) meta.agentPreset = (await presets.resolve(preset || undefined)).id
     const createOptions = {
       ...(Object.keys(meta).length > 0 ? { meta } : {}),
       ...options,
@@ -363,7 +392,7 @@ export class SessionManager {
       // 用户看到的就是「发消息没人回」。这里兜底：再 resume 一次，还不行就换 id 重开。
       const again = await this.agents
         .resume({ resumeSessionId: sessionId, ...options })
-        .catch(() => null)
+        .catch(() => { if (setupError) throw setupError; return null })
       if (again?.agent) {
         this.logger.warn?.(`[dsh-qq] 会话 ${sessionId.slice(0, 8)} 建不出来，退回 resume 成功`)
         return { agent: again.agent, dispose: () => again.dispose(), owned: true, cwd: cwd ?? null, sessionId }
