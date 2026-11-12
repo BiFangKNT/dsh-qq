@@ -396,8 +396,10 @@ console.log('✓ 引用别人的消息不接')
 
 // —— [SILENT] 出口：非必回的群消息才给 ——
 assert.doesNotMatch(textOf(groupAgent.received[0]), /\[SILENT\]/, '被 @ 的消息是必回的，不该给潜水出口')
-assert.match(textOf(groupAgent.received[beforeOther]), /\[SILENT\]/, '保活窗里可以自己决定接不接，应该给 [SILENT] 出口')
-console.log('✓ [SILENT] 出口只给非必回的消息')
+assert.doesNotMatch(textOf(groupAgent.received[beforeOther]), /\[SILENT\]/, '沉默说明不写进用户历史')
+assert.equal(groupAgent.received[0].source.qqMaySilent, false)
+assert.equal(groupAgent.received[beforeOther].source.qqMaySilent, true)
+console.log('✓ 沉默要求随消息投递，说明不写入用户历史')
 
 // 模型真回了 [SILENT] → 一个字节都不发出去
 const beforeSilentSend = mock.calls.filter((c) => c.action === 'send_group_msg').length

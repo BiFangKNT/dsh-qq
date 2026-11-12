@@ -525,11 +525,6 @@ export function stripLeakedThinking(text, config = {}) {
 /** 太短不算一句，避免「嗯。」单独发一条。 */
 const MIN_SENTENCE = 6
 
-/** 这一段里有几个汉字——用来判断一段话是不是「人话」。 */
-function cjkCount(text) {
-  return (String(text).match(/[\u4e00-\u9fa5]/g) ?? []).length
-}
-
 /**
  * 模型把自己那边的界面标记当成正文写出来了。
  * 2026-10-29 18:42：正文是「已思考（用时1秒）好模型」——那是 UI 上的折叠条，
@@ -537,145 +532,18 @@ function cjkCount(text) {
  */
 const THINK_MARK_RE = /^已?(?:深度)?思考[（(]\s*用时[^）)]{0,16}[）)]\s*[：:，,]?\s*[）)]?\s*/
 
-/**
- * 模型偶尔把答案整个写进 reasoning 通道，text 块是空的。
- * 2026-10-26 17:15:24 和 17:16:06 各一次：turn 正常结束，QQ 上一个字都没有，
- * 因为 extractText() 只认 text 块，拿到空串就直接 return 了。
- * 这种情况下退回去取 reasoning 的最后一段当正文——总比整条不回好。
- */
-/** 「这版就它了」的标记：模型常把定稿接在它后面，或者单独起一段。 */
-const DRAFT_MARK =
-  /^\s*(?:good|okay|ok|fine|final|done|got it|i'?ll\s+(?:go|write|say|do|use)|let'?s\s+(?:go|use|say))\s*[.。:：,，、—–-]?\s*/i
-
-/** 读起来像「一句话说完了」：有句末标点，或者够长。 */
-function looksWhole(text) {
-  return /[。！？!?…~～]/.test(text) || cjkCount(text) >= 12
-}
-
-/** 这条 assistant 消息里有没有工具调用。
- *  2026-10-27 09:42 事故：她这轮只调了 edit（写日记），一个 text 块都没有 →
- *  reasoningTail 把 reasoning 里「检查目录」「我选择静默」「先 edit」整段捞出来发了。
- *  带工具调用的消息里，reasoning 全是"动手前的盘算"，一律不许当正文兜底。 */
+/** 工具轮由工具执行完成后的消息提供正式正文。 */
 export function hasToolUse(message) {
   const content = message?.content
   if (!Array.isArray(content)) return false
   return content.some((part) => /tool|function/i.test(String(part?.type ?? '')))
 }
 
-export function reasoningTail(message, config = {}) {
-  const content = message?.content
-  if (!Array.isArray(content)) return ''
-  const parts = []
-  for (const part of content) {
-    if (part?.type === 'reasoning' && typeof part.text === 'string') parts.push(part.text)
-  }
-  if (parts.length === 0) return ''
-  const segments = parts
-    .join('\n\n')
-    .split(/\n\s*\n/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-  const cleaned = segments.map((seg) => ({
-    text: stripLeakedThinking(seg, config) || '',
-    marked: DRAFT_MARK.test(seg),
-  }))
-
-  // ① 有定稿标记：从**最后一个**标记段开始，往后全要。
-  // 2026-10-26 20:10 修：原来只捞最后一段「像人话的」，但定稿常常被拆成两段
-  // （19:59 那轮 reasoning 是 `Good.揉得本姑娘有点晕` 加一段 `不过不喊停`，只捞最后一段
-  // 就发出一个没主语的半句）。起点认标记、终点认结尾，才是模型写完的那一版。
-  const marks = []
-  cleaned.forEach((seg, i) => {
-    if (seg.marked && seg.text) marks.push(i)
-  })
-  if (marks.length > 0) {
-    const out = cleaned
-      .slice(marks[marks.length - 1])
-      .map((seg) => seg.text)
-      .filter(Boolean)
-      .join('\n\n')
-    if (cjkCount(out) >= 2) return out
-  }
-
-  // ② 没有标记：最后一段自己够长就直接用；实在太短（`不过不喊停` 这种没主语的半句）
-  // 才往前并，最多并三段。别轻易往前并——并多了会把「面条好呀」和「汤面还是拌的」
-  // 这种本来分开说的话凑成一段。
-  const picks = []
-  for (let i = cleaned.length - 1; i >= 0 && picks.length < 3; i -= 1) {
-    const t = cleaned[i].text
-    if (!t) continue
-    picks.unshift(t)
-    const joined = picks.join('\n\n')
-    if (picks.length === 1 && cjkCount(t) < 6 && !looksWhole(t)) continue
-    if (cjkCount(joined) >= 4) return joined
-  }
-  const joined = picks.join('\n\n').trim()
-  return cjkCount(joined) >= 4 ? joined : ''
-}
-
-/**
- * 兜底捞 reasoning 时，把「改稿指令」和「自问自答」的段落剥掉，只留真的像话的那部分。
- *
- * 2026-10-27 15:08 事故：她那轮 text 是空的，reasoning 写的是
- * `再加一点温度：不用太长。` / `好，一句。` —— 兜底原样发到了 QQ 上。
- * 同一套毛病在 16:00 又出了一次（`我选 [SILENT]。` 那段）。
- *
- * 判据走**白名单**：一段话里得出现「你 / 姐姐 / 本姑娘」这种说话的对象或自称，
- * 才算是在对谁说话；否则要么是元指令，要么是纯盘算，丢掉。
- * 白名单比黑名单稳——元词列不全，而"她在跟谁说话"这件事漏不掉。
- * 只在这条兜底路径上生效，正常正文不经过它。
- */
 const SPEECH_MARK = /你|您|主人|本姑娘|咱/
 function hasSpeechMark(text, config) {
   const label = String(config?.ownerLabel ?? '').trim()
   return SPEECH_MARK.test(text) || Boolean(label && text.includes(label))
 }
-const META_WORD =
-  /再加|加一点|减一点|改一下|改一改|换个说法|说得|写得|语气|口吻|温度|太长|太短|短一点|长一点|字数|句子|一句/g
-/** 自问自答的样子：「嗯，但会不会显得太冷淡？不，规矩说不发也可以。」 */
-const SELF_TALK = /会不会|要不要|该不该|是不是(?:觉得|显得|太)|显得太/
-
-/**
- * 2026-10-29 19:00：这条尾巴像不像中文话。
- * 老二/老三用英文思考时正文容易空，兜底会把英文推理尾巴捞出来当话发——
- * 「Actually she's about to eat — better: 打爽了没」这种。中文尾巴照旧捞
- * （2026-10-26 17:15、17:16 那两次就是中文），只拦英文为主的。
- */
-function mostlyChinese(s) {
-  const src = String(s ?? '')
-  const cjk = (src.match(/[\u4e00-\u9fff]/g) ?? []).length
-  const latin = (src.match(/[A-Za-z]/g) ?? []).length
-  if (latin === 0) return true
-  return cjk >= 4 && cjk * 2 >= latin
-}
-
-export function stripMetaTalk(text, config = {}) {
-  const src = String(text ?? '').trim()
-  if (!src) return ''
-  const segs = src
-    .split(/\n+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-  const kept = []
-  for (const seg of segs) {
-    const meta = (seg.match(META_WORD) ?? []).length
-    if (meta >= 2) continue // 一句话里两处元词：铁定是在改稿，不是在说话
-    if (SELF_TALK.test(seg)) continue // 在问自己，不是在跟姐姐说话
-    if (hasSpeechMark(seg, config)) {
-      kept.push(seg)
-      continue
-    }
-    // 没有称呼、也没有元词，但紧跟在一句像样的话后面：当成那句的续句留着。
-    if (kept.length > 0 && meta === 0) {
-      kept.push(seg)
-      continue
-    }
-    // 开头第一段没有自称，但本身就够长、又不像盘算：也可能是在说话，留着。
-    if (kept.length === 0 && meta === 0 && cjkCount(seg) >= 4) kept.push(seg)
-  }
-  return kept.join('\n').trim()
-}
-
 /**
  * 收尾的元话：她是在跟自己交代状态，不是在跟人说话。
  *
@@ -860,43 +728,11 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
         wake?.noteProactiveSilent?.(record)
         return
       }
-      // 模型偶尔把答案整个写进 reasoning，text 块是空的（2026-10-26 17:15、17:16 各一次：
-      // turn 正常结束，QQ 那边一个字都没收到）。退回去取 reasoning 的尾段当正文。
-      // 2026-10-27 09:42 起加护栏：带工具调用的消息不兜底（那是动手前的盘算，不是话）。
-      // 2026-10-27 15:08 / 16:00 再加一层：兜底捞到的东西先过 stripMetaTalk，
-      // 把「再加一点温度：不用太长。」这类改稿指令剥掉；剥空了就当这轮没话，不发。
-      // 2026-10-28：主动机会那一轮不兜底 —— 正文空就是她选择不说。
-      // 兜底的初衷是「怕丢话」，可主动机会本来就是「可以说，也可以不说」，
-      // 硬兜底等于逼她开口，还把「就沉默。规则说发出去没人应，当她在忙」这种
-      // 心里话当成话播了出去（08:30、09:00、09:48 三轮）。
-      if (!text && !hasToolUse(data.message) && inProactiveTurn(record)) {
-        logger.info?.(`[dsh-qq] ${record.label} 主动机会这一轮没写正文，按沉默处理（不兜底 reasoning）`)
+      if (!text) {
         resetStream(sessionId)
         wake?.noteProactiveSilent?.(record)
         return
       }
-      if (!text && !hasToolUse(data.message)) {
-        const tailed = reasoningTail(data.message, config)
-        if (tailed.includes(SILENT_MARKER)) {
-          // 2026-10-27 16:00 事故：她那轮 reasoning 是「嗯，但会不会显得太冷淡？不，规矩说不发也可以。」
-          // 加「我选 [SILENT]。」——text 空，兜底把整段捞成正文，连标记一起发到了 QQ 上。
-          // 带静默标记就当她自己选了潜水：交给 send 按沉默处理（不扣主动额度）。
-          logger.info?.(`[dsh-qq] ${record.label} 兜底内容里带 ${SILENT_MARKER}，按沉默处理`)
-          text = SILENT_MARKER
-        } else {
-          // 2026-10-27 15:08 事故：兜底捞出「再加一点温度：不用太长。／好，一句。」这种改稿指令。
-          // 先剥掉元话语；剥空了就当这轮没话，不发。
-          text = stripMetaTalk(tailed, config)
-          // 2026-10-29 19:00：剥完还得是中文话。模型用英文思考时正文容易空，
-          // 兜底顺手把英文推理尾巴当成话发出去（老二 18:42 那次就是桌面端只有思考、
-          // QQ 却收到一条）。中文尾巴照旧捞——这条闸只拦英文为主的。
-          if (text && !mostlyChinese(text)) {
-            logger.info?.(`[dsh-qq] ${record.label} 兜底内容不是中文（模型在用英文思考），这轮不发`)
-            text = ''
-          }
-        }
-      }
-      if (!text) return
 
       const already = streamCount.get(sessionId) ?? 0
       const consumed = streamConsumed.get(sessionId) ?? 0

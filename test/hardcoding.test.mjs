@@ -8,7 +8,7 @@ import vm from 'node:vm'
 import { ensurePeerWorkspace } from '../src/workspace.js'
 import { doorLine, doorList, markDoorRead } from '../src/door.js'
 import { buildChatPrompt, proactiveRule, readingAskRule } from '../src/prompts.js'
-import { createOutbound, stripLeakedThinking, stripMetaTalk, stripClosingTalk } from '../src/outbound.js'
+import { createOutbound, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
 import { isDirectedAtAi, evaluateWakeTrigger } from '../src/wake-trigger.js'
 import { installSettingsApi } from '../src/settings.js'
 import { waitFor } from './mock-dsh.mjs'
@@ -70,7 +70,6 @@ test('自定义称呼用于上下文回显和收尾过滤，正常话不丢失',
   const config = { ownerLabel: '组长[甲]' }
   assert.equal(stripLeakedThinking('[组长[甲]] 今天忙吗', config), '')
   assert.equal(stripClosingTalk('结束这轮，组长[甲]晚安。', config), '结束这轮，组长[甲]晚安。')
-  assert.equal(stripMetaTalk('组长[甲]好', config), '组长[甲]好')
   const sent = []
   const onEvent = createOutbound({ manager: { find: () => ({ scope: 'private' }) }, config,
     logger: {}, send: async (_record, text) => sent.push(text) })

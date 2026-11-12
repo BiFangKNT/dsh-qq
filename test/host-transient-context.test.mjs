@@ -9,6 +9,7 @@ import { installChatSystem, createSystemPromptStore } from '../src/system-prompt
 import { clearRuntimeContext } from '../src/runtime-context.js'
 import { runtimeContextName } from '../src/session-view.js'
 import { assertHostAccepted } from '../src/host-compatibility.js'
+import { SILENT_HINT } from '../src/prompts.js'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 
 const require = createRequire(import.meta.resolve('@deepseek-ai/dsh-agent-loop'))
@@ -69,8 +70,8 @@ async function harness(t, { root, respond, compact = false } = {}) {
     handles.push(handle)
     return handle
   }
-  async function send(agent, body = 'hello') {
-    agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: body }], source: { kind: 'user' } }))
+  async function send(agent, body = 'hello', source = { kind: 'user' }) {
+    agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: body }], source }))
     await agent.whenIdle()
     assert.deepEqual(errors, [])
   }
@@ -126,7 +127,7 @@ test('工具续调刷新、网络重试复用快照，清理不改写已发送�
   } }))
   let retries = 0
   agent.ctx.on('agent/request-error', async (_payload, next) => retries++ === 0 ? { kind: 'retry' } : next())
-  await h.send(agent)
+  await h.send(agent, '普通群消息', { kind: 'user', qqMaySilent: true })
   assert.equal(h.requests.length, 3)
   assert.equal(h.renderCount, 2)
   assert.deepEqual(h.requests[0].messages, h.requests[1].messages)
@@ -135,6 +136,30 @@ test('工具续调刷新、网络重试复用快照，清理不改写已发送�
   assert.match(text(h.requests[2].messages.at(-1)), /STATE-AFTER-TOOL/)
   assert.equal(h.requests[2].messages.at(-2).role, 'tool')
   assert.doesNotMatch(text(agent.session.deriveMessages()), /STATE-/)
+  for (const request of h.requests) {
+    const content = request.messages.at(-1).content.map(block => block.text ?? '').join('')
+    assert.ok(content.includes(SILENT_HINT))
+    assert.equal(request.messages.filter(message => text(message).includes(SILENT_HINT)).length, 1)
+  }
+  assert.equal(text(agent.session.deriveMessages()).includes(SILENT_HINT), false)
+})
+
+test('沉默说明只在本轮末尾出现，不留历史、不进压缩，也不沿用到主动机会和下次点名', async t => {
+  const h = await harness(t, { compact: true }), { agent } = await h.attach()
+  await h.send(agent, '普通群消息 '.repeat(500), { kind: 'user', qqMaySilent: true })
+  assert.ok(text(h.requests.at(-1).messages.at(-1)).includes(SILENT_HINT))
+  assert.equal(text(agent.session.deriveMessages()).includes(SILENT_HINT), false)
+  const system = h.requests[0].messages[0]
+  assert.ok(await h.ctx.compaction.compactNow(agent, new AbortController().signal))
+  assert.equal(h.requests.at(-1).purpose, 'compaction')
+  assert.equal(text(h.requests.at(-1)).includes(SILENT_HINT), false)
+  await h.send(agent, '明确点名', { kind: 'user', qqMaySilent: false })
+  assert.equal(text(h.requests.at(-1)).includes(SILENT_HINT), false)
+  await h.send(agent, '又一条普通消息', { kind: 'user', qqMaySilent: true })
+  assert.ok(text(h.requests.at(-1).messages.at(-1)).includes(SILENT_HINT))
+  await h.send(agent, '主动机会', { kind: 'plugin', plugin: 'dsh-qq', form: 'proactive' })
+  assert.equal(text(h.requests.at(-1)).includes(SILENT_HINT), false)
+  assert.deepEqual(h.requests.at(-1).messages[0].content, system.content)
 })
 
 test('真实手动与超窗 compact 不含状态，压缩后更新锁定 system 并恢复状态', async t => {

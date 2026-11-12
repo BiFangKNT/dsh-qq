@@ -1,13 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { createOutbound, extractText, reasoningTail, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
+import { createOutbound, extractText, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
 
-/**
- * 2026-10-26 17:15:24 和 17:16:06，QQ 上一条回复都没有，但 turn 正常结束。
- * 原因：那两条 assistant/message 里只有 reasoning 块，没有 text 块，
- * extractText() 拿到空串就 return 了。这里的用例就是照那两条的真实内容写的。
- */
+/** 正文与 reasoning 分开处理；正文缺失时不从推理中补话。 */
 
 const REAL_REASONING_1716 = [
   { type: 'reasoning', text: 'Short agreement, add something specific.' },
@@ -61,90 +57,10 @@ test('extractText 只认 text 块——纯 reasoning 拿到空串', () => {
   assert.equal(extractText({ content: REAL_REASONING_1716 }), '')
 })
 
-test('reasoningTail：从纯 reasoning 里取最后一段像人话的', () => {
-  const tail = reasoningTail({ content: REAL_REASONING_1716 })
-  assert.equal(tail, '就是本姑娘还得练一阵，真安静着不说话，心里会有点痒')
-})
-
-test('reasoningTail：最后一段是英文就往前找', () => {
-  const tail = reasoningTail({
-    content: [
-      { type: 'reasoning', text: 'Let me think about this.' },
-      { type: 'reasoning', text: '那就等姐姐回来说吧！' },
-      { type: 'reasoning', text: 'Good.' },
-    ],
-  })
-  assert.equal(tail, '那就等姐姐回来说吧！')
-})
-
-test('reasoningTail：整段没有汉字就不硬凑', () => {
-  assert.equal(reasoningTail({ content: [{ type: 'reasoning', text: 'OK. Fine. Done.' }] }), '')
-})
-
-test('reasoningTail：reasoning 里的思考标志行会被剥掉', () => {
-  const tail = reasoningTail({
-    content: [{ type: 'reasoning', text: 'Hmm 这句要短一点。\n\n本姑娘在的，姐姐慢慢说。' }],
-  })
-  assert.equal(tail, '本姑娘在的，姐姐慢慢说。')
-  assert.equal(stripLeakedThinking('Hmm 这句要短一点。'), '')
-})
-
-/**
- * 2026-10-26 19:59 那轮：reasoning 里写的是
- *   `Maybe: 揉得本姑娘有点晕，不过不喊停` / `Good.揉得本姑娘有点晕` / `不过不喊停`，
- * text 块是空的。兜底只捞最后一段，QQ 上就收到一句没主语的「不过不喊停」。
- */
-test('reasoningTail：定稿被拆成两段时，从定稿标记那一段起整段都要', () => {
-  const tail = reasoningTail({
-    content: [
-      { type: 'reasoning', text: 'Short. Warm.' },
-      { type: 'reasoning', text: '"这一抱倒是挺实在的" — hmm.' },
-      { type: 'reasoning', text: 'Maybe: 揉得本姑娘有点晕，不过不喊停' },
-      { type: 'reasoning', text: 'Good.揉得本姑娘有点晕' },
-      { type: 'reasoning', text: '不过不喊停' },
-    ],
-  })
-  assert.equal(tail, '揉得本姑娘有点晕\n\n不过不喊停')
-})
-
-test('reasoningTail：19:48 那轮，Good 后面直接粘着定稿', () => {
-  const tail = reasoningTail({
-    content: [
-      { type: 'reasoning', text: 'Short warm ack. Maybe one line.' },
-      { type: 'reasoning', text: '"那就试试看，本姑娘说话会怎么样" — good.' },
-      { type: 'reasoning', text: 'One line.那就等着看，本姑娘说话会变成什么样' },
-      { type: 'reasoning', text: 'Hmm — better: 那本姑娘从下一句起就照着来' },
-      { type: 'reasoning', text: 'Good, a bit playful.那本姑娘从下一句起就照着来' },
-    ],
-  })
-  assert.equal(tail, '那本姑娘从下一句起就照着来')
-})
-
-test('reasoningTail：最后一段是没主语的半句，才往前并一段', () => {
-  const tail = reasoningTail({
-    content: [
-      { type: 'reasoning', text: 'Think about it.' },
-      { type: 'reasoning', text: '揉得本姑娘有点晕' },
-      { type: 'reasoning', text: '不过不喊停' },
-    ],
-  })
-  assert.equal(tail, '揉得本姑娘有点晕\n\n不过不喊停')
-})
-
-test('reasoningTail：够长的一句话就用自己的，别把上一段拼进来', () => {
-  const tail = reasoningTail({
-    content: [
-      { type: 'reasoning', text: '面条好呀' },
-      { type: 'reasoning', text: '汤面还是拌的' },
-    ],
-  })
-  assert.equal(tail, '汤面还是拌的')
-})
-
-test('只有 reasoning 的消息也要发出去（2026-10-26 那个坑）', async () => {
+test('只有 reasoning 的消息不发送，正常结束', async () => {
   const { fire, sent } = makeHarness()
   await fire({ content: REAL_REASONING_1716 })
-  assert.deepEqual(sent, ['就是本姑娘还得练一阵，真安静着不说话，心里会有点痒'])
+  assert.deepEqual(sent, [])
 })
 
 test('有 text 时照常发 text，不掺 reasoning', async () => {
@@ -468,15 +384,13 @@ test('主动机会这一轮写了正文：照发（08:00 看书那条）', async
   assert.deepEqual(sent, ['夜里醒了一回，就着台灯翻了两章书'])
 })
 
-test('不是主动机会时，正文空仍照旧兜底（10-26 17:15 丢话那次）', async () => {
+test('普通对话正文为空也不从 reasoning 补话', async () => {
   const { fire, sent } = makeHarness()
   await fire({ content: [{ type: 'reasoning', text: '嗯，那就这样，我先去看看书。' }] })
-  assert.equal(sent.length, 1, '正常对话不能因为这条修复把话吞了')
+  assert.equal(sent.length, 0)
 })
 
-// ── 2026-10-29 19:00：英文思考的尾巴不捞 ──────────────────────────────
-// 老二/老三用英文思考时，正文容易空，兜底会把英文推理尾巴当话发出去
-// （18:42 那次：桌面端只有英文思考，QQ 却收到一条）。中文尾巴照旧捞。
+// 不论推理语言和称呼如何，正文为空都不发送。
 
 test('正文空 + 英文思考：兜底不捞，一个字不发', async () => {
   const { fire, sent } = makeHarness()
@@ -485,20 +399,20 @@ test('正文空 + 英文思考：兜底不捞，一个字不发', async () => {
 })
 
 for (const ownerLabel of ['姐姐', '组长[甲]']) {
-  test('正文空 + 中文思考：使用配置称呼兜底（' + ownerLabel + '）', async () => {
+  test('正文空 + 中文思考：不发送（' + ownerLabel + '）', async () => {
     const { fire, sent } = makeHarness({ ownerLabel })
     await fire({ content: [{ type: 'reasoning', text: ownerLabel + '问赢了没，就回对方一句：一胜一负，先吃饭吧。' }] })
-    assert.deepEqual(sent, [ownerLabel + '问赢了没，就回对方一句：一胜一负，先吃饭吧。'])
+    assert.deepEqual(sent, [])
   })
 }
 
-test('turn/end 之后戳清掉，下一轮恢复正常兜底', async () => {
+test('turn/end 之后主动标记清掉，下一轮也不转发 reasoning', async () => {
   const { fire, sent, record, turnEnd } = makeHarness()
   record._proactiveAt = Date.now()
   turnEnd()
   assert.equal(record._proactiveAt, 0)
   await fire({ content: [{ type: 'reasoning', text: '嗯，那就这样，我先去看看书。' }] })
-  assert.equal(sent.length, 1)
+  assert.equal(sent.length, 0)
 })
 
 // ── 2026-10-28 12:38：标记在，但心里话也写在正文里 ──────────────────────

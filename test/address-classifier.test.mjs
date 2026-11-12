@@ -55,7 +55,7 @@ function inboundHarness(t, gate, extra = {}) {
     },
   }
   const inbound = createInbound({ config, manager, addressClassifier: gate, logger,
-    client: { call: async () => ({}) }, sleep: extra.sleep, approval: extra.approval, questions: extra.questions,
+    client: extra.client ?? { call: async () => ({}) }, sleep: extra.sleep, approval: extra.approval, questions: extra.questions,
     contextGuard: extra.contextGuard })
   t.after(() => inbound.dispose())
   const event = (id, text = `消息${id}`) => ({ post_type: 'message', message_type: 'group',
@@ -246,9 +246,90 @@ test('睡眠中的完整消息重启后交付，关闭开关不会偷偷恢复�
   await waitFor(() => awake.delivered.length === 1)
   assert.match(textOf(awake.delivered[0]), /消息1/)
   assert.match(textOf(awake.delivered[0]), /消息2/)
+  assert.equal(awake.delivered[0].source.qqMaySilent, true, '恢复队列不把普通群消息变成必须回复')
+  assert.doesNotMatch(textOf(awake.delivered[0]), /\[SILENT\]/)
   assert.equal(llm.calls.length, 2)
   assert.equal(restored.hasPending(), false)
 })
+
+for (const { atMe, addressedMaySilent, maySilent } of [
+  { atMe: false, addressedMaySilent: false, maySilent: true },
+  { atMe: true, addressedMaySilent: false, maySilent: false },
+  { atMe: true, addressedMaySilent: true, maySilent: true },
+]) {
+  test(`分类器放行只决定是否投递：atMe=${atMe}, addressedMaySilent=${addressedMaySilent}`, async t => {
+    const home = await directory(t)
+    const gate = createAddressClassifier({ home, config: configOf(), llm: model('yes'), logger })
+    t.after(() => gate.stop())
+    const h = inboundHarness(t, gate, { config: { addressedMaySilent } })
+    const event = h.event(1)
+    if (atMe) event.message = [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '消息1' } }]
+    await h.inbound(event)
+    await waitFor(() => h.delivered.length === 1)
+    assert.equal(h.delivered[0].source.qqMaySilent, maySilent)
+    assert.doesNotMatch(textOf(h.delivered[0]), /\[SILENT\]/)
+  })
+}
+
+for (const quoted of [false, true]) {
+  for (const addressedMaySilent of [false, true]) {
+    test(`分类器积压批次保留前面的点名：引用=${quoted}, 允许沉默=${addressedMaySilent}`, async t => {
+      const home = await directory(t), llm = model('yes', 'yes', 'yes')
+      const gate = createAddressClassifier({ home, config: configOf(), llm, logger })
+      t.after(() => gate.stop())
+      let holding = true
+      const h = inboundHarness(t, gate, { config: { addressedMaySilent },
+        sleep: { shouldHold: () => holding }, client: { call: async () => ({
+          sender: { user_id: 9 }, message: '机器人的上一条回复',
+        }) } })
+      const first = h.event(1)
+      first.message = [{ type: quoted ? 'reply' : 'at', data: quoted ? { id: '88' } : { qq: '9' } },
+        { type: 'text', data: { text: '第一条问题' } }]
+      await h.inbound(first)
+      await h.inbound(h.event(2, '后续普通补充'))
+      assert.equal(h.delivered.length, 0)
+      holding = false
+      await h.inbound(h.event(3, '最后一条普通补充'))
+      await waitFor(() => h.delivered.length === 1)
+      assert.equal(h.delivered[0].source.qqMaySilent, addressedMaySilent)
+      assert.match(textOf(h.delivered[0]), /第一条问题/)
+      assert.match(textOf(h.delivered[0]), /最后一条普通补充/)
+    })
+  }
+}
+
+test('重启后恢复的整批消息仍保留前面的点名要求', async t => {
+  const home = await directory(t), config = configOf(), llm = model('yes', 'yes')
+  const gate = createAddressClassifier({ home, config, llm, logger })
+  const sleeping = inboundHarness(t, gate, { sleep: { shouldHold: () => true } })
+  const first = sleeping.event(1)
+  first.message = [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '请回答这个问题' } }]
+  await sleeping.inbound(first)
+  await sleeping.inbound(sleeping.event(2, '附带一点说明'))
+  sleeping.inbound.dispose()
+  const restored = createAddressClassifier({ home, config, llm, logger })
+  const awake = inboundHarness(t, restored)
+  await waitFor(() => awake.delivered.length === 1)
+  assert.equal(awake.delivered[0].source.qqMaySilent, false)
+  assert.equal(llm.calls.length, 2, '恢复交付不重新分类')
+})
+
+for (const { text, config, maySilent } of [
+  { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'] }, maySilent: false },
+  { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'], groupWakeNameMention: false }, maySilent: true },
+  { text: '请协助处理', config: { groupWakeKeywords: ['请协助'] }, maySilent: false },
+  { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'], addressedMaySilent: true }, maySilent: true },
+]) {
+  test(`分类器放行保留现有名字和关键词规则：${JSON.stringify(config)}`, async t => {
+    const home = await directory(t)
+    const gate = createAddressClassifier({ home, config: configOf(), llm: model('yes'), logger })
+    t.after(() => gate.stop())
+    const h = inboundHarness(t, gate, { config: { groupWakeQuestion: false, ...config } })
+    await h.inbound(h.event(1, text))
+    await waitFor(() => h.delivered.length === 1)
+    assert.equal(h.delivered[0].source.qqMaySilent, maySilent)
+  })
+}
 
 test('审批回答不等待分类，关闭后恢复旧触发，未授权与同类开关不被绕过', async t => {
   const home = await directory(t), config = configOf()

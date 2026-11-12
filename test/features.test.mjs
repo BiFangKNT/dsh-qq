@@ -61,7 +61,8 @@ test('新配置可通过设置文件覆盖，字符串名单也可使用', async
   h.config.groupFree = h.group
   await h.inbound(h.event(1)); await h.flush()
   assert.equal(h.delivered.length, 1)
-  assert.match(JSON.stringify(h.delivered), /SILENT/)
+  assert.equal(h.delivered[0].source.qqMaySilent, true)
+  assert.doesNotMatch(JSON.stringify(h.delivered), /SILENT/)
 })
 
 test('去重只按会话内的消息 ID，内容相同的新消息仍会投递', async () => {

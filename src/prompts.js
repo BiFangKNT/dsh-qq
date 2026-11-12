@@ -137,7 +137,7 @@ export const QUOTE_DIRECTION_HINT = `[引用规矩：消息里带「[引用 某�
  */
 export const SILENT_MARKER = '[SILENT]'
 
-export const SILENT_HINT = `[这条不一定是在叫你：想接就接；不想接、接不上、或者觉得插不进嘴，就只输出 ${SILENT_MARKER}——那不会发出去，也没人知道你看了。]`
+export const SILENT_HINT = `[本轮可以选择不回复。不想接话或没有要补充的内容时，只输出 ${SILENT_MARKER}；该标记不会发送到聊天中。]`
 
 /**
  * 把正文里的 [SILENT] 剥掉，看还剩不剩话。

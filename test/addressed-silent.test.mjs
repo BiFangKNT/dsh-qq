@@ -3,7 +3,7 @@
  *
  * 2026-10-27 姐姐定：老三在群里被 @ / 被引用 / 被点名的时候，
  * **看得见、回不回她定**——不再强制开口。
- * 私聊和补发（replay）不受影响，该回还得回。
+ * 私聊保持原行为，群聊补发不改变原消息的沉默规则。
  *
  * 跑法：node test/addressed-silent.test.mjs
  */
@@ -52,8 +52,10 @@ t('开关开：私聊照样必须回', () => {
   assert.equal(mustReplyFor({ isGroup: false, addressedMaySilent: true }), true)
 })
 
-t('开关开：补发（replay）照样必须回', () => {
-  assert.equal(mustReplyFor({ isGroup: true, isReplay: true, addressedMaySilent: true }), true)
+t('群聊补发保留原消息的沉默规则', () => {
+  assert.equal(mustReplyFor({ isGroup: true, isReplay: true }), false)
+  assert.equal(mustReplyFor({ isGroup: true, isReplay: true, atMe: true }), true)
+  assert.equal(mustReplyFor({ isGroup: true, isReplay: true, atMe: true, addressedMaySilent: true }), false)
 })
 
 t('群里没人叫它：本来就留出口（开关开或关都一样）', () => {

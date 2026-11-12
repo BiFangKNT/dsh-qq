@@ -1,7 +1,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readMessage, readCommandText } from './onebot/segment.js'
 import { rememberFaces, facesCount } from './faces.js'
-import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT, SILENT_HINT } from './prompts.js'
+import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT } from './prompts.js'
 import { evaluateWakeTrigger, rollWakeProbability } from './wake-trigger.js'
 import { doorLine } from './door.js'
 import { resolvePeerWorkspace } from './workspace.js'
@@ -257,21 +257,20 @@ function historyTime(d = new Date()) {
 /**
  * 这一轮「必须回」还是「可以沉默」。
  *
- * - 私聊、补发（replay）：必须回 —— 那是冲它来的正经话，别装死。
+ * - 私聊：默认回应。
  * - 群里被 @ / 被引用 / 被叫名字点名（addressedBy）：默认必须回；
- *   2026-10-27 姐姐定「群里主动 @ 一直不开」，`addressedMaySilent` 打开后
- *   被叫照样叫得醒（消息进上下文、能看能开口），但回不回它自己定。
+ *   `addressedMaySilent` 打开后，被叫也允许沉默。
  * - 群里没被叫（概率唤醒 / 保活窗路过）：可以沉默。
+ * - 补发和分类器放行不改变原消息的回复要求。
  */
 export function mustReplyFor({
   isGroup,
   atMe = false,
   quotedMe = false,
-  isReplay = false,
   addressedBy = null,
   addressedMaySilent = false,
 } = {}) {
-  if (!isGroup || isReplay) return true
+  if (!isGroup) return true
   const addressed = Boolean(atMe || quotedMe || addressedBy)
   return addressed && addressedMaySilent !== true
 }
@@ -497,7 +496,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
   /**
    * 投递一轮。单条消息和「连发合并」后的整段，走的是同一条路。
    */
-  function runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs, beforeSubmit, onAccepted, onRejected, onIdle, canDeliver }) {
+  function runTurn({ record, label, peerId, isGroup, client, body, mustReply, maxTurnMs, beforeSubmit, onAccepted, onRejected, onIdle, canDeliver }) {
     const startedAt = Date.now()
 
     manager.enqueue(record, async () => {
@@ -510,7 +509,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         const text = typeof body === 'function' ? body() : body
         const message = createUserMessage({
           content: [{ type: 'text', text }],
-          source: { kind: 'user' },
+          source: { kind: 'user', qqMaySilent: !mustReply },
         })
         // 私聊回一句「正在输入」，让对方知道这边在敲字（群聊没有这个概念，跳过）
         if (!isGroup && client) {
@@ -753,7 +752,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // addressedBy：没 @ 但被「叫名字 / 点名提问 / 关键词」叫住的理由（2026-10-25）。
     // 这种算「有人冲它来了」，必须回，不给 [SILENT] 出口。
     const freeGroup = isGroup && listOf(config.groupFree).includes(peerId)
-    let addressedBy = null
+    let addressedBy = isReplay ? event.__addressedBy ?? null : null
     if (!classified && isGroup && config.requireMention && !freeGroup && !info.atMe && !isReplay) {
       // 没 @ 我、却 @ 了别人（包括群里另一个机器人）：那明显不是跟我说话，
       // 保活期也不算 —— 否则别人一句「@ 那个谁 来帮我测一下」它也会冲上去接。
@@ -819,7 +818,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         `[dsh-qq] 群 ${peerId} 距上次回复不到 ${config.groupReplyGapMs}ms，先攒着（到点补回）`,
       )
       keepBacklog(peerId, historyLine(sender, info.text || '[图片]', ownerInfo))
-      scheduleGapReplay(event, peerId, senderId)
+      scheduleGapReplay({ ...event, __addressedBy: addressedBy }, peerId, senderId)
       return
     }
 
@@ -1006,22 +1005,14 @@ export function createInbound({ config, manager, logger, client, send, approval,
     else if (ownerInfo.isOwner && head) head = `[${ownerLabel}] ${head}`
     if (head) parts.push(head)
 
-    // 群聊里没被 @、也不是引用着我的：给一个「可以不接」的出口。
-    // 私聊、被 @、被引用回复这三种情况必须回，就不给出口 —— 该说话的时候别装死。
-    // 2026-10-25 补：被叫名字 / 点名提问 / 关键词叫住的（addressedBy）也算被点名，同样必须回；
-    // 只有「概率唤醒」那种路过看一眼的，才留 [SILENT] 出口。
-    // 2026-10-27 姐姐定：群里「主动 @ 一直不开」——`addressedMaySilent` 打开后，
-    // 被叫照样叫得醒（消息进上下文、能看能开口），但不再非答不可，回不回它自己定。
-    // 规则本体在 mustReplyFor()，这里只负责把当前这一条的实况递进去。
+    // 只保存本轮回复要求；沉默说明在请求末尾提供，不写入用户正文。
     const mustReply = mustReplyFor({
       isGroup,
       atMe: info.atMe,
       quotedMe,
-      isReplay,
-      addressedBy: classified ? 'classifier' : addressedBy,
+      addressedBy,
       addressedMaySilent: config.addressedMaySilent,
     })
-    if (!mustReply) parts.push(SILENT_HINT)
 
     if (imagePaths.length > 0) {
       parts.push(
@@ -1154,7 +1145,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       }
       batch.bodies.push(body)
       // 用最新的 record（上下文换过会话的话，投给新那个）
-      batch.meta = { record, label, peerId, isGroup, client, beforeSubmit }
+      batch.meta = { record, label, peerId, isGroup, client, mustReply, beforeSubmit }
       if (batch.timer) clearTimeout(batch.timer)
       batch.timer = setTimeout(() => {
         mergeBatches.delete(key)
@@ -1165,7 +1156,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
       return
     }
 
-    runTurn({ record, label, peerId, isGroup, client, body, maxTurnMs, beforeSubmit })
+    runTurn({ record, label, peerId, isGroup, client, body, mustReply, maxTurnMs, beforeSubmit })
   }
 
   function permitted(meta) {
@@ -1197,6 +1188,18 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const batchAttachments = new Set(batch.flatMap(item => item.attachmentPaths ?? []))
     return new Promise((resolve, reject) => runTurn({
       record, label: meta.label, peerId: meta.peerId, isGroup, client,
+      mustReply: batch.some(({ message, source }) => mustReplyFor({
+        isGroup,
+        atMe: message.atMe,
+        quotedMe: Boolean(message.quote?.ok && String(message.quote.userId) === meta.selfId),
+        addressedBy: isGroup && !message.atOthers?.length ? evaluateWakeTrigger({
+          plainText: message.text,
+          names: [manager.selfName, source?.self_name, ...(config.groupWakeNames ?? [])].filter(Boolean),
+          triggers: { nameMention: config.groupWakeNameMention, question: config.groupWakeQuestion,
+            keywords: config.groupWakeKeywords },
+        }) : null,
+        addressedMaySilent: config.addressedMaySilent,
+      })),
       body: () => {
         const backlog = isGroup ? [...(groupBacklog.get(meta.peerId) ?? [])] : []
         return [

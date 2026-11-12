@@ -1,7 +1,7 @@
 import { createDeveloperMessage } from '@deepseek-ai/dsh-llm'
 import { runtimeContextName } from './session-view.js'
 import { facesForPrompt } from './faces.js'
-import { faceStrategyRule } from './prompts.js'
+import { faceStrategyRule, SILENT_HINT } from './prompts.js'
 import { loadGroupDigest } from './settings.js'
 import { listOf } from './config.js'
 
@@ -25,6 +25,7 @@ export function installRuntimeContext(agentCtx, agent, render, view) {
   if (installed.has(agent)) return installed.get(agent).dispose
   if (typeof agent.session.append !== 'function') throw new Error('QQ 状态区需要宿主 session.append 接口')
   let captured = '', failure = null, disposed = false
+  let maySilent = false
   const disposers = []
   const clear = () => {
     try {
@@ -53,9 +54,12 @@ export function installRuntimeContext(agentCtx, agent, render, view) {
     clear()
     disposers.push(agentCtx.get('systemPrompt').context({ name: runtimeContextName, order: 1000,
       required: true, interpolate: false, text: () => captured }))
-    disposers.push(agentCtx.on('agent/pre-step', async (_payload, next) => {
+    disposers.push(agentCtx.on('agent/pre-step', async ({ messages }, next) => {
       clear()
-      captured = render()
+      // 在宿主实际取出消息时更新，排队中的下一轮不能提前影响当前轮。
+      // 工具续调没有新消息，继续沿用本轮要求；主动机会等其他入口不继承它。
+      if (messages.length) maySilent = messages.every(message => message.source?.qqMaySilent === true)
+      captured = [render(), maySilent ? SILENT_HINT : ''].filter(Boolean).join('\n\n')
       return next()
     }, { prepend: true }))
     disposers.push(agentCtx.on('agent/assistant-stream', ({ frame }) => {

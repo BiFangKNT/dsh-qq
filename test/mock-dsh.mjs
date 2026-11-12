@@ -143,7 +143,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     await event(agent, 'user/message', message, { surfaceOp: 'append' })
     let reason = { kind: 'completed' }
     try {
-      await request(agent)
+      await request(agent, [message])
       for (const step of plan) {
         switch (step.type) {
           case 'text': {
@@ -174,9 +174,9 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     } catch (err) { logger.warn(err); reason = { kind: 'error', error: { message: err.message, code: err.code } } }
     finally { await event(agent, 'turn/end', { reason }); await ctx.emit('agent/status', { agent, status: 'idle' }) }
   }
-  async function request(agent) {
+  async function request(agent, messages = []) {
     const assembly = await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))
-    await ctx.waterfall('agent/pre-step', { agent }, () => ({ kind: 'enter', messages: [] }))
+    await ctx.waterfall('agent/pre-step', { agent, messages }, () => ({ kind: 'enter', messages }))
     const prompt = agent.ctx.get('systemPrompt')
     const current = prompt.refreshContext(assembly, assembleContextFor(agent))
     const header = { system: renderPrompt(assembly), tools: assembly.tools }
