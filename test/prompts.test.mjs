@@ -42,7 +42,7 @@ t('人设排在协议层之后', () => {
   assert.ok(iPersona > 0)
   assert.ok(iPersona > p.indexOf(BUILTIN_RULES.slice(0, 20)))
   assert.ok(iPersona > p.indexOf('【时间】'))
-  assert.ok(iPersona > p.indexOf('【脾气】'))
+  assert.ok(iPersona > p.indexOf('【分歧与纠错】'))
 })
 
 t('SELF_KNOWN_RULE 紧跟在人设后面（中间只有空行）', () => {
@@ -66,7 +66,7 @@ t('没配人设才用 ANON_RULE，且不出现 SELF_KNOWN_RULE', () => {
 t('personaInSystem：人设在系统提示里时，消息里不再重复一份', () => {
   const p = buildChatPrompt({ persona: PERSONA, personaInSystem: true }, { isGroup: false })
   assert.ok(!p.includes(PERSONA), '人设不该再拼进消息')
-  assert.ok(p.includes('系统提示里写着了'), '要留一句指代，别让它去猜自己是谁')
+  assert.ok(p.includes('由宿主系统提示提供'), '要说明角色由宿主人设提供')
   assert.ok(!p.includes(ANON_RULE), '有系统级人设就不该走「没有固定名字」那条')
   assert.ok(!p.includes(SELF_KNOWN_RULE), 'SELF_KNOWN_RULE 说的是「上面那段」，这里上面没有人设')
 })
@@ -98,7 +98,7 @@ t('表情包在最后', () => {
 t('群聊没人设时也不会把 ANON 挤到中间', () => {
   const p = buildChatPrompt({ ownerIds: ['123'], ownerLabel: '姐姐' }, { isGroup: true })
   assert.ok(p.includes(GROUP_RULES.slice(0, 10)))
-  assert.ok(p.indexOf(ANON_RULE) > p.indexOf('【谁是谁】'))
+  assert.ok(p.indexOf(ANON_RULE) > p.indexOf('【消息来源与授权】'))
 })
 
 console.log('两层提示词 · 人设泄漏检测')

@@ -988,7 +988,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
             ok: false,
             mode: 'none',
             messageId: 0,
-            reason: `收藏的图片文件不见了：${face.path}（换一个吧，或者让主人重新收一张）`,
+            reason: `收藏的图片文件不见了：${face.path}（可换一张，或请用户重新收藏）`,
           }
         }
         try {

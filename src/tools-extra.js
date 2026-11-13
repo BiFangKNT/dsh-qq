@@ -50,7 +50,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
 
   tools.register({
     name: 'qq_private_history',
-    description: '查询落盘的私聊流水，默认最近一天，最多七天。仅私聊可用：主人可读正文，其他人好感度到 100 仅可查时间线。user_id 留空查整体活动，指定他人仅限主人。无记录就说不知道。',
+    description: '查询落盘的私聊流水，默认最近一天，最多七天。仅私聊可用：授权账号可读正文，其他人好感度到 100 仅可查时间线。user_id 留空查整体活动，指定他人仅限授权账号。无记录就说不知道。',
     parameters: {
       type: 'object', properties: {
         user_id: { type: 'string' }, days: { type: 'integer', minimum: 1, maximum: 7 },
@@ -70,7 +70,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
 
   tools.register({
     name: 'qq_qzone_send',
-    description: '发布 QQ 空间说说，仅主人私聊可用。先展示完整文案、图片和可见范围，得到主人确认后再调用。默认 public，每天最多两次尝试；失败或超时不自动重发。',
+    description: '发布 QQ 空间说说，仅授权账号私聊可用。先展示完整文案、图片和可见范围，得到该账号确认后再调用。默认 public，每天最多两次尝试；失败或超时不自动重发。',
     parameters: {
       type: 'object', properties: {
         text: { type: 'string' }, images: { type: 'array', items: { type: 'string' }, maxItems: 9 },
@@ -88,7 +88,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
     async execute(args, exec) {
       const record = needRecord(manager, exec)
       if (record.scope !== 'private' || !listOf(config.ownerIds).includes(String(record.peerId))) {
-        throw new Error('只有主人私聊可以发布空间说说')
+        throw new Error('只有授权账号私聊可以发布空间说说')
       }
       assertQuiet(record)
       const text = cleanOutboundText(args.text)

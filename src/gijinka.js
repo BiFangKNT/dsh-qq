@@ -189,7 +189,7 @@ export function renderGijinka(opts = {}) {
   const lines = [
     '【AI 娘图鉴】群友说的「X 娘」是画师画的各家 AI 拟人同人形象，不是真人，也不是官方拟人：',
     ...list.map(gijinkaLine),
-    '认不出来就说认不出来，别硬猜长相；也别自称是其中某一位——你是你自己。',
+    '以上是角色参考资料，不决定你的人设。图片无法确认时说明不确定，不凭别名猜测画面。',
   ]
   return lines.join('\n')
 }

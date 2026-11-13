@@ -192,9 +192,9 @@ test('事实卡限额独立，拒绝多行注入，允许带归属的个人说�
   assert.throws(() => appendFact(file, '乙', '第一行\n## 会话 甲'), /单行/)
 })
 
-test('私聊权限：主人看正文和会话来源，其他人只看日期时间，拒绝越权', async t => {
+test('私聊权限：授权账号看正文，称呼不授予权限，其他人只看日期时间', async t => {
   const root = await temporary(t)
-  const config = { workspaceRoot: root, ownerIds: ['10001'] }
+  const config = { workspaceRoot: root, ownerIds: ['10001'], memberLabels: { '10002': '爸爸' } }
   const now = new Date(2026, 0, 2, 12)
   const log = join(root, '私聊_10003', '聊天记录')
   await mkdir(log, { recursive: true })
@@ -206,7 +206,7 @@ test('私聊权限：主人看正文和会话来源，其他人只看日期时�
   const timeline = await query('10002')
   assert.match(timeline, /2026-01-02 09:10/)
   assert.doesNotMatch(timeline, /私密内容|10003|甲/)
-  await assert.rejects(query('10002', { userId: '10003' }), /只有主人/)
+  await assert.rejects(query('10002', { userId: '10003' }), /只有授权账号/)
   await assert.rejects(query('10001', { userId: '../10003' }), /QQ 号/)
   await assert.rejects(query('10001', { record: { scope: 'group' } }), /只在私聊/)
 })
@@ -237,7 +237,7 @@ test('新增工具沿用真实会话权限和静默闸', async t => {
     config: { ownerIds: ['10001'] }, logger, home,
   })
   const exec = { agent: { session: { id: 's' } } }
-  await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /主人私聊/)
+  await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /授权账号私聊/)
   record.scope = 'private'; record.quietRound = true
   await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /夜里/)
   await assert.rejects(tools.get('qq_send_voice').execute({ text: '正文' }, exec), /夜里/)

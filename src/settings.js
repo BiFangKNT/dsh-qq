@@ -22,6 +22,7 @@ import { join, resolve, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
 import { migrateGroupSettings, retiredGroupSettings } from './group-trigger.js'
+import { migrateOwnerLabel } from './identity.js'
 
 /**
  * 设置页本地服务端口。
@@ -48,6 +49,7 @@ export const OVERRIDABLE = [
   'personaFile',
   'ownerIds',
   'ownerLabel',
+  'memberLabels',
   'directPrompt',
   'groupPrompt',
   // 工作区与记忆
@@ -192,6 +194,17 @@ export function loadOverrides(ctx, logger) {
     logger?.warn?.(`读 ${file} 失败，按没有覆盖处理:`, err?.message ?? err)
     return {}
   }
+}
+
+/** 在应用配置前持久化迁移结果，不能让旧称呼在下次启动时扩散到新增账号。 */
+export function migrateIdentityOverrides(ctx, config, overrides, logger) {
+  // 分离部署由运行 QQ 的 profile 迁移，设置进程可能看不到该 profile 的 ownerIds。
+  if (config.uiOnly) return overrides
+  const migration = migrateOwnerLabel({ ...config, ...overrides })
+  if (!migration) return overrides
+  const result = saveOverrides(ctx, { ...overrides, ...migration }, logger)
+  if (!result.ok) throw new Error(`旧称呼配置迁移失败：${result.error}`)
+  return result.overrides
 }
 
 /** 只留名单里的键；顺手把 `undefined` / `null` 剔掉（null 表示「清掉这条覆盖」）。 */
@@ -444,6 +457,13 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const rawPatch = body?.patch && typeof body.patch === 'object' ? body.patch : body
       const patch = rawPatch && typeof rawPatch === 'object' ? migrateGroupSettings(rawPatch) : rawPatch
       if (!patch || typeof patch !== 'object') return sendJson(res, 400, { ok: false, error: '要一个对象' })
+      if (Object.hasOwn(patch, 'ownerLabel')) {
+        return sendJson(res, 400, { ok: false, error: 'ownerLabel 已停用，请使用 memberLabels 按账号设置称呼' })
+      }
+      if (Object.hasOwn(patch, 'memberLabels') && (!patch.memberLabels || typeof patch.memberLabels !== 'object' || Array.isArray(patch.memberLabels) ||
+        Object.entries(patch.memberLabels).some(([id, label]) => !/^\d+$/.test(id) || typeof label !== 'string' || label.length > 80 || /[\r\n]/.test(label)))) {
+        return sendJson(res, 400, { ok: false, error: '成员称呼必须是 QQ 号到单行称呼的对象，称呼最多 80 字；用空对象清空' })
+      }
       if (patch.acceptedDshVersions != null && (typeof patch.acceptedDshVersions !== 'object' || Array.isArray(patch.acceptedDshVersions) ||
         Object.values(patch.acceptedDshVersions).some(value => typeof value !== 'string'))) {
         return sendJson(res, 400, { ok: false, error: 'acceptedDshVersions 必须是包名到版本号的对象' })

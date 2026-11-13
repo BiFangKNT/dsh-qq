@@ -455,6 +455,12 @@ export function looksPlanning(line) {
   return false
 }
 
+function configuredLabels(config) {
+  // 旧称呼只用于识别已有会话中的回显，不再作为新消息的身份标记。
+  return [...Object.values(config?.memberLabels ?? {}), config?.ownerLabel]
+    .filter(value => typeof value === 'string' && value.trim()).map(value => value.trim())
+}
+
 export function stripLeakedThinking(text, config = {}) {
   if (!text) return text
   const kept = repairShape(text).split('\n').map((line) => {
@@ -466,8 +472,8 @@ export function stripLeakedThinking(text, config = {}) {
       if (!t) return null
     }
     // 整行是插件自己的上下文信封（`[现在是 …]` / `[姐姐] …`）→ 不是话，丢掉
-    const label = String(config.ownerLabel ?? '').trim()
-    if (CONTEXT_ECHO_RE.test(t) || (label && t.startsWith('[' + label + ']') && t.length <= label.length + 83)) return null
+    if (CONTEXT_ECHO_RE.test(t) || configuredLabels(config).some(label =>
+      t.startsWith('[' + label + ']') && t.length <= label.length + 83)) return null
     // 整行是「点评自己上一句」的元话（`破折号? fine.`）→ 丢掉
     if (looksSelfReview(t)) return null
     // 整行是英文改稿标签（`— better: 打爽了没` / `Reply: 平手，还行`）→ 丢掉
@@ -541,8 +547,7 @@ export function hasToolUse(message) {
 
 const SPEECH_MARK = /你|您|主人|本姑娘|咱/
 function hasSpeechMark(text, config) {
-  const label = String(config?.ownerLabel ?? '').trim()
-  return SPEECH_MARK.test(text) || Boolean(label && text.includes(label))
+  return SPEECH_MARK.test(text) || configuredLabels(config).some(label => text.includes(label))
 }
 /**
  * 收尾的元话：她是在跟自己交代状态，不是在跟人说话。

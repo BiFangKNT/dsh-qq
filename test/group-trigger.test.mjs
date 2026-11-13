@@ -106,7 +106,7 @@ test('第一条开始固定等待，不随新消息滑动；@ 提前结束等待
   assert.equal(h.delivered.length, 1)
   assert.match(textOf(h.delivered[0]), /第一条[\s\S]*第二条/)
   assert.match(textOf(h.delivered[0]), /收到消息的时间/)
-  assert.ok([...h.records.values()][0].history.every(line => line.includes(' · 主人')))
+  assert.ok([...h.records.values()][0].history.every(line => line.includes(' · 授权账号')))
   assert.equal(h.delivered[0].source.qqMaySilent, true)
   await h.receive('第三条')
   await h.tick(20)

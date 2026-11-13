@@ -22,7 +22,7 @@ export async function readPrivateHistory({ config, home, record, userId = '', da
   }
   const uid = String(userId).trim()
   if (uid && !/^\d+$/.test(uid)) throw new Error('user_id 必须是 QQ 号')
-  if (!owner && uid && uid !== caller) throw new Error('只有主人能查询其他人的记录')
+  if (!owner && uid && uid !== caller) throw new Error('只有授权账号能查询其他人的记录')
   const ownDir = resolvePeerWorkspace(config, 'private', caller)
   if (!ownDir) throw new Error('未启用会话目录隔离，没有独立的私聊流水')
   const root = join(ownDir, '..')

@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const { RiskConfirmation } = require('@deepseek-ai/dsh-client-ui-primitives')
     const h = React.createElement
-    const { useState, useEffect, useCallback } = React
+    const { useState, useEffect, useCallback, useRef } = React
 
     // 数据来源两条路（自动选第一个通的）：
     //   1) DSH 自己的 /api/dsh-qq —— 宿主 webServer 愿意把路由挂出来时用这条
@@ -105,6 +105,8 @@ window.__ModuleLoader__.load({
 [data-qq-btn]:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.24));}
 [data-qq-btn][data-primary]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
 [data-qq-btn][disabled]{opacity:.5;cursor:default;}
+[data-qq-member-row] [data-qq-input]{flex:1;min-width:0;}
+[data-qq-member-row] [data-qq-btn]{flex:none;white-space:nowrap;}
 [data-qq-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;word-break:break-all;
   background:var(--dsw-alias-bg-overlay,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-qq-msg][data-warn]{color:#f59e0b;}
@@ -202,9 +204,14 @@ window.__ModuleLoader__.load({
       const [msg, setMsg] = useState(null)
       const [draft, setDraft] = useState({})
       const [groupIdDraft, setGroupIdDraft] = useState('')
+      const [memberIdDraft, setMemberIdDraft] = useState('')
+      const [memberLabelDraft, setMemberLabelDraft] = useState('')
       const [persona, setPersona] = useState(null)
       const [syncDeferred, setSyncDeferred] = useState(false)
       const [syncExcluded, setSyncExcluded] = useState([])
+      const saveQueue = useRef(Promise.resolve())
+      const savedValues = useRef(val)
+      savedValues.current = val
       const syncPending = st?.promptSync?.pending ?? []
       const syncOperations = st?.promptSync?.operations ?? []
       const syncRunning = syncOperations.some(item => ['queued', 'running'].includes(item.status))
@@ -231,13 +238,21 @@ window.__ModuleLoader__.load({
         return () => clearInterval(t)
       }, [syncRunning])
 
-      const patch = async (body, label) => {
+      const savePatch = async (body, label) => {
         setBusy('save')
         setMsg(null)
         try {
-          const r = await jpost('/settings', { patch: body })
+          const update = typeof body === 'function' ? body(savedValues.current) : body
+          const r = await jpost('/settings', { patch: update })
+          savedValues.current = r.values
           setVal(r.values)
-          setDraft({})
+          if (update.memberLabels) {
+            // 慢请求返回时，只清掉已保存的称呼草稿，保留正在输入的其他修改。
+            setDraft(current => ({ ...current, memberLabels: Object.fromEntries(
+              Object.entries(current.memberLabels ?? {}).filter(([id, text]) =>
+                Object.hasOwn(update.memberLabels, id) && text !== update.memberLabels[id]),
+            ) }))
+          } else setDraft({})
           if (r.persona) setPersona({ ...r.persona })
           const tail = r.needReconnect ? '（点右边「重连」生效）' : r.needRestart ? '（有几项要重启宿主才生效）' : ''
           let text = `${label} 已保存${tail}`
@@ -250,12 +265,27 @@ window.__ModuleLoader__.load({
           }
           setMsg({ text, tone: r.persona && r.persona.file && !r.persona.ok ? 'warn' : 'good' })
           setSt(await jget('/status'))
+          return true
         } catch (e) {
           setMsg({ text: '保存失败：' + e.message, tone: 'warn' })
+          return false
         } finally {
           setBusy('')
         }
       }
+
+      const patch = (body, label) => {
+        const pending = saveQueue.current.then(() => savePatch(body, label))
+        saveQueue.current = pending
+        return pending
+      }
+
+      const changeMemberLabel = (id, label) => patch(values => {
+        const memberLabels = { ...values.memberLabels }
+        if (label === null) delete memberLabels[id]
+        else memberLabels[id] = label
+        return { memberLabels }
+      }, label === null ? '移除成员称呼' : '成员称呼')
 
       const syncPrompts = async action => {
         setBusy('sync')
@@ -438,7 +468,7 @@ window.__ModuleLoader__.load({
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '它是谁（人设）'),
           areaField('persona', '人设', {
-            hint: '名字、性格、怎么称呼对方、有什么小习惯，都写这儿。留空 = 一个没名字、说话正常的普通助手（插件不自带任何角色）。',
+            hint: '写机器人的名字、性格、语气和小习惯。对具体成员的称呼在下方单独设置。留空时按普通助手交流。',
             rows: 6,
           }),
           textField('personaFile', '人设文件（地址）', {
@@ -446,8 +476,33 @@ window.__ModuleLoader__.load({
             mono: true,
             placeholder: 'D:/某个角色.md（留空 = 只用上面的文本框）',
           }),
-          personaNote(persona),
-          textField('ownerLabel', '在群里怎么称呼主人', { hint: '例如「老板」「老大」。', placeholder: '主人' })),
+          personaNote(persona)),
+
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '成员称呼'),
+          h('div', { 'data-qq-note': '' }, '按 QQ 号单独设置，群聊和私聊通用。未设置时使用昵称、群名片或「你」。称呼不授予权限，新增授权账号不会继承其他人的称呼；修改后从下一轮对话生效。'),
+          ...Object.entries(val.memberLabels ?? {}).map(([id, label]) => h('div', { key: id, 'data-qq-row': '', 'data-qq-member-row': '' },
+            h('div', { 'data-qq-label': '' }, id),
+            h('input', { 'data-qq-input': '', 'aria-label': `账号 ${id} 的称呼`, maxLength: 80,
+              value: draft.memberLabels?.[id] ?? label,
+              onChange: e => setDraft(current => ({ ...current,
+                memberLabels: { ...current.memberLabels, [id]: e.target.value } })),
+              onBlur: e => {
+                if (e.target.value !== label) return changeMemberLabel(id, e.target.value.trim())
+              } }),
+            h('button', { 'data-qq-btn': '', type: 'button', onClick: () => changeMemberLabel(id, null) }, '移除'))),
+          h('div', { 'data-qq-row': '', 'data-qq-member-row': '' },
+            h('input', { 'data-qq-input': '', 'aria-label': '称呼对应的 QQ 号', placeholder: 'QQ 号', value: memberIdDraft,
+              onChange: e => setMemberIdDraft(e.target.value) }),
+            h('input', { 'data-qq-input': '', 'aria-label': '新成员称呼', placeholder: '称呼', maxLength: 80, value: memberLabelDraft,
+              onChange: e => setMemberLabelDraft(e.target.value) }),
+            h('button', { 'data-qq-btn': '', type: 'button', disabled: Boolean(busy), onClick: async () => {
+              const id = memberIdDraft.trim(), label = memberLabelDraft.trim()
+              if (!/^\d+$/.test(id) || !label) { setMsg({ text: '请填写 QQ 号和称呼', tone: 'warn' }); return }
+              if (await changeMemberLabel(id, label)) {
+                setMemberIdDraft(''); setMemberLabelDraft('')
+              }
+            } }, '添加称呼'))),
 
         /* ── 补充提示词 ── */
         h('div', { 'data-qq-sec': '' },
@@ -527,14 +582,14 @@ window.__ModuleLoader__.load({
           listField('privateAllow', '私聊白名单', { hint: 'QQ 号，用逗号分隔。' }),
           modeField('groupMode', '群聊', '「关掉」= 群里完全不理它。'),
           listField('groupAllow', '群聊白名单', { hint: '群号，用逗号分隔。' }),
-          listField('ownerIds', '谁是主人（QQ 号）', {
-            hint: '这些人在群里说话会标上「主人」的称呼，问本机的事也正常答；其他人一律当陌生人。留空 = 不区分。',
+          listField('ownerIds', '授权账号（QQ 号）', {
+            hint: '相关功能按此名单检查权限。不改变称呼、亲密关系或回复顺序，也不绕过群聊触发条件。支持多个账号。',
           })),
 
         /* ── 同类机器人 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '同类机器人（另一个 bot）'),
-          boolField('botChatEnabled', '允许它和同类聊天 / 回怼', '默认关：同类说啥都不理，连 @ 也不接。打开之后才会顶嘴——被骂了先看是不是在说它自己。'),
+          boolField('botChatEnabled', '允许它和其他机器人聊天', '默认关闭：已标记的其他机器人即使 @ 也不触发。开启后沿用相同的触发规则，不要求回怼或持续接话。'),
           listField('peerBots', '同类机器人的 QQ 号', { hint: '填了才认得出「这句是别的机器人发的」。' })),
 
         /* ── 主动说话 ── */

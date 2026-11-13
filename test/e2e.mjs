@@ -138,8 +138,8 @@ const privateAgent = created[0]
 assert.match(textOf(privateAgent.received[0]), /在吗在吗/, '私聊正文应该原样进 agent')
 await privateAgent.whenIdle()
 assert.match(privateAgent.system, /你叫小满/, 'persona 应该放进 system')
-assert.match(privateAgent.system, /你正在用 QQ 跟人聊天/, 'system 应该带内置聊天规矩')
-assert.doesNotMatch(textOf(privateAgent.received[0]), /你叫小满|你正在用 QQ 跟人聊天/)
+assert.match(privateAgent.system, /【聊天与工具】/, 'system 应该带内置聊天规矩')
+assert.doesNotMatch(textOf(privateAgent.received[0]), /你叫小满|【聊天与工具】/)
 assert.match(
   textOf(privateAgent.received[0]),
   /\[现在是 \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
@@ -176,15 +176,15 @@ console.log('✓ 重复消息去重')
 mock.emitPrivateText({ userId: 11001, nickname: '朋友', text: '再问一句', messageId: 111 })
 await waitFor(() => privateAgent.received.length === 2, { what: '第二条私聊' })
 assert.match(textOf(privateAgent.received[1]), /再问一句/)
-assert.doesNotMatch(textOf(privateAgent.received[1]), /你正在用 QQ 跟人聊天/, '聊天规矩不应每条重复注入')
+assert.doesNotMatch(textOf(privateAgent.received[1]), /【聊天与工具】/, '聊天规矩不应每条重复注入')
 assert.doesNotMatch(textOf(privateAgent.received[1]), /你叫小满/, 'persona 不应每条重复注入')
 console.log('✓ 聊天规矩只注入一次')
 
-// 私聊里对面就是主人：注入私聊版认人规矩，正文带 [主人] 标记；群聊版不串进来
-assert.match(privateAgent.system, /对面这位是你的/, '私聊主人应该注入私聊版认人规矩')
-assert.doesNotMatch(privateAgent.system, /群里标了/, '私聊不该注入群聊版认人规矩')
-assert.match(textOf(privateAgent.received[0]), /\[主人\] 在吗在吗/, '私聊正文应该带主人标记')
-console.log('✓ 私聊保底：主人标记 + 私聊版认人规矩')
+// 私聊保留来源与授权标记，不从授权身份推导关系称呼。
+assert.match(privateAgent.system, /【消息来源与授权】/)
+assert.doesNotMatch(privateAgent.system, /他的话优先|对面这位是你的/)
+assert.match(textOf(privateAgent.received[0]), /· 授权账号[^\n]*⟩ 在吗在吗/)
+console.log('✓ 私聊来源标记与称呼分离')
 
 // —— 群聊：没 @ 不该触发 ——
 mock.emitGroupText({ groupId: 88888, userId: 1, nickname: '路人', text: '今天吃什么', messageId: 201 })
@@ -233,10 +233,10 @@ await sleep(300)
 assert.equal(groupAgent.received.length, 1, '@ 的是别人，保活期内也不该投给 agent')
 console.log('✓ 保活期内 @ 别人的消息被挡下')
 
-// 群聊首条带「谁是谁」——配置了 ownerIds 才带
+// 固定规则解释来源，具体授权账号由状态区提供。
 await groupAgent.whenIdle()
-assert.match(groupAgent.system, /谁是谁/, '配了 ownerIds 的群聊应该注入认人规矩')
-assert.match(groupAgent.system, /陌生人/, '认人规矩里应该说明陌生人边界')
+assert.match(groupAgent.system, /【消息来源与授权】/)
+assert.match(groupAgent.system, /称呼.*表达偏好/)
 assert.match(
   textOf(groupAgent.received[0]),
   /⟨\S+ \(\d+\)\S* \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）⟩/,
@@ -246,8 +246,8 @@ console.log('✓ 群聊注入认人规矩')
 
 // 群里最容易翻车的两段规矩：认不出「哪句是我说的」、被冲了就开始道歉
 assert.match(groupAgent.system, /谁是「你」/, '群聊应该注入「谁是你在说」的规矩')
-assert.match(groupAgent.system, /别的机器人/, '要说明群里可能有别的机器人、它说的不是你')
-assert.match(groupAgent.system, /【脾气】/, '应该注入脾气规矩（不客气不用客气）')
+assert.match(groupAgent.system, /其他成员和其他机器人的发言属于他们/, '其他机器人的话不能冒认成自己的')
+assert.match(groupAgent.system, /【分歧与纠错】/, '应该提供通用纠错规则')
 
 // 主人在群里说话 → 群历史行标「· 主人」
 mock.emitEvent({
@@ -265,7 +265,7 @@ mock.emitEvent({
   sender: { user_id: 11001, nickname: '主人' },
 })
 await waitFor(() => groupAgent.received.length === 2, { what: '主人群聊入站' })
-assert.match(textOf(groupAgent.received[1]), /· 主人/, '主人发言应该在群历史里被标出来')
+assert.match(textOf(groupAgent.received[1]), /· 授权账号/, '授权账号发言应使用中性标记')
 assert.match(textOf(groupAgent.received[0]), /\(1\)/, '群友发言不该被标成主人')
 console.log('✓ 群里认主人：主人打标、群友保持陌生人')
 
@@ -407,10 +407,10 @@ await waitFor(() => groupAgent.received.length === beforePeer + 1, { what: '同�
 // 规矩文本本身单独验（会话里 chatPromptInjected 已经注入过一次，中途打开开关不会重注——重启宿主才生效）
 const promptOn = buildChatPrompt({ ...config, botChatEnabled: true }, { isGroup: true })
 const promptOff = buildChatPrompt({ ...config, botChatEnabled: false }, { isGroup: true })
-assert.match(promptOn, /【同类机器人】/, '开关开着应该注入同类规矩')
-assert.match(promptOn, /不替它打圆场/, '要写明不替它打圆场')
-assert.match(promptOn, /先分清是不是在说你/, '要写明「先看是不是在冲自己」')
-assert.doesNotMatch(promptOff, /【同类机器人】/, '开关关着不该注入同类规矩')
+assert.match(promptOn, /【其他机器人】/, '开关开着应该注入机器人聊天规则')
+assert.match(promptOn, /是否接话仍看消息指向和内容/, '需要按消息指向判断是否接话')
+assert.match(promptOn, /避免互相重复应声/, '避免机器人之间无意义循环')
+assert.doesNotMatch(promptOff, /【其他机器人】/, '开关关着不该注入机器人聊天规则')
 console.log('✓ 同类机器人：开关打开才接，并带上同类规矩')
 
 // 同类发言在群历史里要单独标出来，不然又分不清「这句是谁说的」
@@ -515,7 +515,7 @@ const afterCompact = created
   .concat(created2)
   .flatMap((a) => a.received.map(textOf))
   .find((t) => /刚才说到哪了/.test(t))
-assert.doesNotMatch(afterCompact, /你正在用 QQ 跟人聊天/, '压缩后不再把固定规则写入用户消息')
+assert.doesNotMatch(afterCompact, /【聊天与工具】/, '压缩后不再把固定规则写入用户消息')
 console.log('✓ 压缩后不追加旧状态卡')
 
 // —— 上下文守卫：压力超过阈值主动换会话 ——
@@ -541,7 +541,7 @@ const swapped = created.find(gotIt)
 const swappedText = textOf(swapped.received.find(m => textOf(m).includes('聊点别的')))
 assert.match(swappedText, /聊点别的/)
 await swapped.whenIdle()
-assert.match(swapped.system, /你正在用 QQ 跟人聊天/, '新会话应该使用 system 聊天规矩')
+assert.match(swapped.system, /【聊天与工具】/, '新会话应该使用 system 聊天规矩')
 assert.equal(swapped, privateAgent, '不按 token 阈值换会话')
 assert.doesNotMatch(swappedText, /刚才那段聊到这里/)
 console.log('✓ 压力超限仍保留原会话')

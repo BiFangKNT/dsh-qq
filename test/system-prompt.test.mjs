@@ -383,7 +383,7 @@ test('真实插件设置 API 返回待同步列表，操作结果可轮询且主
   env.emitMessage({ text: '第一条', messageId: 1 })
   await waitFor(() => [...env.host.agents.values()].some(agent => agent.requests.length))
   const agent = [...env.host.agents.values()][0], oldSystem = agent.requests[0].system
-  assert.doesNotMatch(JSON.stringify(agent.received), /API旧人设|你正在用 QQ 跟人聊天/)
+  assert.doesNotMatch(JSON.stringify(agent.received), /API旧人设|【聊天与工具】/)
   const save = async patch => (await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST',
     headers: { 'content-type': 'application/json' }, body: JSON.stringify({ patch }) })).json()
   assert.deepEqual((await save({ persona: 'API旧人设' })).promptSync.pending, [])

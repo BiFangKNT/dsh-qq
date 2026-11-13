@@ -83,7 +83,7 @@ dsh plugin --profile desktop why dsh-qq-onebot
 
 将令牌替换为协议端设置的值，将 `10001` 替换为允许访问的 QQ 号。保留配置文件中需要继续使用的其他键。
 
-需要群聊时，可将 `groupMode` 设为 `allowlist`，并配置 `groupAllow`；群聊默认需要 @ 机器人。`ownerIds` 用于身份标记和部分工具的权限判断，不能代替 `privateAllow`。
+需要群聊时，可将 `groupMode` 设为 `allowlist`，并配置 `groupAllow`；群聊默认需要 @ 机器人。`ownerIds` 是授权账号名单，用于部分工具的权限判断，不能代替 `privateAllow`。称呼通过 `memberLabels` 按账号单独配置，不随授权身份继承，详见[人设与称呼](docs/persona.md)。
 
 ### 3. 验证消息收发
 

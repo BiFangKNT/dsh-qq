@@ -32,6 +32,7 @@
         # provider/model/preset/cwd 留空 = 跟随宿主默认
         directPrompt: ''
         groupPrompt: ''
+        memberLabels: {}
         historyLimit: 20
 
         # ── 触发 ──

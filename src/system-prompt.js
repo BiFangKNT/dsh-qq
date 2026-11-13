@@ -3,15 +3,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from 'node:path'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { buildChatPrompt } from './prompts.js'
-import { listOf } from './config.js'
 import { installRuntimeContext } from './runtime-context.js'
 import { prepareSessionView } from './session-view.js'
 
 const digest = text => createHash('sha256').update(text).digest('hex')
 
 export function chatSystemRules(config, meta) {
-  return buildChatPrompt(config, { isGroup: meta.scope === 'group',
-    isOwner: listOf(config.ownerIds).includes(String(meta.peerId)) })
+  return buildChatPrompt(config, { isGroup: meta.scope === 'group' })
 }
 
 export function createSystemPromptStore(home) {

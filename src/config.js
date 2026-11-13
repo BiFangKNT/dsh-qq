@@ -105,17 +105,19 @@ export const ConfigSchema = Schema.object({
   ownerIds: Schema.array(Schema.string())
     .default([])
     .description(
-      '「主人」的 QQ 号，可多个。群聊里这些人的发言会标上主人称呼，Agent 会优先响应、问本机的事也正常答；不在名单里的群友一律按陌生人对待。留空则不区分任何人',
+      '授权账号的 QQ 号，可多个。用于相关工具的权限检查，不改变称呼、关系或回复顺序',
     ),
   ownerLabel: Schema.string()
-    .default('主人')
-    .description('群聊里怎么称呼这位主人，例如「老板」「老大」；默认「主人」'),
+    .default('')
+    .description('已停用，仅供迁移旧配置；改用 memberLabels 按账号设置称呼'),
+  memberLabels: Schema.dict(Schema.string()).default({})
+    .description('QQ 号对应称呼，群聊和私聊通用；不设置时用昵称、群名片或「你」，与授权名单无关'),
   directPrompt: Schema.string()
     .default('')
-    .description('私聊时追加到每条投递文字最前面的补充指令（内置聊天规矩在 preset 里，这里放你自己的）'),
+    .description('私聊 system 的补充提示词，按会话的 system 同步规则生效'),
   groupPrompt: Schema.string()
     .default('')
-    .description('群聊时追加到每条投递文字最前面的补充指令（内置聊天规矩在 preset 里，这里放你自己的）'),
+    .description('群聊 system 的补充提示词，按会话的 system 同步规则生效'),
   aiGirls: Schema.boolean()
     .default(true)
     .description(

@@ -238,7 +238,7 @@ function makeConfig(over = {}) {
   check('提示词带安静时长', groupText.includes('安静了 32 分钟'), true)
   check('提示词带时间段', groupText.includes('晚上（20:40）'), true)
   check('提示词允许不说', groupText.includes('[SILENT]'), true)
-  check('提示词里落了「先发，没回当在忙」', groupText.includes('不用先猜对方在忙'), true)
+  check('主动机会不编造对方活动', groupText.includes('不编造自己或对方的活动'), true)
   const privateText = proactiveRule({}, { label: '私聊', silentMin: 45, isGroup: false, now: new Date(2026, 9, 24, 8, 5) })
   check('私聊措辞不同', privateText.includes('对方有一阵子没动静'), true)
   check('上午时段', privateText.includes('上午（08:05）'), true)

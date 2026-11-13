@@ -116,6 +116,7 @@ test('两个独立设置服务可用不同端口，客户端手动选择后读�
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: initial => { const i = cursor++; if (!(i in state)) state[i] = initial; return [state[i], value => { state[i] = typeof value === 'function' ? value(state[i]) : value }] },
     useCallback: fn => fn, useEffect() {},
+    useRef: initial => { const i = cursor++; if (!(i in state)) state[i] = { current: initial }; return state[i] },
   }
   const context = vm.createContext({ window: { __ModuleLoader__: { load: value => { bundle = value } } },
     fetch, console, setTimeout, setInterval, clearInterval,

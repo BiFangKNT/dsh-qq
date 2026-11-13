@@ -31,6 +31,7 @@ import {
   homeDirOf,
   installSettingsApi,
   loadOverrides,
+  migrateIdentityOverrides,
   resolvePersonaFile,
   settingsFileOf,
 } from './settings.js'
@@ -216,7 +217,7 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
 export function apply(ctx, config) {
   // ⭐ 设置页存下来的覆盖**先于**其它一切生效：logger 的 debug 开关也吃这一层。
   //    这样「在设置里改人设 / 改记忆区路径」不用去碰 profile 的 cordis.patch.yml。
-  const savedOverrides = loadOverrides(ctx)
+  const savedOverrides = migrateIdentityOverrides(ctx, config, loadOverrides(ctx))
   const appliedOverrides = applyOverrides(config, savedOverrides)
   const logger = makeLogger(ctx, config)
   if (appliedOverrides.length > 0) logger.info(`已应用设置页覆盖: ${appliedOverrides.join(', ')}`)
