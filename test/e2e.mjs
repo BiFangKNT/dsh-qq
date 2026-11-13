@@ -18,10 +18,7 @@ import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { sensitiveContentNotice } from '../src/audit.js'
 
-// ⭐ 每次跑都换一套干净的「家」和「工作区」。
-// 不隔离的后果（2026-10-27 20:4x 踩到）：e2e 会把会话、注入账本写到仓库里的 `会话/`
-// 和 `~/.dsh/dsh-qq/`，第二次跑时 record 从盘上恢复、`chatPromptInjected` 还是 true，
-// 于是「聊天规矩」不再注入，persona 断言就红了 —— 测试看起来是坏的，其实是不幂等。
+// 每次使用独立临时数据目录，避免写入用户部署或恢复上次的会话与 system 快照。
 const E2E_HOME = mkdtempSync(join(tmpdir(), 'dsh-qq-e2e-home-'))
 process.env.DSH_HOME = E2E_HOME
 const E2E_WORKSPACE = mkdtempSync(join(tmpdir(), 'dsh-qq-e2e-ws-'))
@@ -404,7 +401,7 @@ mock.emitEvent({
   sender: { user_id: 10002, nickname: '同类机器人' },
 })
 await waitFor(() => groupAgent.received.length === beforePeer + 1, { what: '同类机器人（开关已开）入站' })
-// 规矩文本本身单独验（会话里 chatPromptInjected 已经注入过一次，中途打开开关不会重注——重启宿主才生效）
+// 单独验证规则组装；已运行会话继续遵守 system 锁定及同步流程。
 const promptOn = buildChatPrompt({ ...config, botChatEnabled: true }, { isGroup: true })
 const promptOff = buildChatPrompt({ ...config, botChatEnabled: false }, { isGroup: true })
 assert.match(promptOn, /【其他机器人】/, '开关开着应该注入机器人聊天规则')

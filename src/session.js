@@ -31,6 +31,7 @@ export class SessionManager {
     this.config = config
     this.logger = logger
     this.closed = false
+    this.workspaceBackupRoot = home ? join(home, 'workspace-migrations') : ''
     this.systemPrompts = createSystemPromptStore(home)
     // 「reset 到第几代 / 这一代落在哪个 sessionId」的账本：也落盘。
     // 持久保存重置代数和实际 ID，避免重启后恢复已重置的会话。
@@ -245,14 +246,16 @@ export class SessionManager {
 
   /**
    * 这个会话自己的目录。_isolateByPeer_ 关掉时返回 null（沿用宿主 cwd）。
-   * 首次用到时把 AGENTS.md 与记忆区骨架铺好。
+   * 首次使用时创建目录，并备份停用可确认归属的旧插件指令。
    */
   async #peerDir(info) {
     const dir = resolvePeerWorkspace(this.config, info.scope, info.peerId)
     if (!dir) return null
     if (this.#ready.get(dir)) return dir
     try {
-      await ensurePeerWorkspace(dir, info, this.config)
+      await ensurePeerWorkspace(dir, info, this.config, {
+        backupRoot: this.workspaceBackupRoot, logger: this.logger,
+      })
       this.#ready.set(dir, true)
     } catch (err) {
       // 铺不出来就不要把会话钉死在半成品目录上，退回宿主 cwd

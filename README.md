@@ -111,6 +111,8 @@ dsh plugin --profile desktop why dsh-qq-onebot
 
 当前版本使用未修改的 DSH **0.2.2-rc.2**，通过官方接口接入[末尾状态区](docs/host-transient-context.md)，无需宿主补丁。旧便签等会一次性迁移，未完成内容先待核实。
 
+QQ 固定规则和框架说明统一进入锁定 system，新工作目录不再生成 `AGENTS.md` 或日记索引。升级时，确认未被修改的旧插件模板会先备份到插件数据目录的 `workspace-migrations/*.bak`，再停用原文件；手工修改或归属不明的文件保留，并记录冲突。已有会话的旧 system 与历史不会因此自动改写，仍使用原有同步选项。详见[工作目录与迁移](docs/configuration.md#工作目录指令与升级)。
+
 rc.2 是当前已验证版本。安装允许更新的 DSH 版本；未经验证时 QQ 暂不启用，可在风险弹窗中明确确认后使用。确认只对当时的核心包版本有效；无界面部署的配置方式见接入说明。
 
 完整默认值、角色设定、媒体处理、共享文件、作息和其他选项见 [配置参考](docs/configuration.md)。

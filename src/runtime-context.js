@@ -2,7 +2,7 @@ import { createDeveloperMessage } from '@deepseek-ai/dsh-llm'
 import { runtimeContextName } from './session-view.js'
 import { facesForPrompt } from './faces.js'
 import { faceStrategyRule, SILENT_HINT } from './prompts.js'
-import { loadGroupDigest } from './settings.js'
+import { loadGroupDigest } from './group-digest.js'
 import { listOf } from './config.js'
 import { identityContext } from './identity.js'
 

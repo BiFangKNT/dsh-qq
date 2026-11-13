@@ -22,7 +22,6 @@ const record = {
   dir,
   recent: ['[主人] 晚上好', '[助手] 主人晚上好'],
   history: [],
-  chatPromptInjected: true,
   busy: 0,
   agent: { inject: (message) => injected.push(message) },
 }

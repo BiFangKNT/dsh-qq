@@ -17,6 +17,7 @@ import {
   BUILTIN_RULES,
   GROUP_RULES,
   PRIVATE_RULES,
+  FRAMEWORK_RULES,
 } from '../src/prompts.js'
 
 let pass = 0
@@ -82,17 +83,24 @@ t('固定规则不包含可变事实', () => {
   assert.ok(iPersona > 0)
 })
 
-t('表情包在最后', () => {
+t('表情资料只进动态状态区，不能通过固定规则入口加入', () => {
   const p = buildChatPrompt(
     { persona: PERSONA },
     { isGroup: false, faces: { total: 3, names: ['猫猫', '问号', '晚安'] } },
   )
-  const iFace = p.indexOf('【表情包】')
-  const iPersona = p.indexOf(PERSONA)
-  assert.ok(iFace > iPersona)
-  assert.ok(p.slice(iFace).indexOf('【') === 0 || true)
-  // 表情包后面不该还有别的大段
-  assert.ok(p.length - iFace < 900)
+  assert.ok(!p.includes('【表情包】'))
+  assert.ok(!p.includes('猫猫'))
+  assert.ok(p.includes(PERSONA))
+})
+
+t('框架定义只有一个正文入口，不带当前配置或旧文件维护指令', () => {
+  for (const isGroup of [false, true]) {
+    const p = buildChatPrompt({ aiGirls: false, workspaceRoot: 'PRIVATE_PATH',
+      memoryRoot: 'SHARED_PATH', memberLabels: { '11001': 'SPECIAL_LABEL' } }, { isGroup })
+    assert.equal(p.split(FRAMEWORK_RULES).length, 2)
+    assert.ok(p.startsWith(FRAMEWORK_RULES))
+    assert.doesNotMatch(p, /PRIVATE_PATH|SHARED_PATH|SPECIAL_LABEL|每写一篇|日记索引|开聊前先读/)
+  }
 })
 
 t('群聊没人设时也不会把 ANON 挤到中间', () => {

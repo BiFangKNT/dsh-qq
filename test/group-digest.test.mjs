@@ -4,22 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadGroupDigest, pickDigestLine } from '../src/settings.js'
-import { buildChatPrompt } from '../src/prompts.js'
+import { loadGroupDigest, pickDigestLine } from '../src/group-digest.js'
 
-/**
- * 2026-10-27 姐姐提的第二个问题：「我问他群里发生什么，她在私聊里面回答不出来。」
- *
- * 一个会话看不到别的会话的记录——这是隔离换来的，没错。但私聊里连「今天群里咋了」
- * 都答不上，就变成断片。让她自己去读群日记？也不行：那本子里是第一人称的叙事
- * （「本姑娘没弄明白，也没敢乱解」），跨窗口读另一个自己写的第一人称旧账，
- * 会有「这不像我写的」的风险——09:42 那次已经出过一回。
- *
- * 第一版递的是日记**头两行**。老三当天 11:43 自己提了意见：
- *   「头两行只够闻个味，一天的肉都在后半段。不如给我尾巴：谁最后说话、
- *     有没人点我名我没应着，这种我才真想知道。量不用加，换个位置就行。」
- * → 所以现在读的是聊天记录的**尾巴**；当天群里没人说话，才退回日记的「一句话」。
- */
+/** 群近况的日志解析回归；访问控制由 runtime-context 的调用方负责。 */
 
 const DAY = '2026-10-27'
 const ME = '1737661812'
@@ -125,16 +112,4 @@ test('多群按群号排；没记录 / 目录不存在 → 空串', () => {
   assert.equal(loadGroupDigest({ workspaceRoot: root, today: '2026-10-01', selfId: ME }), '', '只看今天')
   assert.equal(loadGroupDigest({ workspaceRoot: '', today: DAY }), '')
   assert.equal(loadGroupDigest({ workspaceRoot: join(root, 'nope'), today: DAY }), '')
-})
-
-test('buildChatPrompt：群近况不进入固定 system', () => {
-  const digest = '· 群 123456789：最后 00:08:57 某人 说「随便说的一句」'
-  const priv = buildChatPrompt({}, { isGroup: false, groupDigest: digest })
-  assert.ok(!priv.includes(digest))
-
-  const grp = buildChatPrompt({}, { isGroup: true, groupDigest: digest })
-  assert.ok(!grp.includes('【今天群里发生过'), '她在那个群里，用不着替她讲')
-
-  const none = buildChatPrompt({}, { isGroup: false, groupDigest: '' })
-  assert.ok(!none.includes('【今天群里发生过'), '没内容就别占 token')
 })

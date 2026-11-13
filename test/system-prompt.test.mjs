@@ -14,6 +14,9 @@ import { createMockEnvironment } from './mock-environment.mjs'
 import { Config } from '../src/index.js'
 import { createInbound } from '../src/inbound.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createHash } from 'node:crypto'
+import { FRAMEWORK_RULES, buildChatPrompt } from '../src/prompts.js'
+import { pendingSystemPrompts } from '../src/system-prompt.js'
 
 const logger = { info() {}, warn() {}, debug() {} }
 async function directory(t) {
@@ -27,8 +30,8 @@ async function fixture({ config = { persona: '初始人设 {{literal_text}}', ow
   const agent = { id, ctx, session: { id, events, requestHeader: () => header } }
   if (header?.system !== undefined) events.unshift({ type: 'system/message', seq: -1, data: { message: { content: [{ type: 'text', text: header.system }] } } })
   const dispose = await installChatSystem({ agentCtx: ctx, agent, config, meta: peer, store })
-  const request = async () => {
-    const assembly = await ctx.get('systemPrompt').assemble(assembleContextFor(agent))
+  const request = async (options = {}) => {
+    const assembly = await ctx.get('systemPrompt').assemble({ ...assembleContextFor(agent), ...options })
     const system = renderPrompt(assembly)
     header = { system }
     events.push({ type: 'request/header', seq: events.length, data: { header } })
@@ -37,6 +40,28 @@ async function fixture({ config = { persona: '初始人设 {{literal_text}}', ow
   const compact = data => events.push({ type: 'compaction/end', seq: events.length, data: data ?? {} })
   return { agent, request, compact, config, store, dispose, events }
 }
+
+test('框架定义更新沿用待同步判定，旧完整 system 保持到成功压缩或强制同步', async () => {
+  for (const mode of ['compact', 'force']) {
+    const config = { aiGirls: false, persona: '已有角色' }, store = createSystemPromptStore('')
+    const oldRules = buildChatPrompt(config, { isGroup: false }).replace(`${FRAMEWORK_RULES}\n\n`, '')
+    store.save({ sessionId: 'fixture', meta, text: oldRules,
+      rules: createHash('sha256').update(oldRules).digest('hex'), compactSeq: 0, retired: false })
+    const h = await fixture({ config, store })
+    assert.equal((await h.request()).system, oldRules)
+    assert.equal(pendingSystemPrompts(store, config, meta.selfId).length, 1)
+    assert.equal((await h.request()).system, oldRules)
+    if (mode === 'compact') h.compact()
+    const updated = await h.request(mode === 'force' ? { qqForceSystemSync: true } : {})
+    assert.equal(updated.system.split(FRAMEWORK_RULES).length, 2)
+    assert.equal(pendingSystemPrompts(store, config, meta.selfId).length, 0)
+    assert.equal((await h.request()).system, updated.system)
+    h.dispose()
+  }
+  const fresh = await fixture({ config: { aiGirls: false } })
+  assert.equal((await fresh.request()).system.split(FRAMEWORK_RULES).length, 2)
+  fresh.dispose()
+})
 
 test('每次请求锁定完整 system，工具续调和动态资料变化不改变前缀', async () => {
   const h = await fixture()

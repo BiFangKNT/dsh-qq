@@ -17,17 +17,14 @@ async function temporary(t) {
   return dir
 }
 
-test('会话模板保持在会话内，仅在启用共享记忆后提示工具', async t => {
+test('新工作目录不再生成 AGENTS.md 或旧记忆骨架', async t => {
   const root = await temporary(t)
   const info = { scope: 'private', peerId: '11001', label: '测试会话' }
   for (const [name, config] of [['isolated', {}], ['shared', { memoryRoot: join(root, '共享') }]]) {
     const dir = join(root, name)
     await ensurePeerWorkspace(dir, info, config)
-    const text = await readFile(join(dir, 'AGENTS.md'), 'utf8')
-    assert.doesNotMatch(text, /鲸鲸|姐姐|2710586329|[A-Z]:[\\/]|\.\.\/私人|谁也看不见/)
-    assert.match(text, /管理员读取/)
-    assert.match(text, /\.\/记忆区\/随笔/)
-    assert.equal(/\bqq_memo\b/.test(text), name === 'shared')
+    await assert.rejects(readFile(join(dir, 'AGENTS.md')), { code: 'ENOENT' })
+    await assert.rejects(readFile(join(dir, '记忆区', '大纲', '索引.md')), { code: 'ENOENT' })
   }
 })
 
