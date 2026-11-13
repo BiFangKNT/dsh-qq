@@ -10,7 +10,6 @@ import assert from 'node:assert/strict'
 
 import {
   buildChatPrompt,
-  personaLeaks,
   stripSilentMark,
   SELF_KNOWN_RULE,
   ANON_RULE,
@@ -107,29 +106,6 @@ t('群聊没人设时也不会把 ANON 挤到中间', () => {
   const p = buildChatPrompt({ ownerIds: ['123'], ownerLabel: '姐姐' }, { isGroup: true })
   assert.ok(p.includes(GROUP_RULES.slice(0, 10)))
   assert.ok(p.indexOf(ANON_RULE) > p.indexOf('【消息来源与授权】'))
-})
-
-console.log('两层提示词 · 人设泄漏检测')
-t('干净人设不报警', () => {
-  assert.deepEqual(personaLeaks(PERSONA), { ok: true, hits: [] })
-})
-
-t('人设里写 qq_mface 会被抓出来', () => {
-  const leak = personaLeaks('你是鲸鲸，想发表情就用 qq_mface。')
-  assert.equal(leak.ok, false)
-  assert.ok(leak.hits.includes('qq_mface'))
-})
-
-t('多个工具名都抓到', () => {
-  const leak = personaLeaks('用 qq_reply 回话，用 read_image 看图，不想说话就 [SILENT]。')
-  assert.equal(leak.ok, false)
-  assert.deepEqual(leak.hits.sort(), ['[SILENT]', 'qq_reply', 'read_image'].sort())
-})
-
-t('空 / null 不炸', () => {
-  assert.equal(personaLeaks('').ok, true)
-  assert.equal(personaLeaks(null).ok, true)
-  assert.equal(personaLeaks(undefined).ok, true)
 })
 
 console.log('两层提示词 · 场景差异')

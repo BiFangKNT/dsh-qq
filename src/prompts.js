@@ -73,18 +73,6 @@ export const TIME_RULES = `【时间】
 - 插件给出的「现在是」表示投递时的时间，「收到消息的时间」表示原消息的接收时间；历史时间不是当前时间。
 - 判断先后、日期和时间间隔时使用这些时间信息；缺少依据时不猜测。`
 
-const TOOL_TOKENS = [
-  'qq_reply', 'qq_send', 'qq_send_image', 'qq_send_file', 'qq_mface', 'qq_face',
-  'qq_faces', 'qq_keep_face', 'qq_poke', 'qq_react', 'qq_like', 'qq_recall',
-  'qq_memory', 'qq_history', 'read_image', '[SILENT]', 'SILENT_MARKER',
-]
-
-export function personaLeaks(persona) {
-  const text = String(persona ?? '')
-  const hits = TOOL_TOKENS.filter(token => text.includes(token))
-  return { ok: hits.length === 0, hits }
-}
-
 /** 仅组装固定规则；按宿主现有的新建、压缩或手动同步流程更新。 */
 export function buildChatPrompt(config, { isGroup }) {
   const persona = String(config?.persona ?? '').trim()

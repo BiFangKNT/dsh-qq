@@ -10,7 +10,7 @@ import { createAddressClassifier } from './address-classifier.js'
 import { createMessageStore } from './message-store.js'
 import { createContextBudget } from './context-budget.js'
 import { appendChatLog } from './chatlog.js'
-import { SILENT_MARKER, personaLeaks, stripSilentMark } from './prompts.js'
+import { SILENT_MARKER, stripSilentMark } from './prompts.js'
 import { createOutbound } from './outbound.js'
 import { createBridge } from './bridge.js'
 import { createWake } from './wake.js'
@@ -157,14 +157,6 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
       }
       if (personaRef) {
         personaRef.current = resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) })
-        try {
-          const leak = personaLeaks(config?.persona)
-          if (!leak.ok) {
-            logger.warn(`人设里出现了工具用法（${leak.hits.join('、')}）——这些属于行为层，人设只该写「我是谁」。`)
-          }
-        } catch {
-          /* ignore */
-        }
       }
       onReload?.()
       const effects = settingsEffects(applied)
@@ -236,18 +228,6 @@ export function apply(ctx, config) {
   const overridesRef = { current: savedOverrides }
   const personaRef = { current: resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) }) }
 
-  // 两层提示词的边界检查：人设里混进工具名，日志留痕但不阻止（怎么写是人家的自由）。
-  try {
-    const leak = personaLeaks(config?.persona)
-    if (!leak.ok) {
-      logger.warn(
-        `人设里出现了工具用法（${leak.hits.join('、')}）——这些属于行为层，人设只该写「我是谁」。` +
-          '工具改名或换宿主时这段会变成错的指引。',
-      )
-    }
-  } catch {
-    /* ignore */
-  }
   const agents = ctx?.agents
 
   // 另一个进程（设置面板）改了 settings.json 时，这边自己跟上，不用重启宿主。
