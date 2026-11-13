@@ -138,7 +138,7 @@ QQ 框架说明、聊天规则和人设经同一条组装流程进入固定 syst
 | `imageCacheDir` | 空 | 收到的图片下载到哪；留空用 `<cwd>/图片缓存` |
 | `imageMaxMB` | `8` | 单张图片体积上限 |
 | `memeDb` | 空 | 查梗词库（`memes.db`）的路径；留空读环境变量 `DSH_QQ_MEME_DB`，两个都空则 `qq_meme` 回「没配词库」 |
-| `faceCollectHint` | 空 | 什么样的图值得收进表情包收藏；留空 = 一张都不收 |
+| `faceCollectHint` | 空 | 普通图片收藏规则；当前留空时提示模型不主动收藏普通图片，但工具执行没有对应的禁止检查。商城表情仍自动登记，不受此项限制。QQ 设置页暂无入口，可通过运行端配置或插件 `settings.json` 设置 |
 | `faceSendGapMs` | `90000` | 两次发图/表情之间至少隔多少毫秒；`0` = 不限 |
 | `faceSendMaxPerHour` | `6` | 一小时最多发几张图/表情（`qq_mface` + `qq_send_image` 合计）；`0` = 不限 |
 | `asrEnabled` | `true` | 语音自动转文字（本地 vosk，离线） |
@@ -146,6 +146,8 @@ QQ 框架说明、聊天规则和人设经同一条组装流程进入固定 syst
 | `asrScript` | 空 | ASR 脚本路径；留空用插件自带的 `tools/asr.py` |
 | `asrModel` | 空 | vosk 模型目录（纯 ASCII 路径）；留空按 `VOSK_MODEL` → 插件旁 `models/` 找 |
 | `asrTimeoutMs` | `60000` | 单条语音转写超时 |
+
+图片缓存用于查看聊天图片；调用 `qq_keep_face` 收藏普通图片时，程序另存文件副本，供以后作为表情包发送。收到可用商城表情（`mface`）时，程序自动把重发所需的 ID、名称等信息记入 `表情包收藏.json`，不调用模型决定是否登记，也不下载该图片。两种收藏共用清单，自动登记不等于自动发送；发送仍受频率限制。普通图片收藏的配置、提示词与执行检查尚未统一，后续整理见[QQ 工具整理计划](tool-cleanup-plan.md)。
 
 ## 发消息的节奏
 
