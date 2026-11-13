@@ -1,0 +1,17 @@
+[
+  {
+    "file": "v4.json",
+    "source": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/v4/tokenizer.json",
+    "sha256": "97d2f31b020d18b5aee5c9b3d5b4efb10ea210f3fe3f7dffe3f1cd90542d6b19"
+  },
+  {
+    "file": "v41.json",
+    "source": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/v41/tokenizer.json",
+    "sha256": "81f64d1248a68ce3663e07ab3ee48b851e5df0e32d27cb98e4c9a268151e8d99"
+  },
+  {
+    "file": "LICENSE",
+    "source": "https://raw.githubusercontent.com/deepseek-ai/deepseek-recipe/935817c66f5d6e64838f419692545f06787e485f/static/tokenizers/LICENSE",
+    "sha256": "f2c6c602815669d292889e5be8c802f2ed950653b77999b1584e8e6aed25d040"
+  }
+]

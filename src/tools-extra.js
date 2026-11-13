@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url'
 import { listOf } from './config.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { synthesizeVoice } from './voice.js'
-import { readPrivateHistory } from './private-history.js'
 import { createQzonePublisher } from './qzone.js'
 
 /** 新工具只负责参数与会话适配，读记录、合成和发布各有独立边界。 */
@@ -44,26 +43,6 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
         noteToolSent(record, text)
       }
       return { ok: true, messageId }
-    },
-  })
-
-  tools.register({
-    name: 'qq_private_history',
-    description: '查询落盘的私聊流水，默认最近一天，最多七天。仅私聊可用：授权账号可读正文，其他人好感度到 100 仅可查时间线。user_id 留空查整体活动，指定他人仅限授权账号。无记录就说不知道。',
-    parameters: {
-      type: 'object', properties: {
-        user_id: { type: 'string' }, days: { type: 'integer', minimum: 1, maximum: 7 },
-        limit: { type: 'integer', minimum: 1, maximum: 200 },
-      }, additionalProperties: false,
-    },
-    output: {
-      schema: { type: 'object', properties: { ok: { type: 'boolean' }, text: { type: 'string' } }, required: ['ok', 'text'], additionalProperties: false },
-      render: (_args, value) => [{ type: 'text', text: value.text }],
-    },
-    async execute(args, exec) {
-      const record = needRecord(manager, exec)
-      const text = await readPrivateHistory({ config, home, record, userId: args.user_id, days: args.days, limit: args.limit })
-      return { ok: true, text }
     },
   })
 

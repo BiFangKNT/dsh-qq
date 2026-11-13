@@ -46,7 +46,12 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
   }]))
   const presetBindings = new WeakMap()
   const services = {
-    llm,
+    llm: {
+      async prepareCall(config) { return { config: { maxTokens: 8192, ...config }, context: { contextWindow: 1000000 } } },
+      imageRequestPricing() { return { priceImages: images => images.map(() => ({ visualTokens: 1024, text: '' })) } },
+      fileRequestText: attachment => JSON.stringify(attachment),
+      ...llm,
+    },
     attachments: createMockAttachments(home),
     sessionProjections: {
       async register(definition) {
@@ -192,6 +197,10 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     if (sections.length) await event(agent, 'user/message', createUserMessage({ content: [{ type: 'text', text: renderContextSnapshot(current) }],
       source: { kind: 'runtime-context', form: 'snapshot', sections } }), { surfaceOp: 'append' })
     agent.requests.push({ ...header, context: renderContextSnapshot(current), messages: agent.session.deriveMessages() })
+    const options = { ...agent.model.current(), ...header, messages: agent.session.deriveMessages(), sessionId: agent.id }
+    // 与真实 llm/stream 一样，监听器返回的是异步迭代器。
+    const chain = (listeners.get('llm/stream') ?? []).reduceRight((next, fn) => () => fn(options, next), async function* () {})
+    for await (const _ of chain()) { /* 不访问模型 */ }
     await event(agent, 'request/header', { header: { config: {}, tools: assembly.tools } })
   }
   services.compaction = {
@@ -215,6 +224,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     const agentCtx = createMockPromptScope(ctx, header.meta?.cwd, scopedTools)
     const agent = {
       id, ctx: agentCtx, scopedTools, results: [], requests: [],
+      model: { current: () => ({ provider: options.provider || 'mock', model: options.model || 'mock-model' }) },
       session: { id, header, events: saved?.events ?? [],
         snapshotEvents() { return [...this.events] },
         get seq() { return this.events.length },

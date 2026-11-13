@@ -73,7 +73,7 @@ export const OVERRIDABLE = [
   'groupImageBlock',
   'groupMinGapMs',
   'rateLimitPerMin',
-  'historyLimit',
+  'contextTokenizerFamily',
   'groupMode',
   'groupAllow',
   'addressedMaySilent',

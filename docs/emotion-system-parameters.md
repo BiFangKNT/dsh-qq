@@ -206,7 +206,7 @@
 | `holdNightMessages` | `false` | 默认夜间照常回应；开启后私聊暂存、群聊略过回复 |
 | `mergeWindowMs` | 5000 ms | 私聊连发合并，不应代替分类器逐新消息判定 |
 | `BACKLOG_MAX` | 30 条，代码常量 | [`src/inbound.js`](../src/inbound.js) 的群消息待补上下文；仅靠它无法承诺完整保留任意多条被分类器跳过的消息 |
-| 旧历史查询好感阈值 | 数值 ≥100 或字符串 `MAX` | [`src/private-history.js`](../src/private-history.js)；迁移时必须与动态关系分离 |
+| 旧历史查询好感阈值（已移除） | 原为数值 ≥100 或字符串 `MAX` | 查询已统一为 [`qq_history`](../src/message-tools.js)，不再以好感度授权；旧好感文件保留 |
 
 独立模型前置分类器已经接入，具体配置和测试见[开发进度](emotion-system-development.md)。FR-004/019/022 的完整情绪参数组仍未实现，不能把已有保活、主动等待或作息参数改名后当作这些情绪需求已经实现。
 

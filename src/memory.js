@@ -10,7 +10,7 @@ const instruction = `你是只读的聊天记忆整理器，不回复用户、�
 每个变化必须引用本批新增证据ID。没有变化返回空数组。有明确未来日期的事项使用 verifyAt 保留至约定时间；没有明确期限则省略，由程序设置默认核实时间。`
 
 const messageOf = event => event.data?.message ?? event.data
-export function createMemory({ home, config, getLlm = () => undefined, logger, now = Date.now }) {
+export function createMemory({ home, config, getLlm = () => undefined, logger, capacity, messageStore, now = Date.now }) {
   const store = createMemoryStore(home, { now, taskTtlMs: () => Number(config.memoryTaskTtlHours ?? 24) * 3600000 })
   const queues = new Map(), controllers = new Set()
   let stopped = false
@@ -38,10 +38,12 @@ export function createMemory({ home, config, getLlm = () => undefined, logger, n
       const timer = setTimeout(() => controller.abort(new Error('记忆维护超时')), Number(config.memoryTimeoutMs ?? 30000))
       try {
         const assembler = new BlockAssembler()
-        for await (const chunk of llm.stream({ provider, model, sessionId: `qq-memory-${job.id}`,
+        const options = { provider, model, sessionId: `qq-memory-${job.id}`,
           system: instruction, tools: [], signal: controller.signal,
           messages: [createUserMessage({ content: [{ type: 'text', text: JSON.stringify({ entries: data.entries.map(store.effective).map(({ history, ...e }) => e), observedAt: job.observedAt, evidence: job.evidence }) }] })],
-        })) assembler.push(chunk)
+        }
+        if (capacity) await capacity.check(options)
+        for await (const chunk of llm.stream(options)) assembler.push(chunk)
         controller.signal.throwIfAborted()
         if (assembler.finish.kind !== 'stop') throw new Error(`记忆维护未正常结束：${assembler.finish.kind}`)
         const blocks = assembler.blocks()
@@ -96,10 +98,25 @@ export function createMemory({ home, config, getLlm = () => undefined, logger, n
       const data = store.migrate(record)
       const cursor = Number(data.cursors[record.sessionId] ?? -1)
       if (event.seq <= cursor) return
-      const events = session.snapshotEvents().filter(e => e.seq > cursor && e.seq <= event.seq && ['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(e.type))
+      const snapshot = session.snapshotEvents()
+      const events = snapshot.filter(e => e.seq > cursor && e.seq <= event.seq && ['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(e.type))
+      const readCalls = new Set(snapshot.filter(e => e.type === 'tool/call' &&
+        (['qq_history', 'qq_messages', 'qq_group_history', 'qq_private_history'].includes(e.data.name) ||
+          (e.data.name === 'qq_memory' && /"action"\s*:\s*"(?:list|history)"/.test(e.data.arguments))))
+        .map(e => e.data.callId))
       // 摘要、旧快照和主动提示都不是新的用户证据。
-      const evidence = events.filter(e => e.type !== 'user/message' || messageOf(e)?.source?.kind === 'user')
-        .map(e => ({ id: `${record.sessionId}:${e.seq}`, type: e.type, data: e.data }))
+      const evidence = events.filter(e => (e.type !== 'user/message' || messageOf(e)?.source?.kind === 'user') &&
+        !(e.type.startsWith('tool/') && readCalls.has(e.data.callId ?? e.data.message?.toolCallId)))
+        .flatMap(e => {
+          const messages = messageOf(e)?.source?.qqMessages
+          if (e.type === 'user/message' && Array.isArray(messages)) return messages.map(message => {
+            const original = messageStore?.get(record, message.id)
+            if (!original?.body) throw new Error('新增消息依据缺失，拒绝把范围说明或旧快照当作新证据')
+            return { id: `qq:${record.selfId}:${record.scope}:${record.peerId}:${message.id}`, type: e.type,
+              data: { content: [{ type: 'text', text: original.body }], source: { kind: 'user' } } }
+          })
+          return [{ id: `${record.sessionId}:${e.seq}`, type: e.type, data: e.data }]
+        })
       if (record.memorySent?.length) evidence.push(...record.memorySent)
       if (evidence.length) data.jobs.push({ id: randomUUID(), observedAt: now(), evidence })
       data.cursors[record.sessionId] = event.seq

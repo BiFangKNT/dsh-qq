@@ -7,6 +7,8 @@ import { SessionManager } from './session.js'
 import { createPromptSync } from './prompt-sync.js'
 import { createInbound, historyLine, pushHistory } from './inbound.js'
 import { createAddressClassifier } from './address-classifier.js'
+import { createMessageStore } from './message-store.js'
+import { createContextBudget } from './context-budget.js'
 import { appendChatLog } from './chatlog.js'
 import { SILENT_MARKER, personaLeaks, stripSilentMark } from './prompts.js'
 import { createOutbound } from './outbound.js'
@@ -317,7 +319,28 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
 
   let selfId = String(config.selfId ?? '')
   const manager = new SessionManager({ ctx, agents, selfId, config, logger, home: homeDirOf(ctx, logger) })
-  manager.memory = createMemory({ home: homeDirOf(ctx, logger), config, getLlm: () => ctx.get('llm'), logger })
+  const messageStore = createMessageStore(homeDirOf(ctx, logger), logger)
+  manager.messageStore = messageStore
+  manager.capacity = createContextBudget({ ctx, config, store: messageStore, logger })
+  // 所有 OneBot 发送（含工具出口）分别记录结果；未确认的请求绝不自动重发。
+  const onebotCall = client.call.bind(client)
+  client.call = async (action, params, timeout, tracking) => {
+    if (!/^(?:send_(?:group|private)_(?:msg|forward_msg)|upload_(?:group|private)_file)$/.test(action)) return onebotCall(action, params, timeout)
+    const scope = action.includes('_group_') ? 'group' : 'private'
+    const peerId = String(scope === 'group' ? params.group_id : params.user_id)
+    const record = manager.findByPeer(scope, peerId) ?? { selfId: manager.selfId, scope, peerId }
+    const id = tracking?.sendId ?? messageStore.sentStart(record, action, params)
+    if (tracking?.sendId) messageStore.sentEnd(id, 'sending')
+    try {
+      const result = await onebotCall(action, params, timeout)
+      messageStore.sentEnd(id, 'sent', result)
+      return result
+    } catch (error) {
+      messageStore.sentEnd(id, error.onebotDelivery ?? 'uncertain', { message: error.message, retcode: error.retcode })
+      throw error
+    }
+  }
+  manager.memory = createMemory({ home: homeDirOf(ctx, logger), config, getLlm: () => ctx.get('llm'), logger, capacity: manager.capacity, messageStore })
   manager.runtimeContext = record => buildRuntimeContext({ memory: manager.memory, config, record })
   manager.start()
   const promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, manager, logger })
@@ -356,8 +379,8 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     if (!record || !text) return
     const selfName = manager.selfName || '机器人'
     const entry = historyLine(null, text, { isSelf: true, selfName })
-    pushHistory(record, entry, config.historyLimit)
-    record.recent.push(entry)
+    pushHistory(record, entry)
+    record.recent.push(entry.slice(0, 2000))
     const recentKeep = Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3)
     if (record.recent.length > recentKeep) record.recent.splice(0, record.recent.length - recentKeep)
 
@@ -396,8 +419,13 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     const isGroup = record.scope === 'group'
     const action = isGroup ? 'send_group_msg' : 'send_private_msg'
     const target = isGroup ? { group_id: Number(record.peerId) } : { user_id: Number(record.peerId) }
+    const pendingSends = chunks.map(chunk => {
+      const payload = { ...target, message: textSegments(chunk) }
+      return { payload, sendId: messageStore.sentStart(record, action, payload, 'queued') }
+    })
     const rateKey = `${record.scope}:${record.peerId}`
     let sentAny = false
+    const sentChunks = []
 
     // 群聊：两条回复之间拉开一点。一群人追着问的时候，
     // 连着往外吐最容易被人当成刷屏，也最容易被风控。
@@ -425,12 +453,13 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
         break
       }
       try {
-        const result = await client.call(action, { ...target, message: textSegments(chunks[index]) })
+        const result = await client.call(action, pendingSends[index].payload, undefined, { sendId: pendingSends[index].sendId })
         // 记下自己发的消息 id，撤回工具要用
         const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
         if (sentId > 0) record.lastSentMessageId = sentId
         manager.memory.noteSent(record, chunks[index], sentId)
         sentAny = true
+        sentChunks.push(chunks[index])
         // 真发出去了才算用掉一次主动开口的额度（回复不受影响：pending 只在主动轮有）
         wake.noteProactiveDelivered(record)
         logger.info(`→ ${record.label}: ${chunks[index].slice(0, 60)}`)
@@ -450,7 +479,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     // 自己发出去的话也要进历史：不然下一轮它看不见「我说过什么」，
     // 群里口吻相近的别的机器人一开口，就会当成自己说的去道歉、去撤回。
     // 记 spoken 不记 trimmed —— 历史里不该留 [SILENT] 这个标记本身。
-    if (sentAny) noteSelfSaid(record, spoken)
+    if (sentAny) noteSelfSaid(record, sentChunks.join('\n'))
 
     // 发完了，取消「正在输入」
     if (!isGroup) {
@@ -470,7 +499,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   const bedtime = createSleep({ config, manager, logger, automation })
   const wake = createWake({ config, manager, logger, bridge, automation, canAct: record => !bedtime.shouldHold(record) })
   const addressClassifier = createAddressClassifier({ config, home: homeDirOf(ctx, logger), llm: ctx.get?.('llm'),
-    getAttachments: () => ctx.get?.('attachments'), logger })
+    getAttachments: () => ctx.get?.('attachments'), logger, store: messageStore, capacity: manager.capacity })
   const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, addressClassifier })
   const outbound = createOutbound({ manager, config, logger, send, wake, contextGuard })
 

@@ -585,7 +585,7 @@ window.__ModuleLoader__.load({
             type: 'number',
           }),
           textField('rateLimitPerMin', '每分钟最多发几条', { hint: '默认 12。0 = 不限。被风控往往不是说了什么，是回得太多。', type: 'number' }),
-          textField('historyLimit', '补充群历史条数', { hint: '默认 20。每次触发时额外携带的近期群消息上限，可能与已有上下文重叠。0 表示不额外补充，不会清除主会话已积累的上下文。', type: 'number' })),
+          textField('contextTokenizerFamily', 'DeepSeek 分词系列', { hint: 'v41 或 v4，按实际模型选择。同系列日期版本共用；文本计量加结构预留，不等于完整请求的精确计费。' })),
 
         /* ── 谁能跟它说话 ── */
         h('div', { 'data-qq-sec': '' },

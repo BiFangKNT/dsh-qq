@@ -14,8 +14,8 @@ async function harness(t, { config: extra = {}, home = '', answers = [] } = {}) 
   const config = { groupMode: 'open', privateMode: 'open', replyToPrivate: true, requireMention: true,
     groupMessageIntervalMs: 100, mergeWindowMs: 0, historyLimit: 0, chatLog: false,
     addressClassifierProvider: 'test', addressClassifierModel: 'judge', ...extra }
-  const calls = [], delivered = [], sent = [], records = new Map()
-  let idle = Promise.resolve(), id = 0, held = false
+  const calls = [], delivered = [], sent = [], warnings = [], records = new Map()
+  let idle = Promise.resolve(), id = 0, held = false, onFollowup, sendError
   const gate = createAddressClassifier({ config, home, logger: {}, llm: { async *stream(request) {
     calls.push(request)
     yield { type: 'text-delta', index: 0, text: answers.shift() ?? 'yes' }
@@ -26,7 +26,7 @@ async function harness(t, { config: extra = {}, home = '', answers = [] } = {}) 
       const key = meta.scope + ':' + meta.peerId
       if (!records.has(key)) records.set(key, { ...meta, sessionId: key, history: [], recent: [], busy: 0,
         queue: Promise.resolve(), agent: { session: { deriveMessages: () => [] },
-          followup: message => delivered.push(message), whenIdle: () => idle } })
+          followup: message => { delivered.push(message); onFollowup?.(message) }, whenIdle: () => idle } })
       return records.get(key)
     },
     enqueue(record, task) {
@@ -36,9 +36,9 @@ async function harness(t, { config: extra = {}, home = '', answers = [] } = {}) 
     },
     async replaceSession(record) { record.sessionId += '-new' },
   }
-  const inbound = createInbound({ config, manager, addressClassifier: gate, logger: {},
+  const inbound = createInbound({ config, manager, addressClassifier: gate, logger: { warn: (...args) => warnings.push(args) },
     client: { call: async () => ({ sender: { user_id: 9 }, message: '机器人的话' }) },
-    sleep: { shouldHold: () => held }, send: async (_record, body) => sent.push(body) })
+    sleep: { shouldHold: () => held }, send: async (_record, body) => { sent.push(body); if (sendError) throw sendError } })
   t.after(() => inbound.dispose())
   const settle = async () => { for (let n = 0; n < 20; n++) await new Promise(setImmediate) }
   const tick = async ms => { t.mock.timers.tick(ms); await settle() }
@@ -48,8 +48,9 @@ async function harness(t, { config: extra = {}, home = '', answers = [] } = {}) 
       message: [...(atMe ? [{ type: 'at', data: { qq: '9' } }] : []), { type: 'text', data: { text } }], ...extraEvent })
     await settle()
   }
-  return { config, calls, delivered, sent, gate, inbound, manager, records, tick, settle, receive,
-    set idle(value) { idle = value }, set held(value) { held = value } }
+  return { config, calls, delivered, sent, warnings, gate, inbound, manager, records, tick, settle, receive,
+    set idle(value) { idle = value }, set held(value) { held = value },
+    set onFollowup(value) { onFollowup = value }, set sendError(value) { sendError = value } }
 }
 
 test('旧免 @ 名单迁入按群覆盖，显式覆盖优先，退役参数删除', () => {
@@ -240,4 +241,75 @@ test('普通等待可持久恢复，重启按当前规则执行，不绑定旧 s
   await h.tick(1000)
   assert.equal(h.delivered.length, 1)
   assert.match(textOf(h.delivered[0]), /重启前的消息/)
+})
+
+for (const scope of ['group', 'private']) {
+  test(`${scope} 连聊达到上限后等待窗口到期，恢复完整轮数额度`, async t => {
+    const h = await harness(t, { config: { botChatEnabled: true, peerBots: ['10001'], peerChatMaxTurns: 2 } })
+    const event = { message_type: scope }
+    await h.receive('真人开始新话题', true, { ...event, user_id: 20001 })
+    await h.receive('机器人第一轮', true, event)
+    await h.receive('机器人第二轮', true, event)
+    assert.equal(h.delivered.length, 3)
+    await h.receive('本窗口已达上限', true, event)
+    assert.equal(h.delivered.length, 3)
+    await h.tick(31 * 60000)
+    assert.equal(h.delivered.length, 4, '过期后的积压成为新窗口第一轮')
+    await h.receive('新窗口第二轮', true, event)
+    assert.equal(h.delivered.length, 5, '没有沿用旧窗口计数')
+    await h.receive('新窗口再次达到上限', true, event)
+    assert.equal(h.delivered.length, 5)
+  })
+
+  test(`${scope} 单轮超时只提示一次，实际结束前不释放队列或标记完成`, async t => {
+    const h = await harness(t, { config: { maxTurnMs: 50 } }), gate = Promise.withResolvers()
+    const event = { message_type: scope }
+    h.onFollowup = () => { h.idle = gate.promise }
+    await h.receive('长时间处理', true, event)
+    const record = [...h.records.values()][0], messageId = String(record.lastMessageId)
+    const meta = { selfId: '9', scope, peerId: record.peerId }
+    assert.equal(record.busy, 1)
+    assert.equal(h.gate.store.get(meta, messageId).status, 'admitted')
+    await h.tick(49)
+    assert.equal(h.sent.length, 0)
+    await h.tick(1)
+    assert.equal(h.sent.length, 1)
+    assert.match(h.sent[0], /仍在继续/)
+    await h.receive('排队的下一条', true, event)
+    await h.tick(2000)
+    assert.equal(h.sent.length, 1, '同一轮不重复通知')
+    assert.equal(h.delivered.length, 1)
+    assert.equal(record.busy, 1)
+    assert.equal(h.gate.store.get(meta, messageId).status, 'admitted')
+    record.agent.session.snapshotEvents = () => [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }]
+    gate.resolve(); await h.settle()
+    assert.equal(h.gate.store.get(meta, messageId).status, 'processed')
+    await h.tick(1000)
+    assert.equal(h.delivered.length, 2, '结束后才交付下一轮')
+    assert.equal(record.busy, 0)
+    await h.tick(1000)
+    assert.equal(h.sent.length, 1, '正常完成的下一轮不遗留提示')
+  })
+}
+
+test('超时提示发送失败不终止主轮，卸载会清除尚未到期的提示', async t => {
+  const h = await harness(t, { config: { maxTurnMs: 50 } }), gate = Promise.withResolvers()
+  h.onFollowup = () => { h.idle = gate.promise }
+  h.sendError = new Error('模拟通知发送失败')
+  await h.receive('第一轮', true)
+  await h.tick(50)
+  const record = [...h.records.values()][0]
+  assert.equal(record.busy, 1)
+  assert.ok(h.warnings.some(args => args[0] === '发送单轮超时提示失败：'))
+  gate.resolve(); await h.settle()
+  assert.equal(record.busy, 0)
+  h.sendError = null
+  const next = Promise.withResolvers()
+  h.onFollowup = () => { h.idle = next.promise }
+  await h.receive('卸载前还在处理', true)
+  h.inbound.dispose()
+  await h.tick(1000)
+  assert.equal(h.sent.length, 1)
+  next.resolve(); await h.settle()
+  assert.equal(record.busy, 0)
 })

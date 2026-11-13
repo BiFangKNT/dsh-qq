@@ -8,7 +8,7 @@
  * 不让插件因为缺服务而启动失败。
  */
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -20,6 +20,7 @@ import { downloadImage } from './inbound.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerExtraTools } from './tools-extra.js'
 import { registerMemoryTool } from './memory-tools.js'
+import { registerMessageTool } from './message-tools.js'
 import { registerSharedFiles } from './shared-files.js'
 
 const POKE_DESC =
@@ -103,6 +104,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
   }
 
   registerMemoryTool(tools, manager)
+  registerMessageTool(tools, manager, config)
 
   async function assertOutboundText(text, record, source) {
     const verdict = checkOutboundText(text, { config, logger, record, source, knownSecrets: [client.token] })
@@ -942,111 +944,13 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     },
   })
 
-  // 2026-10-26 姐姐：「老三还是看不到群聊」。私聊和群是两个会话，私聊里确实看不见群里的字。
-  // 前辈 qq-bridge 也是 group:id / private:id 分开的，它给的办法是「AI 想看就自己取」——
-  // 所以这里不是把群聊硬塞进私聊，而是给一只「眼睛」：想看看群里刚才聊了什么，自己调。
-  tools.register({
-    name: 'qq_group_history',
-    description:
-      '读某个群最近聊了什么（从落盘的聊天记录里取原话，含别人说的话）。' +
-      '私聊里被问「群里刚才在聊什么」、或者想接一句群里的旧话题时用它。' +
-      '不传 group_id 就先列出有哪些群存着记录。只读，不会往群里发任何东西。',
-    parameters: {
-      type: 'object',
-      properties: {
-        group_id: { type: 'string', description: '群号；不填就列出所有有记录的群（群号 + 最后一条）' },
-        days: { type: 'integer', description: '往前看几天，默认 1，最多 7' },
-        limit: { type: 'integer', description: '最多返回多少条，默认 40，最多 200' },
-      },
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          text: { type: 'string' },
-          groups: { type: 'array', items: { type: 'string' } },
-        },
-        required: ['ok'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [{ type: 'text', text: String(value?.text ?? '（没有记录）') }],
-    },
-    async execute(args) {
-      const root =
-        String(config?.workspaceRoot ?? '').trim() ||
-        join(String(config?.cwd ?? '').trim() || process.cwd(), '会话')
-
-      // 往前 days 天，按时间升序
-      const dayList = []
-      const span = Math.min(Math.max(1, Number(args?.days) || 1), 7)
-      for (let i = span - 1; i >= 0; i -= 1) {
-        const d = new Date()
-        d.setDate(d.getDate() - i)
-        dayList.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`)
-      }
-      const wantLimit = Math.min(Math.max(1, Number(args?.limit) || 40), 200)
-
-      let dirs = []
-      try {
-        dirs = readdirSync(root, { withFileTypes: true })
-          .filter((e) => e.isDirectory() && e.name.startsWith('群_'))
-          .map((e) => e.name)
-      } catch (err) {
-        return { ok: false, text: `读不到 QQ 会话目录：${root}（${err?.message ?? err}）`, groups: [] }
-      }
-
-      const gid = String(args?.group_id ?? '').replace(/[^\d]/g, '')
-      if (!gid) {
-        if (!dirs.length) return { ok: true, text: '还没有任何群聊记录。', groups: [] }
-        const groups = dirs.map((name) => {
-          const id = name.slice(2)
-          let last = ''
-          for (const day of dayList) {
-            const f = join(root, name, '聊天记录', `${day}.md`)
-            if (!existsSync(f)) continue
-            try {
-              const lines = readFileSync(f, 'utf8').split('\n').filter((l) => l.startsWith('- '))
-              if (lines.length) last = `${day} · ${lines[lines.length - 1].replace(/^- /, '')}`
-            } catch {
-              /* 单天读失败就当没有 */
-            }
-          }
-          return `${id}${last ? ` — 最后一条：${last}` : ' — 最近没有记录'}`
-        })
-        return { ok: true, text: `有记录的群：\n${groups.join('\n')}`, groups }
-      }
-
-      const name = `群_${gid}`
-      if (!dirs.includes(name)) {
-        return { ok: false, text: `没有群 ${gid} 的记录（没说过话，或群号不对）。有记录的是：${dirs.map((n) => n.slice(2)).join('、') || '（无）'}`, groups: [] }
-      }
-
-      const msgs = []
-      for (const day of dayList) {
-        const f = join(root, name, '聊天记录', `${day}.md`)
-        if (!existsSync(f)) continue
-        try {
-          const lines = readFileSync(f, 'utf8').split('\n').filter((l) => l.startsWith('- '))
-          for (const line of lines) msgs.push(`${day} ${line.replace(/^- /, '')}`)
-        } catch (err) {
-          logger.warn?.(`qq_group_history 读 ${f} 失败: ${err?.message ?? err}`)
-        }
-      }
-      if (!msgs.length) return { ok: true, text: `群 ${gid} 最近 ${span} 天没有记录。`, groups: [] }
-      const tail = msgs.slice(-wantLimit)
-      return { ok: true, text: `群 ${gid} 最近 ${tail.length} 条：\n${tail.join('\n')}`, groups: [] }
-    },
-  })
-
   registerExtraTools(tools, {
     client, manager, config, home: home ?? homeDirOf(ctx, logger),
     needRecord, assertText: assertOutboundText, noteToolSent,
   })
 
   logger.info?.(
-    `QQ 互动工具已注册：qq_memory / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_group_history / qq_send_voice / qq_private_history / qq_qzone_send（表情包收藏 ${facesCount(config)} 个）`,
+    `QQ 互动工具已注册：qq_memory / qq_history / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_send_voice / qq_qzone_send（表情包收藏 ${facesCount(config)} 个）`,
   )
   logger.info?.(sharedFilesEnabled
     ? 'qq_memo 已启用：获准聊天可读，仅授权账号私聊可写'

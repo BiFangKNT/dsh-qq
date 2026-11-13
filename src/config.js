@@ -112,9 +112,6 @@ export const ConfigSchema = Schema.object({
     .description(
       '把「AI 娘图鉴」夹进提示词：群友说到 DeepSeek 娘、龙娘、通义娘这些同人角色时认得出来，不会当成真人或瞎猜。大约多几百字，嫌占地方可以关掉',
     ),
-  historyLimit: Schema.number()
-    .default(20)
-    .description('群聊时额外带入的最近消息条数（0 = 不带历史）'),
   quoteReply: Schema.boolean()
     .default(true)
     .description('收到的消息带引用时，把「被引用的人 + 原文」一并交给 Agent'),
@@ -341,6 +338,8 @@ export const ConfigSchema = Schema.object({
     ),
 
   // ── 上下文管理 ──
+  contextTokenizerFamily: Schema.union(['v4', 'v41']).default('v41')
+    .description('DeepSeek 文本分词系列；v41 用于 V4.1，v4 用于 V4。同系列日期版本共用。须与实际模型匹配；不表示完整请求的精确计费'),
   contextGuard: Schema.boolean()
     .default(true)
     .description('记录上下文使用与压缩情况；正常长聊由 DSH 自动压缩，不主动换会话'),

@@ -10,7 +10,6 @@ import { createContextGuard } from '../src/context-guard.js'
 import { createOutbound, stripLeakedThinking } from '../src/outbound.js'
 import { cleanOutboundText } from '../src/shared/outbound-text.js'
 import { createQzonePublisher } from '../src/qzone.js'
-import { readPrivateHistory } from '../src/private-history.js'
 import { SessionManager } from '../src/session.js'
 import { registerTools } from '../src/tools.js'
 import { createMockPromptScope } from './mock-dsh.mjs'
@@ -177,25 +176,6 @@ test('preset 在 create 和 resume 的 setup 中挂载，缺服务显式报错',
   }
   const manager = new SessionManager({ agents: {}, config: { preset: 'missing' }, logger })
   await assert.rejects(manager.obtain({ scope: 'private', peerId: '10001' }), /agentPresets/)
-})
-
-test('私聊权限：授权账号看正文，称呼不授予权限，其他人只看日期时间', async t => {
-  const root = await temporary(t)
-  const config = { workspaceRoot: root, ownerIds: ['10001'], memberLabels: { '10002': '爸爸' } }
-  const now = new Date(2026, 0, 2, 12)
-  const log = join(root, '私聊_10003', '聊天记录')
-  await mkdir(log, { recursive: true })
-  await writeFile(join(log, '2026-01-02.md'), '- 09:10:11 · 甲：私密内容\n')
-  const query = (peerId, extra = {}) => readPrivateHistory({ config, home: root, now, record: { scope: 'private', peerId }, ...extra })
-  assert.match(await query('10001'), /私聊_10003 · 甲：私密内容/)
-  await assert.rejects(query('10002'), /好感度/)
-  await writeFile(join(root, 'affinity.json'), JSON.stringify({ '10002': 100 }))
-  const timeline = await query('10002')
-  assert.match(timeline, /2026-01-02 09:10/)
-  assert.doesNotMatch(timeline, /私密内容|10003|甲/)
-  await assert.rejects(query('10002', { userId: '10003' }), /只有授权账号/)
-  await assert.rejects(query('10001', { userId: '../10003' }), /QQ 号/)
-  await assert.rejects(query('10001', { record: { scope: 'group' } }), /只在私聊/)
 })
 
 test('空间超时只发一次，保留额度；并发发布不能突破日限，重启后仍有效', async t => {

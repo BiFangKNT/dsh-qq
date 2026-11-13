@@ -12,6 +12,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "assets",
     "docs",
     "src",
     "test",
@@ -61,6 +62,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "0.2.0",
     "image-size": "^2.0.4",
     "ws": "^8.18.0",
     "zod": "^4.6.6"

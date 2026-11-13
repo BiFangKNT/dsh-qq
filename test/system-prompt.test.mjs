@@ -391,6 +391,7 @@ test('等待新建会话时收到的消息，切换后仍交付且保留本条�
     message_id: 42, sender: { user_id: 11001, nickname: '测试用户' }, message: '切换时收到的新消息' })
   release()
   await waitFor(() => operationOf(h.sync, op.id)?.status === 'done')
+  await waitFor(() => h.record.agent.received.length === 1, { what: '持久队列在切换完成后交付' })
   await h.record.queue
   assert.notEqual(h.record.sessionId, oldId)
   assert.match(JSON.stringify(h.record.agent.received), /切换时收到的新消息/)
@@ -417,6 +418,7 @@ for (const command of ['/new', '#new', '/reset', '#reset']) {
     await inbound(event('新会话中的消息', 42))
     release()
     await resetting
+    await waitFor(() => h.record.agent.received.length === 1, { what: '持久队列在命令切换完成后交付' })
     await h.record.queue
     assert.notEqual(h.record.sessionId, oldId)
     assert.notEqual(h.record.agent, oldAgent)

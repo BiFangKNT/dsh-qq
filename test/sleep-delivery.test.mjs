@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createMockEnvironment } from './mock-environment.mjs'
 import { waitFor, textOf } from './mock-dsh.mjs'
+import { createMessageStore } from '../src/message-store.js'
 
 test('关闭分类器的夜间私聊保留完整原文和图片；重启、换会话后关闭作息只交付一次', async t => {
   const root = mkdtempSync(join(tmpdir(), 'qq-sleep-delivery-'))
@@ -15,9 +16,8 @@ test('关闭分类器的夜间私聊保留完整原文和图片；重启、换�
     sleepFrom: hm((minutes + 1439) % 1440), sleepTo: hm((minutes + 10) % 1440),
   } })
   t.after(async () => { await env.close(); rmSync(root, { recursive: true, force: true }) })
-  const pendingDir = join(root, 'dsh-qq', 'address-classifier')
-  const pending = () => existsSync(pendingDir) ? readdirSync(pendingDir).filter(f => f.endsWith('.json'))
-    .flatMap(f => JSON.parse(readFileSync(join(pendingDir, f), 'utf8')).pending ?? []) : []
+  const store = createMessageStore(join(root, 'dsh-qq'))
+  const pending = () => store.chats().flatMap(meta => store.pending(meta))
   const long = '完整正文'.repeat(300) + '末尾不可丢失'
   env.emitMessage({ text: long, image: true, messageId: 90001 })
   await waitFor(() => pending().some(item => item.body?.includes('末尾不可丢失')), { what: '休息消息完整落盘' })

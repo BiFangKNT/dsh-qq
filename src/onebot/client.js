@@ -111,7 +111,10 @@ export class OneBotClient extends EventEmitter {
         entry.resolve(payload.data)
       } else {
         const detail = payload.wording || payload.message || `retcode=${payload.retcode}`
-        entry.reject(new Error(`${payload.status || 'failed'}: ${detail}`))
+        const error = new Error(`${payload.status || 'failed'}: ${detail}`)
+        error.onebotDelivery = 'rejected'
+        error.retcode = payload.retcode
+        entry.reject(error)
       }
       return
     }
@@ -126,7 +129,9 @@ export class OneBotClient extends EventEmitter {
   call(action, params = {}, timeoutMs = 30_000) {
     const ws = this.#ws
     if (!ws || ws.readyState !== WS_OPEN) {
-      return Promise.reject(new Error(`onebot 未连接（action=${action}）`))
+      const error = new Error(`onebot 未连接（action=${action}）`)
+      error.onebotDelivery = 'not-sent'
+      return Promise.reject(error)
     }
     const echo = `dsh-qq-${++this.#seq}`
     return new Promise((resolve, reject) => {

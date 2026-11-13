@@ -14,6 +14,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: '>=3.18.1'
         version: 3.18.5
+      '@huggingface/tokenizers':
+        specifier: 0.2.0
+        version: 0.2.0
       image-size:
         specifier: ^2.0.4
         version: 2.0.4
@@ -470,6 +473,9 @@ packages:
   '@eslint-community/regexpp@4.12.3':
     resolution: {integrity: sha512-R76UKbvsqI68DJJVTVyqFKqU98CN4+B+acxNfEA2IFarSzP0SjtKf/3+fFiXzTyv5Fj3PxLkGHe2wnVWWMxobQ==}
     engines: {node: ^12.0.0 || ^14.0.0 || >=16.0.0}
+
+  '@huggingface/tokenizers@0.2.0':
+    resolution: {integrity: sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg==}
 
   '@js-temporal/polyfill@0.5.1':
     resolution: {integrity: sha512-hloP58zRVCRSpgDxmqCWJNlizAlUgJFqG2ypq79DCvyv9tHjRYMDOcPFjzfl/A1/YxDvRCZz8wvZvmapQnKwFQ==}
@@ -1163,6 +1169,8 @@ snapshots:
       '@standard-schema/spec': 1.1.0
 
   '@eslint-community/regexpp@4.12.3': {}
+
+  '@huggingface/tokenizers@0.2.0': {}
 
   '@js-temporal/polyfill@0.5.1':
     dependencies:

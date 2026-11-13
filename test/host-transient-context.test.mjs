@@ -11,6 +11,8 @@ import { runtimeContextName } from '../src/session-view.js'
 import { assertHostAccepted } from '../src/host-compatibility.js'
 import { SILENT_HINT } from '../src/prompts.js'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
+import { createContextBudget } from '../src/context-budget.js'
+import { createMessageStore } from '../src/message-store.js'
 
 const require = createRequire(import.meta.resolve('@deepseek-ai/dsh-agent-loop'))
 const load = name => import(pathToFileURL(require.resolve(name)).href)
@@ -38,7 +40,7 @@ const hasState = message => message.source?.kind === 'runtime-context' &&
   message.source.sections?.some(section => section.name === runtimeContextName)
 const text = value => JSON.stringify(value)
 
-async function harness(t, { root, respond, compact = false } = {}) {
+async function harness(t, { root, respond, compact = false, budget = false, modelInfo = {}, agentOptions = {} } = {}) {
   const ctx = new Context(), requests = [], errors = [], handles = []
   for (const plugin of [llm.default, sessionApi.default, Projections, SystemPrompt, tools.default, Native, AgentRegistry, TokenMeter]) await ctx.plugin(plugin)
   if (root) await ctx.plugin(Persistence, { root, compression: 'none' })
@@ -46,7 +48,8 @@ async function harness(t, { root, respond, compact = false } = {}) {
   if (compact) await ctx.plugin(Compaction, { headroomTokens: 0, maxTokens: 128, retainTokens: 0,
     ...(typeof compact === 'object' ? compact : {}) })
   class Adapter extends llm.LlmAdapter {
-    async resolveModel(provider, model) { return { provider, id: model, name: model, context: { contextWindow: 1000000 } } }
+    async resolveModel(provider, model) { return { provider, id: model, name: model,
+      ...(budget ? { defaultMaxTokens: 8192 } : {}), context: { contextWindow: 1000000 }, ...modelInfo } }
     async *stream(options) {
       requests.push(options)
       if (options.purpose === 'compaction') yield* textResponse('conversation summary')
@@ -57,14 +60,17 @@ async function harness(t, { root, respond, compact = false } = {}) {
   ctx.llm.registerAdapter(['mock'], new Adapter())
   ctx.on('agent/error', ({ error }) => errors.push(error))
   const store = createSystemPromptStore(''), config = { persona: '固定人设', ownerIds: [] }
+  const messages = budget ? createMessageStore() : null
+  const capacity = budget ? createContextBudget({ ctx, config, store: messages }) : null
+  if (messages) t.after(() => messages.close())
   let state = 'STATE-V1', renderCount = 0
   const setup = async (agentCtx, agent) => {
-    await installChatSystem({ agentCtx, agent, config, store,
+    await installChatSystem({ agentCtx, agent, config, store, capacity,
       meta: { selfId: '10001', scope: 'private', peerId: '11001' },
       runtimeContext: () => { renderCount++; return state } })
   }
   async function attach(id = 'qq-native', resume = false, managed = true) {
-    const options = { agentOptions: { provider: 'mock', model: 'mock' }, ...(managed ? { setup } : {}) }
+    const options = { agentOptions: { provider: 'mock', model: 'mock', ...agentOptions }, ...(managed ? { setup } : {}) }
     const handle = resume ? await ctx.agents.resume({ resumeSessionId: sessionApi.SessionId(id), ...options })
       : await ctx.agents.create({ sessionId: sessionApi.SessionId(id), ...options })
     handles.push(handle)
@@ -76,8 +82,46 @@ async function harness(t, { root, respond, compact = false } = {}) {
     assert.deepEqual(errors, [])
   }
   t.after(async () => { for (const handle of handles.toReversed()) await handle.dispose(); await ctx.fiber.dispose() })
-  return { ctx, requests, errors, attach, send, setup, config, store, get renderCount() { return renderCount }, set state(value) { state = value } }
+  return { ctx, requests, errors, attach, send, setup, config, store, capacity, messages,
+    get renderCount() { return renderCount }, set state(value) { state = value } }
 }
+
+test('rc.2 的 128K 模型按显式 8K 输出预选消息，允许默认 64K 输出的压缩请求', async t => {
+  const h = await harness(t, { budget: true,
+    modelInfo: { defaultMaxTokens: 65536, context: { contextWindow: 131072 } },
+    agentOptions: { maxTokens: 8192 }, compact: { headroomTokens: 65536, maxTokens: undefined } })
+  const { agent } = await h.attach()
+  const meta = { selfId: '10001', scope: 'private', peerId: '11001' }
+  const record = { ...meta, owned: true, agent }
+  h.messages.put(meta, { id: '1', body: '本次消息', message: { text: '本次消息' }, source: {}, receivedAt: 1, decision: 'yes' })
+  const plan = await h.capacity.select(record, { runtimeContext: () => 'STATE-V1' }, h.messages, 1,
+    selected => selected.map(row => row.body).join('\n'))
+  assert.equal(plan.limit, 57344)
+  assert.equal(plan.selected.length, 1)
+  await h.send(agent, 'conversation '.repeat(500))
+  assert.equal(h.requests[0].maxTokens, 8192)
+  assert.ok(await h.ctx.compaction.compactNow(agent, new AbortController().signal))
+  assert.equal(h.requests.at(-1).purpose, 'compaction')
+  assert.equal(h.requests.at(-1).maxTokens, 65536)
+  assert.deepEqual(h.errors, [])
+  await h.send(agent)
+  assert.equal(h.requests.at(-1).maxTokens, 8192)
+})
+
+test('rc.2 实际请求链的容量检查：工具续调、动态状态和宿主额外输入均进入最终检查', async t => {
+  const h = await harness(t, { budget: true, respond: (_options, requests) => requests.length === 1 ? toolResponse : textResponse('ok') })
+  const { agent } = await h.attach()
+  h.ctx.tools.register(defineContentToolFixture({ name: 'change_state', description: 'test tool', parameters: {},
+    execute: async () => [{ type: 'text', text: 'ok' }] }))
+  await h.send(agent)
+  assert.equal(h.requests.length, 2)
+  assert.match(JSON.stringify(h.requests.at(-1)), /STATE-V1/)
+  agent.ctx.get('systemPrompt').context({ name: 'huge-other-plugin', order: 20, text: '超大宿主资料 '.repeat(400000) })
+  agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: '新的消息' }], source: { kind: 'user' } }))
+  await agent.whenIdle()
+  assert.equal(h.requests.length, 2, '超窗请求没有到达适配器')
+  assert.ok(h.errors.some(error => error.message.includes('输入容量检查失败')))
+})
 
 test('未修改的 rc.2：最新状态、重复安装与清理幂等、普通 agent 隔离', async t => {
   const h = await harness(t), { agent } = await h.attach()

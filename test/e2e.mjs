@@ -36,6 +36,7 @@ async function waitFor(fn, { timeout = 5000, interval = 50, what = '条件' } = 
 
 /** 一个最小的假宿主：提供 agents 服务和事件总线。 */
 function createFakeCtx() {
+  const instanceHome = mkdtempSync(join(E2E_HOME, 'instance-'))
   const handlers = new Map()
   const created = []
   const agents = {
@@ -48,9 +49,12 @@ function createFakeCtx() {
       let idle = Promise.resolve()
       const agent = {
         id: sessionId, ctx: agentCtx,
+        model: { current: () => ({ provider: 'mock', model: 'mock-model' }) },
         session: { id: sessionId, header: { id: sessionId }, events: [],
           append(type, data, surface) { this.events.push({ type, data, seq: this.events.length, ...surface }) },
           snapshotEvents() { return [...this.events] },
+          deriveMessages() { return this.events.filter(event => ['user/message', 'assistant/message'].includes(event.type))
+            .map(event => ({ role: event.type.split('/')[0], ...(event.data.message ?? event.data) })) },
           requestHeader() { return this.events.findLast(event => event.type === 'request/header')?.data.header },
         },
         system: '',
@@ -59,8 +63,13 @@ function createFakeCtx() {
         followup(message) {
           this.received.push(message)
           idle = idle.then(async () => {
+            this.session.append('user/message', message)
             this.system = renderPrompt(await agentCtx.get('systemPrompt').assemble(assembleContextFor(this)))
+            const options = { ...this.model.current(), sessionId, system: this.system, messages: this.session.deriveMessages(), tools: [] }
+            const chain = [...handlers.get('llm/stream') ?? []].reduceRight((next, fn) => () => fn(options, next), async function* () {})
+            for await (const _ of chain()) {}
             this.session.events.push({ type: 'request/header', seq: this.session.events.length, data: { header: { system: this.system } } })
+            this.session.append('turn/end', { reason: { kind: 'completed' } })
           })
         },
         inject(message) {
@@ -79,6 +88,8 @@ function createFakeCtx() {
       async register(definition) {
         return { readerFor: session => () => session.events.reduce((state, event) => definition.apply(state, event), definition.init(session.header)) }
       },
+    } : name === 'dshHomePath' ? leaf => join(instanceHome, leaf) : name === 'llm' ? {
+      prepareCall: async config => ({ config: { maxTokens: 8192, ...config }, context: { contextWindow: 1000000 } }),
     } : undefined,
     logger: { info() {}, warn() {}, error() {}, debug() {} },
     on(name, fn) {
@@ -87,6 +98,10 @@ function createFakeCtx() {
       return () => handlers.get(name)?.delete(fn)
     },
     emit(name, ...args) {
+      if (name === 'session/event' && args[1].seq === undefined) {
+        args[1].seq = args[0].events.length
+        args[0].events.push(args[1])
+      }
       return Promise.all([...handlers.get(name) ?? []].map((fn) => fn(...args)))
     },
   }
@@ -139,7 +154,7 @@ assert.match(privateAgent.system, /【聊天与工具】/, 'system 应该带内�
 assert.doesNotMatch(textOf(privateAgent.received[0]), /你叫小满|【聊天与工具】/)
 assert.match(
   textOf(privateAgent.received[0]),
-  /\[现在是 \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）\]/,
+  /\[现在是 \d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（(凌晨|早上|上午|中午|下午|傍晚|晚上|深夜)）；/,
   '私聊正文应该带一行「现在是 …」的人话时间',
 )
 console.log('✓ 私聊入站 → agent.followup')
@@ -308,8 +323,7 @@ console.log('✓ assistant/message → send_group_msg（未泄漏 CQ 码）')
 }
 console.log('✓ 敏感内容检查：路径正常发送，凭据原文被阻止并提示')
 
-// 自己发出去的话要回写进群历史，并标成「你（昵称）」——
-// 不然它下一轮看不见自己说过什么，会把别人的话认领成自己的。
+// 自己的回复已在宿主 assistant 历史，不能再以“最近历史”重复补入新消息。
 mock.emitEvent({
   post_type: 'message',
   message_type: 'group',
@@ -325,12 +339,9 @@ mock.emitEvent({
   sender: { user_id: 1, nickname: '路人' },
 })
 await waitFor(() => groupAgent.received.length === 3, { what: '第二轮群聊入站' })
-assert.match(
-  textOf(groupAgent.received[2]),
-  /⟨你（[^）]*） \d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}（[^）]*）⟩ 在的在的/,
-  '自己发过的话应该以「你（昵称）」写进群历史',
-)
-console.log('✓ 自己说的话进历史并标成「你」')
+assert.ok(groupAgent.session.deriveMessages().some(message => message.role === 'assistant' && textOf(message).includes('在的在的')))
+assert.doesNotMatch(textOf(groupAgent.received[2]), /在的在的/)
+console.log('✓ 自己说的话保留为 assistant 历史，不重复补入新用户消息')
 
 // —— 必须 @ 是硬限制：后续消息和引用只能作背景 ——
 const beforeOther = groupAgent.received.length
@@ -482,6 +493,7 @@ const config2 = Config({
   accessToken: TOKEN,
   privateMode: 'allowlist',
   privateAllow: ['11001'],
+  mergeWindowMs: 0,
   splitDelayMs: 0,
   replyDelayMeanMs: 0,
   splitDelayMeanMs: 0,

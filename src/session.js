@@ -285,7 +285,7 @@ export class SessionManager {
       try { this.memory.store.migrate(metaInfo) }
       catch (err) { this.logger.warn?.('记忆迁移未完成，原文件保留:', err.message) }
     }
-    const installPrompt = (agentCtx, agent) => installChatSystem({ agentCtx, agent, config: this.config, meta: metaInfo, store: this.systemPrompts,
+    const installPrompt = (agentCtx, agent) => installChatSystem({ agentCtx, agent, config: this.config, meta: metaInfo, store: this.systemPrompts, capacity: this.capacity,
       runtimeContext: this.memory ? () => this.runtimeContext(this.findByPeer(info.scope, info.peerId) ?? metaInfo) : null })
     const mountPreset = async agent => {
       if (!presets) {

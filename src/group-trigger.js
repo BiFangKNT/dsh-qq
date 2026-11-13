@@ -3,7 +3,7 @@ import { readPlainText } from './onebot/segment.js'
 
 export const retiredGroupSettings = ['groupWakeMs', 'groupWakeIdleMs', 'groupRepliesPerWindow',
   'groupReplyGapMs', 'groupWakeNameMention', 'groupWakeQuestion', 'groupWakeKeywords',
-  'groupWakeProbability', 'groupWakeNames']
+  'groupWakeProbability', 'groupWakeNames', 'historyLimit']
 
 /** 旧免 @ 名单只迁移一次；明确配置的逐群值优先。 */
 export function migrateGroupSettings(input) {

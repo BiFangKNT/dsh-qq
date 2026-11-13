@@ -6,14 +6,24 @@ import { join } from 'node:path'
 import { createAddressClassifier as createClassifier } from '../src/address-classifier.js'
 import { createMockAttachments } from './mock-attachments.mjs'
 import { createInbound } from '../src/inbound.js'
-import { keepBacklog, drainBacklog } from '../src/inbound.js'
 import { createMockEnvironment } from './mock-environment.mjs'
 import { waitFor, textOf } from './mock-dsh.mjs'
 import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { Context } from '@deepseek-ai/cordis'
 
 const logger = { warn() {} }
-const createAddressClassifier = options => createClassifier({ getAttachments: () => createMockAttachments(options.home), ...options })
+const createAddressClassifier = options => {
+  const gate = createClassifier({ getAttachments: () => createMockAttachments(options.home), ...options })
+  // 独立分类器测试中的交付回调模拟一次完整主轮；真实 inbound 自己保存进度。
+  const wrap = callback => async (range, meta) => {
+    const accepted = await callback(range, meta)
+    const remaining = gate.store.pending(meta, range.end)
+    if (accepted && remaining.length) gate.store.finish(gate.store.begin(meta, 'test-main', remaining), 'processed')
+    return accepted
+  }
+  return { ...gate, accept: (input, deliver, options) => gate.accept(input, wrap(deliver), options),
+    resume: (meta, deliver, options) => gate.resume(meta, wrap(deliver), options) }
+}
 const imageUrl = 'base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHHsAAAAASUVORK5CYII='
 async function directory(t) {
   const dir = await mkdtemp(join(tmpdir(), 'qq-classifier-'))
@@ -31,7 +41,7 @@ function model(...answers) {
     yield { type: 'finish', reason: { kind: 'stop' } }
   } }
 }
-const configOf = () => ({ addressClassifierEnabled: true, addressClassifierProvider: 'test', addressClassifierModel: 'judge' })
+const configOf = () => ({ addressClassifierEnabled: true, requireMention: false, addressClassifierProvider: 'test', addressClassifierModel: 'judge' })
 const meta = { selfId: '9', scope: 'group', peerId: '70001', label: '测试群' }
 const input = id => ({ id: String(id), meta, body: `正文${id}`, source: { user_id: 10001 }, message: { text: `消息${id}` } })
 
@@ -44,10 +54,15 @@ function inboundHarness(t, gate, extra = {}) {
     findByPeer: (scope, peerId) => records.get(`${scope}:${peerId}`),
     async obtain(meta) {
       const key = `${meta.scope}:${meta.peerId}`
+      const events = []
       if (!records.has(key)) records.set(key, { ...meta, sessionId: key, queue: Promise.resolve(),
         recent: [], history: [], initialContextDelivered: true, agent: {
-          session: { deriveMessages: () => [] },
-          followup: m => delivered.push(m), whenIdle: async () => {},
+          session: { deriveMessages: () => [], snapshotEvents: () => events },
+          followup: m => {
+            delivered.push(m)
+            events.push({ seq: events.length, type: 'user/message', data: m })
+            events.push({ seq: events.length, type: 'turn/end', data: { reason: { kind: 'completed' } } })
+          }, whenIdle: async () => {},
         } })
       return records.get(key)
     },
@@ -74,7 +89,7 @@ test('no/no/yes 完整交付，超过30条不截断，重复事件不重复分�
   const gate = createAddressClassifier({ home, config: configOf(), llm, logger })
   t.after(() => gate.stop())
   const deliveries = []
-  const deliver = async batch => { deliveries.push(batch); return true }
+  const deliver = async range => { deliveries.push(range.read()); return true }
   await Promise.all(Array.from({ length: 36 }, (_, i) => gate.accept(input(i), deliver)))
   await gate.accept(input(35), deliver)
   assert.equal(llm.calls.length, 36)
@@ -93,8 +108,7 @@ test('失败不是no；交付异常、重启和开关切换不丢待交付消息
   let gate = createAddressClassifier({ home, config, llm, logger })
   await gate.accept(input(1), async () => { throw new Error('不应交付') })
   await assert.rejects(gate.accept(input(2), async () => { throw new Error('主会话拒绝') }), /主会话拒绝/)
-  const files = await readdir(join(home, 'address-classifier'))
-  const saved = JSON.parse(await readFile(join(home, 'address-classifier', files.find(f => f.endsWith('.json'))), 'utf8'))
+  const saved = { pending: gate.pending(meta) }
   assert.equal(saved.pending[0].decision, null)
   assert.match(saved.pending[0].error, /网络错误/)
   gate.stop()
@@ -105,7 +119,7 @@ test('失败不是no；交付异常、重启和开关切换不丢待交付消息
   await gate.resume(meta, async () => { count++; return true })
   assert.equal(count, 0)
   config.addressClassifierEnabled = true
-  await gate.resume(meta, async batch => { count++; assert.equal(batch.length, 2); return true })
+  await gate.resume(meta, async range => { const batch = range.read(); count++; assert.equal(batch.length, 2); return true })
   assert.equal(count, 1)
   assert.equal(llm.calls.length, 2)
   assert.equal(gate.hasPending(), false)
@@ -116,7 +130,7 @@ test('不同会话独立，无法识别后重试，旧消息不会被另一会�
   const gate = createAddressClassifier({ home, config, llm, logger })
   t.after(() => gate.stop())
   await gate.accept(input(1), async () => { throw new Error('不应交付') })
-  await gate.accept({ ...input(2), meta: { ...meta, scope: 'private' } }, async batch => {
+  await gate.accept({ ...input(2), meta: { ...meta, scope: 'private' } }, async range => { const batch = range.read();
     assert.deepEqual(batch.map(p => p.id), ['2']); return true
   })
   await gate.accept(input(3), async () => { throw new Error('不应交付') })
@@ -130,7 +144,7 @@ test('严格结果直接采用；正则提取完整单词，忽略推理并拒�
   const gate = createAddressClassifier({ home, config: configOf(), llm, logger })
   t.after(() => gate.stop())
   const deliveries = []
-  const deliver = async batch => { deliveries.push(batch); return true }
+  const deliver = async range => { deliveries.push(range.read()); return true }
   await gate.accept(input(1), deliver)
   assert.equal(llm.calls.length, 1)
   assert.equal(deliveries.length, 0)
@@ -141,8 +155,7 @@ test('严格结果直接采用；正则提取完整单词，忽略推理并拒�
   await gate.accept(input(3), deliver)
   assert.equal(llm.calls.length, 4)
   assert.equal(deliveries.length, 1)
-  const files = await readdir(join(home, 'address-classifier'))
-  const saved = JSON.parse(await readFile(join(home, 'address-classifier', files.find(f => f.endsWith('.json'))), 'utf8'))
+  const saved = { pending: gate.pending(meta) }
   assert.equal(saved.pending[0].decision, 'no')
   assert.deepEqual(saved.pending[0].classification, { method: 'regex', attempts: 2 })
   assert.equal(llm.calls[2].messages.length, 1)
@@ -155,7 +168,7 @@ test('最多重试两次，第三次仍无法识别则yes，并记录可定位�
     logger: { warn: (...args) => warnings.push(args) } })
   t.after(() => gate.stop())
   let count = 0
-  await gate.accept(input(1), async batch => {
+  await gate.accept(input(1), async range => { const batch = range.read();
     count++
     assert.equal(batch[0].decision, 'yes')
     assert.deepEqual(batch[0].classification, { method: 'fallback', attempts: 3 })
@@ -169,8 +182,7 @@ test('最多重试两次，第三次仍无法识别则yes，并记录可定位�
     scope: meta.scope, peerId: meta.peerId, messageId: '1', provider: 'test', model: 'judge',
     attempts: 3, reason: 'unrecognized_response', decision: 'yes' })
   assert.doesNotMatch(JSON.stringify(warnings), /PRIVATE_CLASSIFIER_RESPONSE|CLASSIFIER_PRIVATE_REASONING/)
-  const files = await readdir(join(home, 'address-classifier'))
-  const saved = JSON.parse(await readFile(join(home, 'address-classifier', files.find(f => f.endsWith('.json'))), 'utf8'))
+  const saved = { pending: gate.pending(meta) }
   assert.deepEqual(saved.pending[0].classification, { method: 'fallback', attempts: 3 })
 })
 
@@ -327,11 +339,10 @@ test('重启保留分类图片引用，并实际附带主会话已有图片', as
   const request = llm.calls[0].messages[0]
   assert.deepEqual(request.content.filter(block => block.type === 'image').map(block => block.attachment), [ref, ref])
   assert.deepEqual(JSON.parse(textOf(request)).imageInputs, [
-    { source: 'mainContext', messageId: 'history-1', imageIndex: 0 },
+    { source: 'mainContext', messageId: 'history-1', contextIndex: 0, imageIndex: 0 },
     { source: 'pending', messageId: '1', imageIndex: 1 },
   ])
-  const files = await readdir(join(home, 'address-classifier'))
-  const persisted = await readFile(join(home, 'address-classifier', files[0]), 'utf8')
+  const persisted = JSON.stringify(restored.pending(meta))
   assert.ok(persisted.includes(ref.attachmentId))
   assert.equal(persisted.includes(imageUrl.slice('base64://'.length)), false)
 })
@@ -556,7 +567,7 @@ test('关闭功能不读取旧分类记录，坏记录不被覆盖或破坏正�
   const gate = createAddressClassifier({ home, config, logger: { warn: text => warnings.push(text) } })
   t.after(() => gate.stop())
   assert.deepEqual(gate.list(), [])
-  assert.equal(warnings.length, 0)
+  assert.equal(warnings.length, 1)
   config.addressClassifierEnabled = true
   assert.deepEqual(gate.list(), [])
   assert.match(warnings[0], /原文件保留/)
@@ -776,13 +787,12 @@ test('审批和问答快速通道保留同类机器人开关，群聊与私聊�
       await h.inbound(event(4, '回答'))
       assert.deepEqual(resolved, ['批准', '回答'])
       assert.equal(llm.calls.length, 0)
-      drainBacklog(peerId)
     }
   }
 })
 
 test('no 不修改主会话；正式轮不再交付旧便签', async t => {
-  const home = await directory(t), config = configOf(), llm = model('no')
+  const home = await directory(t), config = configOf(), llm = model('no', 'no')
   let swaps = 0, marked = 0
   const gate = createAddressClassifier({ home, config, llm, logger })
   const h = inboundHarness(t, gate, { config: { persona: '测试人设_首轮必须存在', requireMention: false, historyLimit: 5 },
@@ -791,7 +801,7 @@ test('no 不修改主会话；正式轮不再交付旧便签', async t => {
   record.initialContextDelivered = false
   record.swapSeed = ['保留交接内容']
   h.manager.markInitialContextDelivered = r => { marked++; r.initialContextDelivered = true }
-  keepBacklog(meta.peerId, '此前没有回应的群背景')
+  await gate.accept({ ...input(800), body: '此前没有回应的群背景' }, async () => false)
   const previous = structuredClone({ recent: record.recent, history: record.history,
     swapSeed: record.swapSeed, lastSenderId: record.lastSenderId })
   await h.inbound(h.event(801))
@@ -800,7 +810,7 @@ test('no 不修改主会话；正式轮不再交付旧便签', async t => {
   assert.equal(swaps, 0)
   assert.deepEqual({ recent: record.recent, history: record.history,
     swapSeed: record.swapSeed, lastSenderId: record.lastSenderId }, previous)
-  assert.match(JSON.stringify(llm.calls[0].messages), /此前没有回应的群背景/)
+  assert.match(JSON.stringify(llm.calls[1].messages), /此前没有回应的群背景/)
   h.config.addressClassifierEnabled = false
   await h.inbound(h.event(802, [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '正式处理' } }]))
   await record.queue

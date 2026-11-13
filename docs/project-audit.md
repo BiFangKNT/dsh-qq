@@ -55,7 +55,7 @@
 | QQ 互动与发送 | 戳一戳、表态、点赞、图片、内置与商城表情、文件、撤回、引用、跨目标发送 | 注册为模型工具，不是逐项页面开关；需核对具体协议端支持 | [tools](../src/tools.js) |
 | 表情收藏 | 保存文件副本和收藏清单；按配置限制使用频率 | 部分频率项仅文件覆盖；收藏目录仅 profile | [faces](../src/faces.js) |
 | 语音发送 | Windows SAPI 合成后发送；受操作系统和可用声音限制 | 页面仅配声音名，模型使用 `qq_send_voice` | [voice](../src/voice.js)、[tools-extra](../src/tools-extra.js) |
-| 私聊历史查询 | 授权账号可读正文；其他账号需既有 `affinity.json` 达阈值，仅查时间线；查询他人另受限制 | `qq_private_history`；没有页面维护该好感文件的入口 | [private-history](../src/private-history.js) |
+| 聊天记录查询（已统一） | 默认查询当前获准聊天的收发记录；跨聊天仅授权账号私聊可用，目标也须获准；不再读取好感文件授权 | `qq_history`；旧查询工具退出，旧流水一次性导入 SQLite | [message-tools](../src/message-tools.js)、[history-import](../src/history-import.js) |
 | 空间发布 | 仅授权账号私聊；每日最多两次尝试，未知结果不隐式重发。工具说明要求先确认，发布函数没有独立确认票据校验 | `qq_qzone_send`，无单独页面开关 | [tools-extra](../src/tools-extra.js)、[qzone](../src/qzone.js) |
 | 梗查询 | 查询本地梗数据库；未配库时工具仍存在，返回未配置 | `memeDb` 在 profile，或环境变量 `DSH_QQ_MEME_DB` | [meme](../src/meme.js)、[tools](../src/tools.js) |
 | 同人角色资料 | `aiGirls` 默认 true，将特定角色图鉴放入提示词；不是从聊天自动学来的知识 | 只在 profile 配置；增加提示词内容 | [gijinka](../src/gijinka.js)、[prompts](../src/prompts.js) |
@@ -150,11 +150,11 @@
 
 - `ownerIds` 不是全局管理权限闸门；聊天命令不检查它，部分工具各自检查。当前“谁能做什么”没有统一说明。
 - `qq_memo` 配置后直接由插件进程读写共享目录，执行函数没有 QQ 会话或 owner 校验；路径检查不等于调用者授权。它与默认逐聊天目录隔离是两个不同边界。
-- `qq_group_history` 的执行函数读取公共会话根下的群流水，没有对应的 owner 校验；`qq_private_history` 则有单独的 owner/既有好感检查。二者不能统一描述为“历史都隔离”。
+- 原 `qq_group_history` 无 owner 校验，原 `qq_private_history` 单独读取好感文件。现已统一为 `qq_history`：默认仅当前聊天，跨聊天需要授权账号私聊和目标访问许可，查询不再与好感度耦合。
 - 普通正文、互动工具、文件、跨目标发送、空间发布分别执行检查；当前阅读静默遗漏已经说明，不能以一个总开关的描述代替逐出口核对。
 - 以上先记录事实。哪些应该放开、哪些需要授权，要按用途决定；本轮没有擅自新增限制。
 
-主要依据：[tools](../src/tools.js)、[tools-extra](../src/tools-extra.js)、[private-history](../src/private-history.js)、[inbound](../src/inbound.js)。共享文件与群历史来自上游；私聊历史、空间发布来自 fork。涉及混合代码时分别说明。
+主要依据：[tools](../src/tools.js)、[tools-extra](../src/tools-extra.js)、[message-tools](../src/message-tools.js)、[inbound](../src/inbound.js)。原共享文件与群历史来自上游；原私聊历史、空间发布及现统一查询来自 fork。涉及混合代码时分别说明。
 
 ## 旧代码、规划和测试要分开
 
@@ -170,7 +170,7 @@
 ### 尚未完成的计划
 
 - 群聊完整消息流、提交前容量检查、默认左截断和可选分批摘要，见 [group-message-design](group-message-design.md)，第三、四批尚未落地。当前不能宣传成从会话起完整保留的 IM 消息流。
-- 六情、六欲、动态好感、心愿、不满、求助等后续情绪功能尚未实现，见 [emotion-system-development](emotion-system-development.md)。当前旧 `affinity.json` 查询条件不等于动态好感系统已实现。
+- 六情、六欲、动态好感、心愿、不满、求助等后续情绪功能尚未实现，见 [emotion-system-development](emotion-system-development.md)。旧 `affinity.json` 查询条件已移除，保留该文件不等于动态好感系统已实现。
 - 这些规划是否沿用当前作息和主动逻辑，需要本轮盘点后重新核对具体接入口；不应让已有旧行为自动成为新需求。
 
 ### 文档和测试也有旧行为残留

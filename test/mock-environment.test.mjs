@@ -121,13 +121,40 @@ test('问答和审批走真实插件通道，可从模拟 QQ 回复', async t =>
 test('空间发布和私聊历史工具走真实实现，NapCat 记录可见范围与日限', async t => {
   const env = await setup(t)
   const post = { type: 'tool', name: 'qq_qzone_send', args: { text: '模拟空间说说', images: [`${env.napcat.mediaUrl}/fixture.png`], privacy: 'private' } }
-  env.host.queueTurn([post, { type: 'tool', name: 'qq_private_history', args: {} }])
+  env.host.queueTurn([post, { type: 'tool', name: 'qq_history', args: {} }])
   env.emitMessage({ text: '测试发布和流水' })
   await waitFor(() => env.napcat.posts.length === 1)
   const agent = [...env.host.agents.values()][0]; await idle(env)
   assert.equal(env.napcat.posts[0].ugc_right, 64)
   assert.equal(agent.results[1].result.ok, true)
   assert.equal(JSON.parse(await readFile(join(env.root, 'dsh-qq', 'qzone-state.json'), 'utf8')).count, 1)
+})
+
+test('统一历史工具在完整消息链查询收发正文、工具跨目标发送，关闭 Markdown 流水仍有效', async t => {
+  const env = await setup(t, { config: { chatLog: false, ownerIds: ['11001'] } })
+  const attachment = join(env.root, 'history-fixture.txt')
+  await writeFile(attachment, '测试文件内容')
+  env.emitMessage({ text: '请记住这条测试原文', steps: [{ type: 'text', text: '这是机器人测试回复' }] })
+  await waitFor(() => sent(env).length === 1); await idle(env)
+  env.host.queueTurn([
+    { type: 'tool', name: 'qq_send', args: { to: 'group:70001', text: '发往目标群的测试消息' } },
+    { type: 'tool', name: 'qq_send_file', args: { file: attachment, name: '测试附件.txt' } },
+    { type: 'tool', name: 'qq_history', args: {} },
+    { type: 'tool', name: 'qq_history', args: { chat: 'group:70001', include_status: true } },
+  ])
+  env.emitMessage({ text: '现在查询记录' })
+  const agent = [...env.host.agents.values()][0]
+  await waitFor(() => agent.results.length === 4); await idle(env)
+  const current = agent.results[2].result.messages
+  assert.ok(current.some(row => row.direction === 'incoming' && row.text.includes('请记住这条测试原文')))
+  assert.ok(current.some(row => row.direction === 'outgoing' && row.text === '这是机器人测试回复' && row.confirmed))
+  assert.ok(current.some(row => row.direction === 'outgoing' && row.text === '[文件 测试附件.txt]' && row.confirmed))
+  assert.ok(current.every(row => row.text !== '发往目标群的测试消息'))
+  const target = agent.results[3].result.messages
+  assert.equal(target.length, 1)
+  assert.equal(target[0].text, '发往目标群的测试消息')
+  assert.equal(target[0].status, 'sent')
+  for (const old of ['qq_messages', 'qq_group_history', 'qq_private_history']) assert.equal(env.host.tools.has(old), false)
 })
 
 test('重载恢复会话和预设，后续一条消息只处理一次；上下文超限保留会话', async t => {

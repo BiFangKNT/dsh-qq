@@ -49,15 +49,15 @@ export function createSystemPromptStore(home) {
 /** 保存整个已渲染的 system；动态 context 和工具注册仍交给宿主。 */
 const installations = new WeakMap()
 
-export async function installChatSystem({ agentCtx, agent, config, meta, store, runtimeContext = null }) {
+export async function installChatSystem({ agentCtx, agent, config, meta, store, runtimeContext = null, capacity = null }) {
   if (installations.has(agent)) return installations.get(agent)
-  const pending = install({ agentCtx, agent, config, meta, store, runtimeContext })
+  const pending = install({ agentCtx, agent, config, meta, store, runtimeContext, capacity })
   installations.set(agent, pending)
   pending.catch(() => installations.delete(agent))
   return pending
 }
 
-async function install({ agentCtx, agent, config, meta, store, runtimeContext }) {
+async function install({ agentCtx, agent, config, meta, store, runtimeContext, capacity }) {
   const view = await prepareSessionView(agentCtx, agent, config)
   const prompt = agentCtx.get('systemPrompt')
   if (!prompt?.section || !prompt?.context || !prompt?.variable) {
@@ -66,6 +66,7 @@ async function install({ agentCtx, agent, config, meta, store, runtimeContext })
   let creationRules = chatSystemRules(config, meta)
   const disposers = []
   try {
+    if (capacity) disposers.push(capacity.install(agentCtx, agent))
     disposers.push(prompt.variable('qq_chat_rules', () => chatSystemRules(config, meta)))
     disposers.push(prompt.section({ name: 'dsh-qq:rules', order: 90, text: '{{qq_chat_rules}}' }))
     disposers.push(prompt.section({ name: 'dsh-qq:locked-system', order: 1000,

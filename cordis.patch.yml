@@ -33,7 +33,7 @@
         directPrompt: ''
         groupPrompt: ''
         memberLabels: {}
-        historyLimit: 20
+        contextTokenizerFamily: v41
 
         # ── 触发 ──
         addressClassifierEnabled: false
