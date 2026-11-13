@@ -79,7 +79,7 @@ export const ConfigSchema = Schema.object({
     .description('门口来信来源的显示名称；不代表已验证的发件人身份'),
   isolateByPeer: Schema.boolean()
     .default(true)
-    .description('每个私聊/每个群各自一个工作目录与记忆区（互不可见，也不碰宿主的私人记忆区）'),
+    .description('每个私聊、群聊使用独立工作目录；关闭后共用宿主工作目录。统一记忆另按聊天身份隔离。修改后重启运行 QQ 的宿主'),
   memoryRoot: Schema.string()
     .default('')
     .description(
@@ -274,13 +274,13 @@ export const ConfigSchema = Schema.object({
     .description('是否把工具调用结果也发到 QQ（默认关闭，只发文字回复）'),
   splitDelayMs: Schema.number()
     .default(400)
-    .description('分条发送之间的间隔，单位毫秒（splitDelayMeanMs > 0 时改用随机间隔，这项当兜底）'),
+    .description('分条固定间隔，单位毫秒；仅在 splitDelayMeanMs 为 0 时使用'),
   replyDelayMeanMs: Schema.number()
     .default(500)
     .description('收到消息后隔多久才开口，单位毫秒、指数分布均值（0 = 立刻回）。真人不会在同一毫秒回话；同一轮连发不重复等，隔 20 秒以上才算新的一轮'),
   splitDelayMeanMs: Schema.number()
     .default(500)
-    .description('分条发送之间的间隔均值，单位毫秒、指数分布（0 = 用 splitDelayMs 的固定值）。真人是一条一条打的，齐刷刷吐出来不像人'),
+    .description('分条随机间隔均值，单位毫秒；0 表示使用 splitDelayMs 的固定间隔'),
   rateLimitPerMin: Schema.number()
     .default(12)
     .description('每个会话每分钟最多发几条（0 = 关闭）。QQ 对高频回复很敏感，被限流甚至被封往往不是因为说了什么，而是因为回得太多'),

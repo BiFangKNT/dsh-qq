@@ -27,6 +27,8 @@ import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
 import {
   applyOverrides,
+  captureBaseConfig,
+  settingsEffects,
   ensureSettingsFile,
   homeDirOf,
   installSettingsApi,
@@ -92,6 +94,7 @@ function makeLogger(ctx, config) {
     }
   }
   const wrap = (level) => (fn) => (...args) => {
+    if (level === 'debug' && !config?.debug) return
     fileLog(level, args)
     return typeof fn === 'function' ? fn(prefix, ...args) : undefined
   }
@@ -99,7 +102,7 @@ function makeLogger(ctx, config) {
     info: wrap('info')(base.info?.bind(base)),
     warn: wrap('warn')(base.warn?.bind(base)),
     error: wrap('error')(base.error?.bind(base)),
-    debug: config?.debug ? wrap('debug')((base.debug ?? base.info)?.bind(base)) : () => {},
+    debug: wrap('debug')((base.debug ?? base.info)?.bind(base)),
   }
 }
 
@@ -128,6 +131,7 @@ function safeJson(v) {
  * settings.json 时 watch 会直接报错），而且跨进程写盘在 Windows 上事件不可靠。
  */
 export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef = null, onReload = null) {
+  captureBaseConfig(config)
   let file = ''
   try {
     file = settingsFileOf(ctx, logger)
@@ -144,7 +148,7 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
 
   const reload = () => {
     try {
-      const next = loadOverrides(ctx, logger)
+      const next = loadOverrides(ctx, logger, { strict: true })
       const applied = applyOverrides(config, next, logger)
       if (overridesRef?.current) {
         for (const key of Object.keys(overridesRef.current)) delete overridesRef.current[key]
@@ -162,11 +166,11 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
         }
       }
       onReload?.()
-      logger.info(
-        applied.length > 0
-          ? `settings.json 变了，已就地应用: ${applied.join(', ')}（不用重启）`
-          : 'settings.json 变了，但没有可覆盖的键',
-      )
+      const effects = settingsEffects(applied)
+      logger.info(`settings.json 已重新加载${applied.length ? `: ${applied.join(', ')}` : '，配置未变'}`)
+      if (effects.reconnect.length) logger.info(`连接设置变更，重连后生效: ${effects.reconnect.join(', ')}`)
+      if (effects.restart.length) logger.info(`以下设置需重启运行 QQ 的宿主: ${effects.restart.join(', ')}`)
+      if (effects.newSession.length) logger.info('Agent 工具预设将在新会话生效')
 
       // wsUrl 是唯一「填上之后必须立刻接上」的键：之前没配就没有 client 在连，
       // 这里得把它拉起来。已经连着同一个地址时不动，免得把好好的连接打断。
@@ -175,6 +179,7 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
         const want = String(config.wsUrl ?? '').trim()
         if (want && !client.connected && client.url !== want) {
           client.url = want
+          client.token = config.accessToken
           client.start()
           logger.info(`wsUrl 改成了 ${want}，开始连接 NapCat`)
         }
@@ -186,9 +191,9 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
 
   try {
     watchFile(file, { interval: 800 }, (cur) => {
-      if (!cur || !cur.mtimeMs) return
-      if (cur.mtimeMs === lastMtimeMs) return
-      lastMtimeMs = cur.mtimeMs
+      const mtimeMs = cur?.mtimeMs ?? 0
+      if (mtimeMs === lastMtimeMs) return
+      lastMtimeMs = mtimeMs
       reload()
     })
   } catch (err) {
@@ -215,9 +220,8 @@ export function watchSettingsFile(ctx, config, overridesRef, personaRef, logger,
  * 私聊 / 群聊各对应一个持久 Agent 会话，消息进来 followup，回复走 session/event 出去。
  */
 export function apply(ctx, config) {
-  // ⭐ 设置页存下来的覆盖**先于**其它一切生效：logger 的 debug 开关也吃这一层。
-  //    这样「在设置里改人设 / 改记忆区路径」不用去碰 profile 的 cordis.patch.yml。
-  const savedOverrides = migrateIdentityOverrides(ctx, config, loadOverrides(ctx))
+  // 先应用文件覆盖，再初始化日志、会话和连接；applyOverrides 保留 profile 基础值。
+  const savedOverrides = migrateIdentityOverrides(ctx, config, loadOverrides(ctx, ctx?.logger ?? console))
   const appliedOverrides = applyOverrides(config, savedOverrides)
   const logger = makeLogger(ctx, config)
   if (appliedOverrides.length > 0) logger.info(`已应用设置页覆盖: ${appliedOverrides.join(', ')}`)

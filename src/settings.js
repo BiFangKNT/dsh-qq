@@ -21,6 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, statSync, readdirSy
 import { join, resolve, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { createServer } from 'node:http'
+import { isDeepStrictEqual } from 'node:util'
 import { migrateGroupSettings, retiredGroupSettings } from './group-trigger.js'
 import { migrateOwnerLabel } from './identity.js'
 
@@ -86,6 +87,7 @@ export const OVERRIDABLE = [
   'textChunkLimit',
   'showToolResults',
   'splitDelayMs',
+  'splitDelayMeanMs',
   'streamReply',
   'streamMaxChunks',
   // 表情包
@@ -169,7 +171,7 @@ export function ensureSettingsFile(ctx, logger) {
         '  "accessToken": "你自己的 token",\n' +
         '  "selfId": "机器人 QQ 号",\n' +
         '  "privateAllow": ["你的QQ号"]\n' +
-        '改完保存，约 800ms 自动生效，不用重启宿主。\n' +
+        '保存后约 800ms 重新加载。连接地址和凭证需重连；目录与服务等初始化设置需重启运行 QQ 的宿主；固定提示词需按设置页选择同步方式。\n' +
         '⚠ privateMode 默认是 allowlist（只有白名单里的人私聊才会被回应），\n' +
         '  privateAllow 空着就谁都不理——先把自己的号填进上面那行，或者把\n' +
         '  "privateMode": "open" 也写上（只建议在自己机器上、谁都够不着的时候用）。',
@@ -183,15 +185,17 @@ export function ensureSettingsFile(ctx, logger) {
   }
 }
 
-/** 读覆盖表；坏文件当空的，不让一个坏 JSON 把插件拖住。 */
-export function loadOverrides(ctx, logger) {
+/** 启动时坏文件仅使用基础配置；运行中用 strict 拒绝更新，保留上次有效配置。 */
+export function loadOverrides(ctx, logger, { strict = false } = {}) {
   const file = settingsFileOf(ctx, logger)
   try {
     if (!existsSync(file)) return {}
     const raw = JSON.parse(readFileSync(file, 'utf8'))
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('设置必须是 JSON 对象')
     return sanitizeOverrides(raw, logger)
   } catch (err) {
-    logger?.warn?.(`读 ${file} 失败，按没有覆盖处理:`, err?.message ?? err)
+    if (strict) throw err
+    logger?.warn?.(`读 ${file} 失败，本次启动仅使用基础配置:`, err?.message ?? err)
     return {}
   }
 }
@@ -219,9 +223,62 @@ export function sanitizeOverrides(input, logger) {
     if (value === null) continue
     out[key] = value
   }
+  validateOverrides(out)
   const dropped = Object.keys(input).filter((k) => !OVERRIDABLE.includes(k))
   if (dropped.length > 0) logger?.debug?.(`设置里有不认识的键，忽略: ${dropped.join(', ')}`)
   return out
+}
+
+function validateOverrides(patch) {
+  if (patch.memberLabels != null && (typeof patch.memberLabels !== 'object' || Array.isArray(patch.memberLabels) ||
+    Object.entries(patch.memberLabels).some(([id, label]) => !/^\d+$/.test(id) || typeof label !== 'string' || label.length > 80 || /[\r\n]/.test(label)))) {
+    throw new Error('成员称呼必须是 QQ 号到单行称呼的对象，称呼最多 80 字；用空对象清空')
+  }
+  if (patch.acceptedDshVersions != null && (typeof patch.acceptedDshVersions !== 'object' || Array.isArray(patch.acceptedDshVersions) ||
+    Object.values(patch.acceptedDshVersions).some(value => typeof value !== 'string'))) {
+    throw new Error('acceptedDshVersions 必须是包名到版本号的对象')
+  }
+
+  if (patch.addressClassifierEnabled != null && typeof patch.addressClassifierEnabled !== 'boolean') {
+    throw new Error('addressClassifierEnabled 必须为布尔值')
+  }
+  if (patch.requireMention != null && typeof patch.requireMention !== 'boolean') {
+    throw new Error('requireMention 必须为布尔值')
+  }
+  if (patch.groupMentionOverrides != null && (typeof patch.groupMentionOverrides !== 'object' || Array.isArray(patch.groupMentionOverrides) ||
+    Object.entries(patch.groupMentionOverrides).some(([id, value]) => !/^\d+$/.test(id) || typeof value !== 'boolean'))) {
+    throw new Error('按群覆盖必须是群号到布尔值的对象')
+  }
+  if (patch.groupMessageIntervalMs != null && (!Number.isFinite(patch.groupMessageIntervalMs) || patch.groupMessageIntervalMs < 1)) {
+    throw new Error('普通群聊处理间隔必须为正数')
+  }
+  if (patch.groupTriggerWords != null && (!Array.isArray(patch.groupTriggerWords) || patch.groupTriggerWords.some(word => typeof word !== 'string'))) {
+    throw new Error('触发词必须是字符串数组')
+  }
+  if (patch.addressClassifierTimeoutMs != null && (!Number.isFinite(patch.addressClassifierTimeoutMs) || patch.addressClassifierTimeoutMs <= 0)) {
+    throw new Error('addressClassifierTimeoutMs 必须为正数')
+  }
+  for (const key of ['memoryTimeoutMs', 'memoryTaskTtlHours']) {
+    if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] <= 0)) throw new Error(`${key} 必须为正数`)
+  }
+  for (const key of ['memoryProvider', 'memoryModel']) {
+    if (patch[key] != null && typeof patch[key] !== 'string') throw new Error(`${key} 必须为字符串`)
+  }
+  for (const key of ['addressClassifierProvider', 'addressClassifierModel', 'addressClassifierReasoningEffort']) {
+    if (patch[key] != null && typeof patch[key] !== 'string') {
+      throw new Error(`${key} 必须为字符串`)
+    }
+  }
+
+  if (patch.localApiPort != null && (!Number.isInteger(patch.localApiPort) || patch.localApiPort < 0 || patch.localApiPort > 65535)) {
+    throw new Error('localApiPort 必须为 0–65535 的整数')
+  }
+  if (patch.doorReplyPrefix != null && (typeof patch.doorReplyPrefix !== 'string' || !patch.doorReplyPrefix.trim() || /[\\/:*?"<>|\r\n]/.test(patch.doorReplyPrefix) || /^[._]/.test(patch.doorReplyPrefix.trim()))) {
+    throw new Error('doorReplyPrefix 必须是有效且非隐藏的文件名前缀')
+  }
+  for (const key of ['splitDelayMs', 'splitDelayMeanMs']) {
+    if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] < 0)) throw new Error(`${key} 必须为非负数`)
+  }
 }
 
 /** 写覆盖表（整份覆盖，不做增量合并 —— 调用方给的是最终形态）。 */
@@ -237,29 +294,48 @@ export function saveOverrides(ctx, overrides, logger) {
   }
 }
 
-/**
- * 把覆盖应用到运行中的 config 上（就地改，所有下游模块共享同一个对象）。
- * @returns {string[]} 真正写进去的键
- */
+const baseConfigs = new WeakMap()
+const copySetting = value => value === undefined ? undefined : JSON.parse(JSON.stringify(value))
+
+// 首次调用必须在应用文件覆盖、读取人设文件之前。
+export function captureBaseConfig(config) {
+  if (baseConfigs.has(config)) return
+  const migrated = migrateGroupSettings(config)
+  baseConfigs.set(config, Object.fromEntries(OVERRIDABLE
+    .filter(key => Object.hasOwn(migrated, key))
+    .map(key => [key, copySetting(migrated[key])])))
+}
+
+/** 基础配置加当前覆盖；就地更新共享对象，返回实际变化（含恢复、删除）的键。 */
 export function applyOverrides(config, overrides, logger) {
   const applied = []
   if (!config || !overrides) return applied
-  const base = migrateGroupSettings(config)
-  if (config.groupFree !== undefined) {
-    config.groupMentionOverrides = base.groupMentionOverrides
-    delete config.groupFree
-  }
+  captureBaseConfig(config)
+  const base = baseConfigs.get(config)
+  delete config.groupFree
   for (const key of retiredGroupSettings) delete config[key]
-  overrides = migrateGroupSettings(overrides)
-  for (const [key, value] of Object.entries(overrides)) {
+  const effective = { ...base, ...sanitizeOverrides(overrides, logger) }
+  for (const key of OVERRIDABLE) {
     try {
-      config[key] = value
+      const present = Object.hasOwn(effective, key)
+      if (Object.hasOwn(config, key) === present && isDeepStrictEqual(config[key], effective[key])) continue
+      if (present) config[key] = copySetting(effective[key])
+      else delete config[key]
       applied.push(key)
     } catch (err) {
       logger?.warn?.(`覆盖 ${key} 失败:`, err?.message ?? err)
     }
   }
   return applied
+}
+
+const restartKeys = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'imageCacheDir']
+export function settingsEffects(changed) {
+  return {
+    reconnect: changed.filter(key => ['wsUrl', 'accessToken'].includes(key)),
+    restart: changed.filter(key => restartKeys.includes(key)),
+    newSession: changed.filter(key => key === 'preset'),
+  }
 }
 
 /**
@@ -342,6 +418,7 @@ export function settingsInfo(ctx, logger) {
  * @returns {boolean} 是否挂上
  */
 export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef, promptSync, compatibility, getRuntime }) {
+  captureBaseConfig(config)
   // 自证：这次到底有没有把路由挂上（排查「设置页 404」时不用靠猜）
   const noteApiState = (ok, detail) => {
     try {
@@ -426,7 +503,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       try { compatibility.validate(body.versions) }
       catch (err) { return sendJson(res, 409, { ok: false, error: err.message }) }
       const accepted = { ...body.versions }
-      const saved = saveOverrides(ctx, { ...loadOverrides(ctx, logger), acceptedDshVersions: accepted }, logger)
+      const saved = saveOverrides(ctx, { ...loadOverrides(ctx, logger, { strict: true }), acceptedDshVersions: accepted }, logger)
       if (!saved.ok) return sendJson(res, 500, { ok: false, error: saved.error })
       config.acceptedDshVersions = accepted
       if (overridesRef) overridesRef.current = saved.overrides
@@ -454,61 +531,18 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
     if (req.method === 'POST' && path === '/api/dsh-qq/settings') {
       const body = await readJsonBody(req)
-      const rawPatch = body?.patch && typeof body.patch === 'object' ? body.patch : body
-      const patch = rawPatch && typeof rawPatch === 'object' ? migrateGroupSettings(rawPatch) : rawPatch
-      if (!patch || typeof patch !== 'object') return sendJson(res, 400, { ok: false, error: '要一个对象' })
+      const rawPatch = body && Object.hasOwn(body, 'patch') ? body.patch : body
+      if (!rawPatch || typeof rawPatch !== 'object' || Array.isArray(rawPatch)) return sendJson(res, 400, { ok: false, error: '要一个对象' })
+      const patch = migrateGroupSettings(rawPatch)
       if (Object.hasOwn(patch, 'ownerLabel')) {
         return sendJson(res, 400, { ok: false, error: 'ownerLabel 已停用，请使用 memberLabels 按账号设置称呼' })
       }
-      if (Object.hasOwn(patch, 'memberLabels') && (!patch.memberLabels || typeof patch.memberLabels !== 'object' || Array.isArray(patch.memberLabels) ||
-        Object.entries(patch.memberLabels).some(([id, label]) => !/^\d+$/.test(id) || typeof label !== 'string' || label.length > 80 || /[\r\n]/.test(label)))) {
-        return sendJson(res, 400, { ok: false, error: '成员称呼必须是 QQ 号到单行称呼的对象，称呼最多 80 字；用空对象清空' })
-      }
-      if (patch.acceptedDshVersions != null && (typeof patch.acceptedDshVersions !== 'object' || Array.isArray(patch.acceptedDshVersions) ||
-        Object.values(patch.acceptedDshVersions).some(value => typeof value !== 'string'))) {
-        return sendJson(res, 400, { ok: false, error: 'acceptedDshVersions 必须是包名到版本号的对象' })
-      }
-
-      if (patch.addressClassifierEnabled != null && typeof patch.addressClassifierEnabled !== 'boolean') {
-        return sendJson(res, 400, { ok: false, error: 'addressClassifierEnabled 必须为布尔值' })
-      }
-      if (patch.requireMention != null && typeof patch.requireMention !== 'boolean') {
-        return sendJson(res, 400, { ok: false, error: 'requireMention 必须为布尔值' })
-      }
-      if (patch.groupMentionOverrides != null && (typeof patch.groupMentionOverrides !== 'object' || Array.isArray(patch.groupMentionOverrides) ||
-        Object.entries(patch.groupMentionOverrides).some(([id, value]) => !/^\d+$/.test(id) || typeof value !== 'boolean'))) {
-        return sendJson(res, 400, { ok: false, error: '按群覆盖必须是群号到布尔值的对象' })
-      }
-      if (patch.groupMessageIntervalMs != null && (!Number.isFinite(patch.groupMessageIntervalMs) || patch.groupMessageIntervalMs < 1)) {
-        return sendJson(res, 400, { ok: false, error: '普通群聊处理间隔必须为正数' })
-      }
-      if (patch.groupTriggerWords != null && (!Array.isArray(patch.groupTriggerWords) || patch.groupTriggerWords.some(word => typeof word !== 'string'))) {
-        return sendJson(res, 400, { ok: false, error: '触发词必须是字符串数组' })
-      }
-      if (patch.addressClassifierTimeoutMs != null && (!Number.isFinite(patch.addressClassifierTimeoutMs) || patch.addressClassifierTimeoutMs <= 0)) {
-        return sendJson(res, 400, { ok: false, error: 'addressClassifierTimeoutMs 必须为正数' })
-      }
-      for (const key of ['memoryTimeoutMs', 'memoryTaskTtlHours']) {
-        if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] <= 0)) return sendJson(res, 400, { ok: false, error: `${key} 必须为正数` })
-      }
-      for (const key of ['memoryProvider', 'memoryModel']) {
-        if (patch[key] != null && typeof patch[key] !== 'string') return sendJson(res, 400, { ok: false, error: `${key} 必须为字符串` })
-      }
-      for (const key of ['addressClassifierProvider', 'addressClassifierModel', 'addressClassifierReasoningEffort']) {
-        if (patch[key] != null && typeof patch[key] !== 'string') {
-          return sendJson(res, 400, { ok: false, error: `${key} 必须为字符串` })
-        }
-      }
-
-      if (patch.localApiPort != null && (!Number.isInteger(patch.localApiPort) || patch.localApiPort < 0 || patch.localApiPort > 65535)) {
-        return sendJson(res, 400, { ok: false, error: 'localApiPort 必须为 0–65535 的整数' })
-      }
-      if (patch.doorReplyPrefix != null && (typeof patch.doorReplyPrefix !== 'string' || !patch.doorReplyPrefix.trim() || /[\\/:*?"<>|\r\n]/.test(patch.doorReplyPrefix) || /^[._]/.test(patch.doorReplyPrefix.trim()))) {
-        return sendJson(res, 400, { ok: false, error: 'doorReplyPrefix 必须是有效且非隐藏的文件名前缀' })
-      }
+      try { validateOverrides(patch) }
+      catch (err) { return sendJson(res, 400, { ok: false, error: err.message }) }
 
       // 值是 null = 清掉这条覆盖，回到 cordis 里的默认值
       const systemBefore = JSON.stringify(runtimeSync?.status().pending ?? [])
+      const valuesBefore = copySetting(snapshot())
       const next = { ...(overridesRef?.current ?? {}) }
       for (const [key, value] of Object.entries(patch)) {
         if (!OVERRIDABLE.includes(key)) continue
@@ -529,9 +563,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const personaNow = resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) })
       if (personaRef) personaRef.current = personaNow
 
-      const touched = (key) => Object.prototype.hasOwnProperty.call(patch, key)
-      const needReconnect = ['wsUrl', 'accessToken'].some(touched)
-      const needRestart = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'asrPython'].some(touched)
+      const effects = settingsEffects(OVERRIDABLE.filter(key => !isDeepStrictEqual(valuesBefore[key], config[key])))
       const promptStatus = (getRuntime?.().promptSync ?? runtimeSync)?.status() ?? { pending: [], operations: [] }
 
       return sendJson(res, 200, {
@@ -539,8 +571,9 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
         values: snapshot(),
         file: saved.file,
         persona: personaNow,
-        needReconnect,
-        needRestart,
+        needReconnect: effects.reconnect.length > 0,
+        needRestart: effects.restart.length > 0,
+        effects,
         promptSync: promptStatus,
         systemChanged: systemBefore !== JSON.stringify(promptStatus.pending),
       })

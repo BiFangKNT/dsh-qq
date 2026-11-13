@@ -36,7 +36,7 @@ export function createPromptSync({ ctx, home, config, manager, logger }) {
       if (stopped) throw new Error('插件已停止')
       if (record.sessionId !== item.sessionId) throw new Error('会话已切换，请刷新后重试')
       // 等待回复期间设置也可能变化，执行时读取最新文件。
-      applyOverrides(config, loadOverrides(ctx, logger), logger)
+      applyOverrides(config, loadOverrides(ctx, logger, { strict: true }), logger)
       resolvePersonaFile(config, logger, { home })
       if (operation.action === 'new') await manager.replaceSession(record)
       else if (operation.action === 'force') {

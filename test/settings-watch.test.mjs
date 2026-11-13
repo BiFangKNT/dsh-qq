@@ -44,12 +44,13 @@ assert.deepEqual(overridesRef.current, { groupMode: 'allowlist', groupAllow: ['1
 writeFileSync(file, JSON.stringify({ groupMode: 'open' }), 'utf8')
 await new Promise((r) => setTimeout(r, 2200))
 assert.equal(config.groupMode, 'open', '③ 第二次改动也要生效')
-assert.equal(config.groupAllow !== undefined, true, '③ 覆盖表清了但 config 里的旧值保留（applyOverrides 不清键）')
+assert.deepEqual(config.groupAllow, [], '③ 移除覆盖后恢复基础值')
 
 // ④ 坏 JSON 不该把插件弄挂，也不该把现有配置冲掉
 writeFileSync(file, '{ 这不是 JSON', 'utf8')
 await new Promise((r) => setTimeout(r, 2200))
-assert.equal(config.groupMode, 'open', '④ 坏文件应被当成「没有覆盖」，保留现值')
+assert.equal(config.groupMode, 'open', '④ 坏文件保留上次有效配置')
+assert.deepEqual(overridesRef.current, { groupMode: 'open' }, '④ 坏文件也不能清空已生效的覆盖表')
 assert.ok(logs.some(([lv]) => lv === 'warn'), '④ 坏文件应该有 warn 日志')
 
 // ⑤ 不认识的键要被过滤掉
@@ -58,8 +59,18 @@ await new Promise((r) => setTimeout(r, 2200))
 assert.equal(config.groupMode, 'allowlist', '⑤ 认识的键生效')
 assert.equal(config['不存在的键'], undefined, '⑤ 不认识的键不许写进 config')
 
+writeFileSync(file, JSON.stringify({ groupMessageIntervalMs: -1 }), 'utf8')
+await new Promise((r) => setTimeout(r, 2200))
+assert.equal(config.groupMode, 'allowlist', '⑥ 非法配置值也应保留上次有效配置')
+assert.deepEqual(overridesRef.current, { groupMode: 'allowlist' })
+
+rmSync(file)
+await new Promise((r) => setTimeout(r, 2200))
+assert.equal(config.groupMode, 'disabled', '⑦ 删除文件后恢复基础配置')
+assert.deepEqual(overridesRef.current, {})
+
 rmSync(home, { recursive: true, force: true })
-console.log('✓ settings.json 热加载 5/5 通过')
+console.log('✓ settings.json 热加载 7/7 通过')
 console.log(`  日志条数 ${logs.length}，最后一条：${logs.filter(([lv]) => lv === 'info').at(-1)?.[1] ?? '(无)'}`)
 // watchFile 的轮询定时器会一直吊着事件循环（真实宿主里就该这样），测试里手动收工
 process.exit(0)

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
-async function panel({ beforeSave } = {}) {
+async function panel({ beforeSave, saveResult = {} } = {}) {
   const pending = [{ sessionId: 'a', label: '测试私聊' }, { sessionId: 'b', label: '测试群' }]
   const status = { promptSync: { pending, operations: [] } }
   const values = { persona: '当前人设' }
@@ -35,7 +35,7 @@ async function panel({ beforeSave } = {}) {
         await beforeSave?.(body.patch)
         Object.assign(values, body.patch)
       }
-      result = { values: structuredClone(values), promptSync: status.promptSync, systemChanged: false }
+      result = { values: structuredClone(values), promptSync: status.promptSync, systemChanged: false, ...saveResult }
     }
     return { ok: true, json: async () => result }
   }
@@ -53,6 +53,22 @@ async function panel({ beforeSave } = {}) {
   return { render, calls, state, status }
 }
 const button = (tree, text) => tree.find(element => element.type === 'button' && element.children.includes(text))
+
+test('一次保存同时提示重连、重启与新会话，随机分条间隔可保存', async () => {
+  const h = await panel({ saveResult: { needReconnect: true, needRestart: true, effects: { newSession: ['preset'] } } })
+  const tree = h.render()
+  const label = tree.find(element => element.children.includes('分条随机间隔均值（毫秒）'))
+  const field = tree.slice(tree.indexOf(label)).find(element => element.type === 'input')
+  assert.ok(field)
+  field.props.onChange({ target: { value: '0' } })
+  field.props.onBlur({ target: { value: '0' } })
+  await new Promise(resolve => setImmediate(resolve))
+  const text = h.render().flatMap(element => element.children).filter(item => typeof item === 'string').join('\n')
+  assert.match(text, /连接设置需重连运行端/)
+  assert.match(text, /部分设置需重启运行 QQ 的宿主/)
+  assert.match(text, /工具预设在新会话生效/)
+  assert.deepEqual(h.calls.find(call => call.body?.patch).body.patch, { splitDelayMeanMs: 0 })
+})
 
 test('设置页显示四个选择，可选择会话；稍后同步保留待同步入口', async () => {
   const h = await panel()
