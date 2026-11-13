@@ -5,43 +5,38 @@ import { listOf } from './config.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { synthesizeVoice } from './voice.js'
 import { createQzonePublisher } from './qzone.js'
+import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
 
 /** 新工具只负责参数与会话适配，读记录、合成和发布各有独立边界。 */
-export function registerExtraTools(tools, { client, manager, config, home, needRecord, assertText, noteToolSent }) {
+export function registerExtraTools(tools, { client, manager, config, home, needRecord, assertText, noteToolSent, synthesize = synthesizeVoice }) {
   const publisher = createQzonePublisher({ client, home })
   tools.register({
     name: 'qq_send_voice',
-    description: '用 Windows SAPI 合成并发送一条语音。text 最多 500 字；to 可选 user:<QQ号> 或 group:<群号>，留空发到当前会话。',
+    description: '仅 Windows 可用：用本机 SAPI 合成并发送语音，其他平台无法使用当前实现。text 最多 500 字；to 可选 user:<QQ号> 或 group:<群号>，留空发到当前聊天。跨聊天发送仅授权账号私聊可用，当前聊天和目标均须获准。发送结果不确定时先检查目标聊天，不自动重发。',
     parameters: {
       type: 'object', properties: { text: { type: 'string' }, to: { type: 'string' } },
       required: ['text'], additionalProperties: false,
     },
     output: {
-      schema: { type: 'object', properties: { ok: { type: 'boolean' }, messageId: { type: 'integer' } }, required: ['ok'], additionalProperties: false },
-      render: (_args, value) => [{ type: 'text', text: value.ok ? '语音已发送' : '语音未发送' }],
+      schema: { type: 'object', properties: { ok: { type: 'boolean' }, messageId: { type: 'integer' }, reason: { type: 'string' } }, required: ['ok'], additionalProperties: false },
+      render: (_args, value) => [{ type: 'text', text: value.ok ? '语音已发送' : value.reason }],
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+      const target = resolveSendTarget(record, args?.to)
+      assertSendAccess(manager, config, record, target)
       const text = cleanOutboundText(args.text)
       await assertText(text, record, 'qq_send_voice')
-      let scope = record.scope
-      let peerId = record.peerId
-      if (args.to) {
-        const match = /^(user|group):(\d+)$/.exec(String(args.to).trim())
-        if (!match) throw new Error('to 格式应为 user:<QQ号> 或 group:<群号>')
-        scope = match[1] === 'group' ? 'group' : 'private'
-        peerId = match[2]
-      }
-      const audio = await synthesizeVoice(text, { voiceName: config.voiceName })
-      const result = await client.call(scope === 'group' ? 'send_group_msg' : 'send_private_msg', {
-        ...(scope === 'group' ? { group_id: Number(peerId) } : { user_id: Number(peerId) }),
+      assertSendAccess(manager, config, record, target)
+      const audio = await synthesize(text, { voiceName: config.voiceName })
+      assertSendAccess(manager, config, record, target)
+      const result = await client.call(target.scope === 'group' ? 'send_group_msg' : 'send_private_msg', {
+        ...(target.scope === 'group' ? { group_id: Number(target.peerId) } : { user_id: Number(target.peerId) }),
         message: [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }],
       })
-      const messageId = Number(result?.message_id ?? 0)
-      if (scope === record.scope && String(peerId) === String(record.peerId)) {
-        if (messageId) record.lastSentMessageId = messageId
-        noteToolSent(record, text)
-      }
+      const messageId = parseMessageId(result?.message_id ?? result?.data?.message_id)
+      if (messageId === null) return { ok: false, messageId: 0, reason: '回执缺少有效消息 ID，发送未确认。请先检查目标聊天，不自动重发。' }
+      noteToolSent(record, text, target, messageId)
       return { ok: true, messageId }
     },
   })

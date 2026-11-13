@@ -19,6 +19,7 @@ function pickSession(args) {
 }
 
 import { SILENT_MARKER } from './prompts.js'
+import { resolveSendTarget } from './tool-send.js'
 
 function sessionIdOf(session, raw) {
   const id =
@@ -775,7 +776,17 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
 
     if (type === 'tool/call') {
       const name = String(data.name ?? '')
-      if (SELF_SENDING_TOOLS.has(name)) selfSent.add(sessionId)
+      let sendsHere = SELF_SENDING_TOOLS.has(name)
+      if (sendsHere && ['qq_send', 'qq_send_voice'].includes(name) && data.arguments !== undefined) {
+        try {
+          const target = resolveSendTarget(record, JSON.parse(data.arguments)?.to)
+          sendsHere = target.scope === record.scope && target.peerId === String(record.peerId)
+        } catch {
+          // 参数无效的调用不能当成已向当前聊天发送。
+          sendsHere = false
+        }
+      }
+      if (sendsHere) selfSent.add(sessionId)
       if (config.showToolResults) {
         await emit(record, `🔧 调用 ${name || 'tool'}`)
       }

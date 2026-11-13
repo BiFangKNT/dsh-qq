@@ -157,6 +157,87 @@ test('统一历史工具在完整消息链查询收发正文、工具跨目标�
   for (const old of ['qq_messages', 'qq_group_history', 'qq_private_history']) assert.equal(env.host.tools.has(old), false)
 })
 
+test('跨聊天发送不启动目标 Agent、不覆盖发起聊天的撤回目标，并保留结果说明', async t => {
+  const env = await setup(t, { autoReply: false, config: { chatLog: false } })
+  env.emitMessage({ text: '发起私聊', steps: [{ type: 'text', text: '原先的私聊回复' }] })
+  await waitFor(() => sent(env).length === 1); await idle(env)
+  const agent = [...env.host.agents.values()][0]
+  const oldMessage = [...env.napcat.messages.values()].find(message => Array.isArray(message.message) &&
+    message.message.some(segment => segment.type === 'text' && segment.data.text === '原先的私聊回复'))
+  assert.ok(oldMessage)
+  env.emitMessage({ text: '请发送到另一个群', steps: [
+    { type: 'tool', name: 'qq_send', args: { to: 'group:70001', text: '目标群收到的内容' } },
+    { type: 'tool', name: 'qq_recall', args: {} },
+    { type: 'text', text: '已发送到目标群。' },
+  ] })
+  await waitFor(() => agent.received.length === 2); await idle(env)
+  assert.equal(env.host.agents.size, 1)
+  const recall = env.napcat.calls.find(call => call.action === 'delete_msg')
+  assert.equal(recall.params.message_id, oldMessage.message_id)
+  assert.equal(agent.results[1].result.ok, true)
+  assert.equal(sent(env).length, 3)
+  assert.equal(sent(env)[1].params.group_id, 70001)
+  assert.match(JSON.stringify(sent(env)[2]), /已发送到目标群/)
+})
+
+test('跨聊天发送失败记录在目标聊天，不记为已送达，不自动重试且可说明失败', async t => {
+  const env = await setup(t, { autoReply: false, config: { chatLog: false } })
+  env.napcat.failNext('send_group_msg', { wording: '模拟目标发送失败' })
+  env.emitMessage({ text: '测试发送失败', steps: [
+    { type: 'tool', name: 'qq_send', args: { to: 'group:70001', text: '未送达的目标内容' } },
+    { type: 'tool', name: 'qq_history', args: { chat: 'group:70001', include_status: true } },
+    { type: 'tool', name: 'qq_history', args: {} },
+    { type: 'text', text: '发送失败，请稍后检查。' },
+  ] })
+  await waitFor(() => [...env.host.agents.values()][0]?.results.length === 3); await idle(env)
+  const agent = [...env.host.agents.values()][0]
+  assert.equal(agent.results[0].result.ok, false)
+  const target = agent.results[1].result.messages
+  assert.equal(target.length, 1)
+  assert.equal(target[0].text, '未送达的目标内容')
+  assert.equal(target[0].confirmed, false)
+  assert.equal(target[0].status, 'rejected')
+  assert.ok(agent.results[2].result.messages.every(row => row.text !== '未送达的目标内容'))
+  assert.equal(env.napcat.calls.filter(call => call.action === 'send_group_msg').length, 1)
+  assert.match(JSON.stringify(sent(env).at(-1)), /发送失败/)
+})
+
+for (const messageId of [-71, 0]) {
+  test(`成功回执消息 ID 为 ${messageId} 时，工具和目标历史均确认发送`, async t => {
+    const env = await setup(t, { autoReply: false, config: { chatLog: false } })
+    env.napcat.failNext('send_group_msg', { afterApply: true, data: { message_id: messageId } })
+    env.emitMessage({ text: '测试有符号回执', steps: [
+      { type: 'tool', name: 'qq_send', args: { to: 'group:70001', text: '目标群的消息' } },
+      { type: 'tool', name: 'qq_history', args: { chat: 'group:70001', include_status: true } },
+    ] })
+    await waitFor(() => [...env.host.agents.values()][0]?.results.length === 2); await idle(env)
+    const agent = [...env.host.agents.values()][0]
+    assert.equal(agent.results[0].result.ok, true)
+    assert.equal(agent.results[0].result.messageId, messageId)
+    const message = agent.results[1].result.messages[0]
+    assert.equal(message.status, 'sent')
+    assert.equal(message.confirmed, true)
+    assert.equal(message.id, String(messageId))
+    assert.equal(env.napcat.calls.filter(call => call.action === 'send_group_msg').length, 1)
+  })
+}
+
+test('消息实际发出但回执缺少消息 ID 时，工具和历史均标为未确认，不重发', async t => {
+  const env = await setup(t, { autoReply: false, config: { chatLog: false } })
+  env.napcat.failNext('send_group_msg', { afterApply: true, data: {} })
+  env.emitMessage({ text: '测试异常回执', steps: [
+    { type: 'tool', name: 'qq_send', args: { to: 'group:70001', text: '回执缺失的目标消息' } },
+    { type: 'tool', name: 'qq_history', args: { chat: 'group:70001', include_status: true } },
+  ] })
+  await waitFor(() => [...env.host.agents.values()][0]?.results.length === 2); await idle(env)
+  const agent = [...env.host.agents.values()][0]
+  assert.equal(agent.results[0].result.ok, false)
+  assert.match(agent.results[0].result.reason, /未确认|不自动重发/)
+  assert.equal(agent.results[1].result.messages[0].status, 'uncertain')
+  assert.equal(agent.results[1].result.messages[0].confirmed, false)
+  assert.equal(env.napcat.calls.filter(call => call.action === 'send_group_msg').length, 1)
+})
+
 test('重载恢复会话和预设，后续一条消息只处理一次；上下文超限保留会话', async t => {
   const env = await setup(t)
   env.emitMessage({ text: '重载前' })

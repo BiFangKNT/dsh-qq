@@ -22,6 +22,7 @@ import { registerExtraTools } from './tools-extra.js'
 import { registerMemoryTool } from './memory-tools.js'
 import { registerMessageTool } from './message-tools.js'
 import { registerSharedFiles } from './shared-files.js'
+import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
 
 const POKE_DESC =
   '戳一戳当前对话里的对方（私聊戳好友，群聊戳那位发言的人）。用来提醒对方注意、' +
@@ -78,7 +79,7 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home, notifyBlocked }) {
+export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home, notifyBlocked, synthesize }) {
   const tools = ctx.get?.('tools')
   if (!tools?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
@@ -91,13 +92,19 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
    * 以前只有正文走 send() 才写流水、进 history，用 qq_send / qq_reply 说的话等于「发出去就没了」：
    * 翻聊天记录缺一句，下一轮她自己也不知道自己说过。这里补上，顺带兑现主动开口的额度。
    */
-  function noteToolSent(record, text) {
+  function noteToolSent(record, text, target = record, messageId = null) {
     const said = String(text ?? '').trim()
     if (!said) return
+    const destination = target.scope === record.scope && String(target.peerId) === String(record.peerId)
+      ? record : manager.findByPeer?.(target.scope, target.peerId)
+    // 尚无会话的目标已由 OneBot 出口记录到 SQLite，不为记账启动 Agent。
+    if (!destination) return
+    if (messageId !== null) destination.lastSentMessageId = messageId
     try {
-      wake?.noteProactiveDelivered?.(record)
-      noteSelfSaid?.(record, said)
-      manager.memory?.noteSent(record, said)
+      wake?.noteOutbound?.(destination)
+      if (destination === record) wake?.noteProactiveDelivered?.(destination)
+      noteSelfSaid?.(destination, said)
+      manager.memory?.noteSent(destination, said, messageId)
     } catch (err) {
       logger?.debug?.(`工具外发记账失败：${err?.message ?? err}`)
     }
@@ -118,9 +125,9 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
   tools.register({
     name: 'qq_meme',
     description:
-      '查一个网络梗 / 黑话 / 缩写的出处和用法。手边有一份 6668 条的梗词库快照（cnmeme.wiki，2026-10-26 建库），毫秒级。' +
-      '看到不认识的词先查一次，别硬猜、别编出处；查到之后**先接梗、别科普**——照着「怎么用」随口用一句，只有对方明确问「这是什么梗」才讲一两句。' +
-      '⚠️ 它只收网上的通用梗：群里的自造说法（「已取餐」这类）查不到，那些用 qq_memory 记录已确认词义。查不到就说不认识。',
+      '查询用户配置的本地梗词库，查找词义、用法和出处；具体收录内容与数量取决于所配置的数据库。' +
+      '需要配置 memeDb 或环境变量 DSH_QQ_MEME_DB 指向兼容的 SQLite 词库，未配置或文件不可用时无法查询。' +
+      '查不到不代表这个词没有含义；不编造出处，当前聊天已确认的自定义词义用 qq_memory 管理。',
     parameters: {
       type: 'object',
       properties: {
@@ -156,8 +163,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
             title: '',
             text: '',
             message:
-              `词库里没有「${word}」。它是网络通用梗的快照，群里的自造说法它没有 —— ` +
-              '直接说不认识，别猜，也别把两个不相干的梗拼一起。',
+              `所配置的词库未找到「${word}」。未命中不代表这个词没有含义；缺少依据时说明不确定，不编造出处。`,
           }
         }
         return { found: true, title: r.title, text: r.text, message: '' }
@@ -544,8 +550,8 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
-      const messageId = Number(args?.message_id ?? record.lastSentMessageId ?? 0)
-      if (!Number.isFinite(messageId) || messageId <= 0) {
+      const messageId = parseMessageId(args?.message_id ?? record.lastSentMessageId)
+      if (messageId === null) {
         throw new Error('qq_recall: 找不到要撤回的消息')
       }
       try {
@@ -622,8 +628,8 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     description:
       '发一条普通消息（不带引用）。' +
       '不填 to 就发给「当前正在跟你说话的人/群」；' +
-      '填 to 可以主动发给别人，格式 `user:123456` 或 `group:987654`（群号）。' +
-      '想接某句话用 qq_reply，只想说点什么用这个。',
+      'to 可指定 `user:<QQ号>` 或 `group:<群号>`；跨聊天发送仅授权账号私聊可用，当前聊天和目标均须获准。' +
+      '想接某句话用 qq_reply，只想说点什么用这个。发送结果不确定时先检查目标聊天，不自动重发。',
     parameters: {
       type: 'object',
       properties: {
@@ -640,50 +646,41 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
           ok: { type: 'boolean' },
           messageId: { type: 'integer' },
           target: { type: 'string' },
+          reason: { type: 'string' },
         },
         required: ['ok'],
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `已发到 ${value.target}` : '发送失败' },
+        { type: 'text', text: value.ok ? `已发到 ${value.target}` : value.reason || '发送未确认，请先检查目标聊天，不自动重发。' },
       ],
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
+      const destination = resolveSendTarget(record, args?.to)
+      assertSendAccess(manager, config, record, destination)
       const text = cleanOutboundText(args?.text)
       if (!text) throw new Error('qq_send: text 不能为空')
       await assertOutboundText(text, record, 'qq_send')
-
-      // 解析目标：默认当前会话
-      let action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
-      let target = record.scope === 'group'
-        ? { group_id: Number(record.peerId) }
-        : { user_id: Number(record.peerId) }
-      let targetLabel = record.peerId
-
-      const to = String(args?.to ?? '').trim()
-      if (to) {
-        const m = /^(user|group):(\d+)$/i.exec(to)
-        if (!m) throw new Error('qq_send: to 格式要写成 user:123456 或 group:987654')
-        const kind = m[1].toLowerCase()
-        const id = Number(m[2])
-        action = kind === 'group' ? 'send_group_msg' : 'send_private_msg'
-        target = kind === 'group' ? { group_id: id } : { user_id: id }
-        targetLabel = to
-      }
+      assertSendAccess(manager, config, record, destination)
+      const action = destination.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
+      const target = peerOf(destination)
+      const targetLabel = `${destination.scope === 'group' ? 'group' : 'user'}:${destination.peerId}`
 
       try {
         const result = await client.call(action, {
           ...target,
           message: [{ type: 'text', data: { text } }],
         })
-        const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
-        if (sentId > 0) record.lastSentMessageId = sentId
-        noteToolSent(record, text)
+        const sentId = parseMessageId(result?.message_id ?? result?.data?.message_id)
+        if (sentId !== null) noteToolSent(record, text, destination, sentId)
+        else return { ok: false, messageId: 0, target: targetLabel, reason: '回执缺少有效消息 ID，发送未确认。请先检查目标聊天，不自动重发。' }
         return { ok: true, messageId: sentId, target: targetLabel }
       } catch (err) {
         logger.warn?.(`qq_send 失败: ${err?.message ?? err}`)
-        return { ok: false, messageId: 0, target: targetLabel }
+        return { ok: false, messageId: 0, target: targetLabel, reason: ['rejected', 'not-sent'].includes(err.onebotDelivery)
+          ? '发送未成功，请检查目标聊天和连接后再决定是否重试。'
+          : '发送未确认，可能已经送达。请先检查目标聊天，不自动重发。' }
       }
     },
   })
@@ -946,7 +943,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
 
   registerExtraTools(tools, {
     client, manager, config, home: home ?? homeDirOf(ctx, logger),
-    needRecord, assertText: assertOutboundText, noteToolSent,
+    needRecord, assertText: assertOutboundText, noteToolSent, synthesize,
   })
 
   logger.info?.(

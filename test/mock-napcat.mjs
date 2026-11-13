@@ -38,9 +38,9 @@ export function startMockNapcat({ port = 3001, token = '', selfId = 10001, selfN
       let response
       try {
         const data = !fault || fault.afterApply ? respond(action, params) : null
-        response = fault && !fault.drop
+        response = fault && !fault.drop && !Object.hasOwn(fault, 'data')
           ? { status: 'failed', retcode: fault.retcode ?? 1200, wording: fault.wording ?? '模拟 API 失败', data: null }
-          : { status: 'ok', retcode: 0, data }
+          : { status: 'ok', retcode: 0, data: fault && Object.hasOwn(fault, 'data') ? fault.data : data }
       } catch (err) { response = { status: 'failed', retcode: 1400, wording: err.message, data: null } }
       if (fault?.drop) return
       if (fault?.delayMs) await new Promise(resolve => setTimeout(resolve, fault.delayMs))

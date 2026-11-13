@@ -24,6 +24,7 @@ import { checkOutboundText, sensitiveContentNotice } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerTools } from './tools.js'
+import { parseMessageId } from './tool-send.js'
 import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
 import {
@@ -313,7 +314,9 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     if (tracking?.sendId) messageStore.sentEnd(id, 'sending')
     try {
       const result = await onebotCall(action, params, timeout)
-      messageStore.sentEnd(id, 'sent', result)
+      const messageId = parseMessageId(result?.message_id ?? result?.data?.message_id)
+      const confirmed = action.endsWith('_file') || messageId !== null
+      messageStore.sentEnd(id, confirmed ? 'sent' : 'uncertain', result)
       return result
     } catch (error) {
       messageStore.sentEnd(id, error.onebotDelivery ?? 'uncertain', { message: error.message, retcode: error.retcode })

@@ -43,8 +43,8 @@ function makeHarness({ sent = [], ownerLabel } = {}) {
       { id: 's1' },
       { type: 'assistant/message', sessionId: 's1', data: { message } },
     )
-  const tool = (name) =>
-    onSessionEvent({ id: 's1' }, { type: 'tool/call', sessionId: 's1', data: { name } })
+  const tool = (name, args) =>
+    onSessionEvent({ id: 's1' }, { type: 'tool/call', sessionId: 's1', data: { name, ...(args === undefined ? {} : { arguments: JSON.stringify(args) }) } })
   const turnEnd = () =>
     onSessionEvent(
       { id: 's1' },
@@ -355,6 +355,18 @@ test('没调发送工具时，正文照发', async () => {
   const { fire, sent } = makeHarness()
   await fire({ content: [{ type: 'text', text: '姐姐晚安' }] })
   assert.deepEqual(sent, ['姐姐晚安'])
+})
+
+test('文字或语音发往其他聊天，不抑制发起聊天的结果说明；显式当前目标仍去重', async () => {
+  for (const name of ['qq_send', 'qq_send_voice']) {
+    for (const to of ['group:70001', 'user:10002', 'user:10001']) {
+      const h = makeHarness()
+      h.record.peerId = '10001'
+      await h.tool(name, { to, text: '测试内容' })
+      await h.fire({ content: [{ type: 'text', text: '发送结果说明' }] })
+      assert.deepEqual(h.sent, to === 'user:10001' ? [] : ['发送结果说明'])
+    }
+  }
 })
 
 test('正文整条都是收尾话时，一个字都不发', async () => {
