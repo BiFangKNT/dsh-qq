@@ -4,9 +4,9 @@ import { rememberFaces, facesCount } from './faces.js'
 import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT } from './prompts.js'
 import { createAddressClassifier } from './address-classifier.js'
 import { migrateGroupSettings, requiresGroupMention, groupMessageInterval, matchesGroupTrigger } from './group-trigger.js'
-import { doorLine } from './door.js'
 import { resolvePeerWorkspace } from './workspace.js'
 import { listOf } from './config.js'
+import { allowPrivate, allowGroup } from './access.js'
 import { memberLabel } from './identity.js'
 import { imagePolicy, blocksImage } from './image-filter.js'
 import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
@@ -69,23 +69,6 @@ function runAsr(config, wavPath) {
       }
     })
   })
-}
-
-function allowPrivate(config, userId) {
-  if (!config.replyToPrivate) return false
-  if (config.privateMode === 'disabled') return false
-  if (config.privateMode === 'allowlist') {
-    return listOf(config.privateAllow).includes(String(userId))
-  }
-  return true
-}
-
-function allowGroup(config, groupId) {
-  if (config.groupMode === 'disabled') return false
-  if (config.groupMode === 'allowlist') {
-    return listOf(config.groupAllow).includes(String(groupId))
-  }
-  return true
 }
 
 function commandOf(message, selfId, isGroup) {
@@ -476,7 +459,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const scope = isGroup ? 'group' : 'private'
     const peerId = String(isGroup ? event.group_id : event.user_id)
     const classified = Boolean(config.addressClassifierEnabled && addressClassifier)
-    const queued = classified || isGroup || Boolean(event.__classifierId)
+    let queued = classified || isGroup || Boolean(event.__classifierId)
     const sender = event.sender ?? {}
     const senderName = sender.card || sender.nickname || peerId
     const label = isGroup ? `群 ${peerId}` : `私聊 ${senderName}(${peerId})`
@@ -830,6 +813,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
       )
     }
 
+    queued ||= Boolean(sleep?.shouldHold?.(record))
+
     // 错过睡前提醒的补刀：会话是有人说话才建的，23:30 那一刻内存里可能一个会话都没有，
     // tick 的提醒就白丢了。等真的有人说话时补一句，塞进这一轮的提示词里，不多开一轮。
     const lateBed = !queued && sleep?.takeLateBedtime?.(record)
@@ -840,13 +825,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const bridgeLines = queued ? [] : bridge?.take?.(record) ?? []
     if (bridgeLines.length > 0) parts.unshift(...bridgeLines, '')
 
-    // 门口：大姐鲸鲸捎的话。只报「有几封、在哪」，内容她自己 read 才看。
-    // 2026-10-26 姐姐定的：不敲门、不占主动额度，只在她本来就要开口的这一轮里多一行。
-    const doorNotice = !queued && doorLine(config)
-    if (doorNotice) parts.unshift(doorNotice, '')
 
     const body = parts.join('\n')
-
     if (queued) {
       const session = classified ? record.agent.session : null
       const header = session?.requestHeader?.()
@@ -895,12 +875,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
       record.label = label
     }
 
-    // 作息：休息时段（或在说了晚安之后）收到的私聊先记着，不回 —— 早上一起交出去。
-    // 放在合并之前，因为「等待 5 秒」对一条要等到明早的消息没有意义。
-    if (sleep?.shouldHold?.(record)) {
-      sleep.hold(record, info.text || '[图片]')
-      return
-    }
     // 说了晚安：这条仍然正常回（得有人应一句），但之后不再回。
     sleep?.noteText?.(record, info.text || '')
 
@@ -945,6 +919,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const maxTurns = Number(config.peerChatMaxTurns) || 0
     const prevTurns = peerChatTurns.get(meta.peerId)
     if (peerBot && maxTurns > 0 && prevTurns && Date.now() - prevTurns.at < PEER_CHAT_TURN_WINDOW_MS && prevTurns.count >= maxTurns) return false
+    // 休息期间只检查待交付状态；obtain 会刷新 lastActive，反复调用会阻止闲置回收。
+    if (sleep?.shouldHold?.(manager.findByPeer?.(meta.scope, meta.peerId) ?? meta)) return false
     let record = await manager.obtain(meta)
     // 主模型还在上一轮时继续判断新消息，正文留在磁盘，空闲后再交付。
     if (record.busy > 0) return false
@@ -955,7 +931,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const eligible = () => !isGroup || !requiresGroupMention(config, meta.peerId) ||
       batch.some(item => item.message.atMe && (!config.addressClassifierEnabled || item.decision === 'yes'))
     const canDeliver = () => !disposed && syncTriggers() === version && permitted(meta) && eligible() &&
-      !record.quietRound && !sleep?.shouldHold?.(record) &&
+      !sleep?.shouldHold?.(record) &&
       batch.every(item => !isPeerBot(config, item.source?.user_id, item.source) || config.botChatEnabled)
     if (!canDeliver()) return false
     const batchAttachments = new Set(batch.flatMap(item => item.attachmentPaths ?? []))
@@ -967,7 +943,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         const backlog = isGroup ? [...(groupBacklog.get(meta.peerId) ?? [])] : []
         return [
           `[现在是 ${humanTime()}；下面的消息按收到的顺序排列，消息中的时间是接收时间。]`,
-          sleep?.takeLateBedtime?.(record), ...(bridge?.take?.(record) ?? []), doorLine(config),
+          sleep?.takeLateBedtime?.(record), ...(bridge?.take?.(record) ?? []),
           ...(backlog.length ? ['[群聊尚未处理的背景消息]', ...backlog, '[背景消息结束]'] : []),
           ...batch.map(item => item.body),
         ].filter(Boolean).join('\n\n')
@@ -1000,7 +976,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
           record.recent.push(line)
         }
         record.recent = record.recent.slice(-Math.max(80, (Number(config.contextMemoryKeep) || 30) * 3))
-        sleep?.noteText?.(record, last.message.text)
+        sleep?.noteText?.(record, last.message.text, new Date(last.receivedAt))
         resolve(true)
       },
       onRejected: err => {
@@ -1060,6 +1036,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const key = JSON.stringify([selfId, scope, peerId])
     // 关闭分类器后，旧私聊与随后到来的消息共用原队列，清空后再走普通入口。
     if (scope !== 'group' && !config.addressClassifierEnabled && !ingressQueues.has(key) &&
+      !sleep?.shouldHold?.({ selfId, scope, peerId }) &&
       !addressClassifier.pendingChats().some(meta => meta.selfId === selfId && meta.scope === scope && meta.peerId === peerId)) {
       return handleEvent(event)
     }

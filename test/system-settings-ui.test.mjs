@@ -54,6 +54,19 @@ async function panel({ beforeSave, saveResult = {} } = {}) {
 }
 const button = (tree, text) => tree.find(element => element.type === 'button' && element.children.includes(text))
 
+test('共享文件目录可从设置页配置，并说明权限与重启', async () => {
+  const h = await panel(), tree = h.render()
+  const label = tree.find(element => element.children.includes('共享文件目录'))
+  assert.ok(label)
+  const input = tree.slice(tree.indexOf(label)).find(element => element.type === 'input')
+  input.props.onChange({ target: { value: 'D:/shared-files' } })
+  input.props.onBlur({ target: { value: 'D:/shared-files' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls.find(call => call.body?.patch).body.patch, { memoryRoot: 'D:/shared-files' })
+  assert.match(JSON.stringify(tree), /只有授权账号私聊可写/)
+  assert.match(JSON.stringify(tree), /修改后重启宿主/)
+})
+
 test('一次保存同时提示重连、重启与新会话，随机分条间隔可保存', async () => {
   const h = await panel({ saveResult: { needReconnect: true, needRestart: true, effects: { newSession: ['preset'] } } })
   const tree = h.render()

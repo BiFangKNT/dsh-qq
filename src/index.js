@@ -13,8 +13,7 @@ import { createOutbound } from './outbound.js'
 import { createBridge } from './bridge.js'
 import { createWake } from './wake.js'
 import { createSleep } from './sleep.js'
-import { createReading } from './reading.js'
-import { startLearning } from './learning.js'
+import { createAutomationState } from './automation-state.js'
 import { createContextGuard } from './context-guard.js'
 import { createMemory } from './memory.js'
 import { buildRuntimeContext } from './runtime-context.js'
@@ -256,7 +255,11 @@ export function apply(ctx, config) {
   const compatibility = createHostCompatibility({ config, home: homeDirOf(ctx, logger), logger,
     start: () => Object.assign(runtime, startRuntime({ ctx, config, logger, agents, clientRef })) })
   ctx.on('dispose', () => compatibility.stop())
-  watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef, () => compatibility.sync())
+  watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef, () => {
+    compatibility.sync()
+    runtime.wake?.sync()
+    runtime.bedtime?.sync()
+  })
 
   // 设置页接口：**运行时注入** webServer，而不是写进顶层 `export const inject`。
   // 有网页服务的宿主（Desktop / Web GUI）才会回调进来；headless 的 qqbot 永远不回调，
@@ -367,12 +370,6 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   }
 
   async function send(record, text, { sensitiveNotice = false } = {}) {
-    // 夜里的读书问询：这一轮是给她自己待着的，不是给对话用的。
-    // 提示词里已经写了「发不出去」，但光靠说会漏，这里硬拦一道。
-    if (record?.quietRound) {
-      logger.info(`[dsh-qq] ${record.label} 读书问询轮，这段不往外发`)
-      return { ok: false, reason: 'quiet' }
-    }
     // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
     // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
     // 被 @、被引用、私聊都不会走到这里。
@@ -469,25 +466,14 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   questions.install(ctx)
 
   const contextGuard = createContextGuard({ manager, config, logger })
-  const wake = createWake({ config, manager, logger, bridge })
-  const bedtime = createSleep({ config, manager, logger })
-  // 夜里的读书问询：默认关，本地 profile 打开才有（见 config.js 的 reading* 一组）
-  const reading = createReading({ config, manager, logger })
-  // 睡着的会话不回收：回收后 tick/wake 都遍历不到它，早上攒的消息就交不出去
-  manager.keeper = (record) => bedtime.isHolding(record)
+  const automation = createAutomationState(homeDirOf(ctx, logger))
+  const bedtime = createSleep({ config, manager, logger, automation })
+  const wake = createWake({ config, manager, logger, bridge, automation, canAct: record => !bedtime.shouldHold(record) })
   const addressClassifier = createAddressClassifier({ config, home: homeDirOf(ctx, logger), llm: ctx.get?.('llm'),
     getAttachments: () => ctx.get?.('attachments'), logger })
   const inbound = createInbound({ config, manager, logger, client, send, approval, questions, contextGuard, wake, sleep: bedtime, bridge, addressClassifier })
   const outbound = createOutbound({ manager, config, logger, send, wake, contextGuard })
 
-  // 群黑话 / 角色知识学习：每 20 分钟扫一次群聊记录，把「鲸鲸自己卡壳」的地方
-  // 记进该群 记忆区/群词典.md 的「待确认」节（只追加、去重）。
-  const disposeLearning = startLearning({
-    workspaceRoot: config.workspaceRoot ?? process.cwd(),
-    selfId: () => manager.selfId || config.selfId || '',
-    onHits: (record, hits) => manager.memory.collect(record, hits),
-    logger,
-  })
 
   const offSessionEvent = ctx.on('session/event', (session, event) => {
     const record = manager.find(String(session.id ?? session.header?.id ?? ''))
@@ -594,7 +580,6 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   }
   wake.start()
   bedtime.start()
-  reading.start()
 
   try {
     registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home: homeDirOf(ctx, logger),
@@ -607,7 +592,6 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     try {
       offSessionEvent?.()
       offGuardEvent?.()
-      disposeLearning?.()
     } catch {
       /* ignore */
     }
@@ -616,12 +600,11 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
     client.stop()
     wake.stop()
     bedtime.stop()
-    reading.stop()
     promptSync.stop()
     manager.memory.stop()
     manager.stop()
     approval.cancelAll()
     questions.cancelAll()
   })
-  return { client, manager, promptSync }
+  return { client, manager, promptSync, wake, bedtime }
 }

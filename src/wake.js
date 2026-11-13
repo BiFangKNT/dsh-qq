@@ -1,33 +1,11 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { proactiveRule } from './prompts.js'
-import { doorLine } from './door.js'
 import { listOf } from './config.js'
+import { createAutomationState } from './automation-state.js'
+import { canAccessChat } from './access.js'
 
-/**
- * 主动说话（冷场冒泡）。
- *
- * 为什么要单独一层：inbound 是「来消息才动」的 —— 没人说话，它就永远不出声。
- * 这里补一个闹钟：会话安静够久、不在静默时段、今天还没说够，就往会话里投一句
- * 「可以主动开口了」。**说不说、说什么仍然由 Agent 自己决定**（不想说就 [SILENT]），
- * 这一层只负责「什么时候给它一次机会」，不替它说话。
- *
- * 防打扰四道闸（全部可配）：
- *   1. 静默时段      proactiveQuietHours（默认 23:00-08:00）
- *   2. 每天配额      proactiveMaxPerDay（默认 6 次／会话）
- *                    **只有真发出去才算一次**；她选 [SILENT] 只是白给一次机会，不扣额度
- *                    （2026-10-26：原来投递时就扣，沉默也扣 —— 她越克制额度烧得越快，
- *                      一天 10 次机会被 6 次沉默吃满，下午最该开口时机制已经哑了）
- *   3. 两次间隔      至少隔 1.5 倍冷场时长；**她自己开口说过话也重新起算**，
- *                    刚聊完不会被隔一会儿又问一次
- *   4. 投递失败就停  连着 3 次投递失败（不是「她选择不说」）才闭嘴 ——
- *                    [SILENT] 是她自己的决定，不该记账（2026-10-25 按她的原话改）
- *
- * 还有一个隐形前提：proactiveSilentMs 必须小于 sessionIdleTimeout。
- * 会话闲置满了是被回收的（agent 一起 dispose），回收之后这一层就够不着它了。
- */
-
+/** 主动发言：按聊天保存额度与间隔；调度只负责提供一次模型请求。 */
 const TICK_MS = 60_000
-const FIRE_TIMEOUT_MS = 300_000
 const MAX_SILENT_MISSES = 3
 
 // ── 别一起打出去（2026-10-30 加）──
@@ -69,8 +47,27 @@ export function inQuietHours(range, d = new Date()) {
     : cur >= range.from || cur < range.to
 }
 
-export function createWake({ config, manager, logger, bridge, staggerMs }) {
-  const states = new Map() // sessionId -> { lastAt, lastProactiveAt, dayKey, count, misses }
+export function createWake({ config, manager, logger, bridge, staggerMs, automation = createAutomationState(), clock = Date.now, canAct = () => true }) {
+  const states = new Map()
+  const identity = record => ({ ...record, selfId: record.selfId ?? manager.selfId ?? config.selfId ?? '' })
+  const keyOf = record => automation.keyOf(identity(record))
+  let generation = 0, wasEnabled = config.proactiveEnabled === true
+  function sync() {
+    const enabled = config.proactiveEnabled === true
+    if (wasEnabled !== enabled) generation++
+    wasEnabled = enabled
+  }
+  function save(record, st) {
+    try {
+      automation.set('wake', identity(record), { dayKey: st.dayKey, count: st.count,
+        misses: st.misses, lastProactiveAt: st.lastProactiveAt })
+      return true
+    } catch (err) {
+      st.blocked = true
+      logger.error?.('主动发言暂停，记录保存失败:', err.message)
+      return false
+    }
+  }
   let timer = null
   let startTimer = null
   let stopped = true
@@ -89,20 +86,22 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
   const maxPerDay = () => Math.max(0, Number(config?.proactiveMaxPerDay) || 0)
 
   function stateOf(record) {
-    let st = states.get(record.sessionId)
+    let st = states.get(keyOf(record))
     if (!st) {
       // 首次见到这个会话时别拿「现在」当起点 —— 用队列层记的上次活动时间，
       // 否则插件刚启动、会话已经安静半小时了也要白等一轮。
       st = {
-        lastAt: Number(record.lastActive) || Date.now(),
+        lastAt: Number(record.lastActive) || clock(),
         lastProactiveAt: 0,
-        dayKey: dayKey(),
+        dayKey: dayKey(new Date(clock())),
         count: 0,
         misses: 0,
         // 这一轮主动机会还在等结果：她说了一句（算数）还是选了 [SILENT]（白给）
         pending: 0,
       }
-      states.set(record.sessionId, st)
+      try { Object.assign(st, automation.get('wake', identity(record))) }
+      catch (err) { st.blocked = true; logger.error?.('主动发言暂停，记录读取失败:', err.message) }
+      states.set(keyOf(record), st)
     }
     return st
   }
@@ -111,15 +110,15 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
   function noteInbound(record) {
     if (!record?.sessionId) return
     const st = stateOf(record)
-    st.lastAt = Date.now()
-    st.misses = 0
+    st.lastAt = clock()
+    if (st.misses && !st.blocked) { st.misses = 0; save(record, st) }
   }
 
   /** 自己发了消息：也算一次活动（不然刚说完就被判冷场）。 */
   function noteOutbound(record) {
     if (!record?.sessionId) return
     const st = stateOf(record)
-    st.lastAt = Date.now()
+    st.lastAt = clock()
     // 注意：这里**不能**动 lastProactiveAt。
     // 她回姐姐一句话不等于「她主动开口过」——只有 fire() 真给了机会才算。
     // 2026-10-25 修：原来这里把每次回复都当成主动说话，导致
@@ -127,10 +126,10 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
     // 三个阈值刚好卡死，整天都等不到一次机会。
   }
 
-  /** 会话被回收/重置时把状态一起丢掉。 */
+  /** 清理会话的运行中标记；持久额度与间隔保留。 */
   function forget(record) {
     if (!record?.sessionId) return
-    states.delete(record.sessionId)
+    states.delete(keyOf(record))
   }
 
   /**
@@ -143,21 +142,32 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
    */
   function noteProactiveDelivered(record) {
     if (!record?.sessionId) return
-    const st = states.get(record.sessionId)
-    if (!st?.pending) return
-    st.pending = 0
-    st.dayKey = dayKey()
+    const st = states.get(keyOf(record))
+    if (!st?.pending || st.blocked) return
+    const today = dayKey(new Date(clock()))
+    if (st.dayKey !== today) { st.dayKey = today; st.count = 0; st.misses = 0 }
     st.count += 1
+    st.misses = 0
+    st.pending = 0
+    save(record, st)
   }
 
   /** 主动轮她自己选了沉默（[SILENT]）：机会白给，不算数、也不记 miss。 */
   function noteProactiveSilent(record) {
     if (!record?.sessionId) return
-    const st = states.get(record.sessionId)
+    const st = states.get(keyOf(record))
     if (st) st.pending = 0
   }
 
-  async function fire(record, st, silentMin, now) {
+  function noteProactiveFailed(record) {
+    const st = states.get(keyOf(record))
+    if (!st?.pending || st.blocked) return
+    st.pending = 0
+    st.misses += 1
+    save(record, st)
+  }
+
+  function fire(record, st, silentMin, now) {
     const base = proactiveRule(config, {
       label: record.label,
       silentMin,
@@ -166,21 +176,18 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
     })
     // 通道回执：断线期间丢过话就先摆在她眼前，别让她对着空气继续说
     const bridgeLines = bridge?.take?.(record) ?? []
-    // 门口：大姐鲸鲸捎的信。只报「有几封、在哪」，不摊内容 —— 拆不拆她自己定。
-    const doorNotice = doorLine(config)
-    const extra = [doorNotice, ...bridgeLines].filter(Boolean)
+    const extra = bridgeLines.filter(Boolean)
     const text = extra.length > 0 ? `${base}\n\n${extra.join('\n')}` : base
-    st.lastProactiveAt = Date.now()
-    // 标记主动机会，供回复出口判断主动正文并记录是否实际发言。
-    record._proactiveAt = Date.now()
-    // 先记「这次机会还没兑现」：真发出去才算用掉额度（见 noteProactiveDelivered）。
-    // 2026-10-26 修：这里原来直接 st.count += 1，[SILENT] 也扣 —— 沉默把配额吃光。
-    st.pending = Date.now()
-    // [SILENT] 是她自己的决定，不记 miss；只有投递真的失败才算（见 catch）
-    logger.info?.(`[dsh-qq] ${record.label} 安静 ${silentMin} 分钟，给一次主动开口的机会`)
+    st.lastProactiveAt = clock()
+    if (!save(record, st)) return
+    const version = generation, sessionId = record.sessionId
     inflight += 1
-    manager.enqueue(record, async () => {
+    Promise.resolve(manager.enqueue(record, async () => {
       try {
+        if (stopped || version !== generation || config.proactiveEnabled !== true || record.sessionId !== sessionId ||
+          !canAccessChat(config, record) || !canAct(record)) return
+        st.pending = clock()
+        record._proactiveAt = clock()
         // 必须是完整的用户消息对象：直接传字符串的话，DSH 内部按消息结构去读
         // content[0].kind 会拿到 undefined，整轮直接抛 Cannot read properties of undefined。
         record.agent.followup(
@@ -189,20 +196,16 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
             source: { kind: 'plugin', plugin: 'dsh-qq', form: 'proactive' },
           }),
         )
-        await Promise.race([
-          Promise.resolve(record.agent.whenIdle?.()).then(() => 'idle'),
-          new Promise((resolve) => {
-            const t = setTimeout(() => resolve('timeout'), FIRE_TIMEOUT_MS)
-            t.unref?.()
-          }),
-        ])
+        await record.agent.whenIdle()
+        await record.outputQueue
       } catch (err) {
-        st.pending = 0
-        st.misses += 1
+        noteProactiveFailed(record)
         logger.warn?.(`[dsh-qq] 主动开口失败 ${record.label}:`, err)
-      } finally {
-        inflight = Math.max(0, inflight - 1)
       }
+    })).catch(err => logger.warn?.('主动发言排队失败:', err.message)).finally(() => {
+      st.pending = 0
+      record._proactiveAt = 0
+      inflight = Math.max(0, inflight - 1)
     })
   }
 
@@ -225,7 +228,7 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
       for (const raw of peers) {
         if (n >= max) break
         const peerId = String(raw)
-        if (hot.has(`private:${peerId}`)) continue
+        if (hot.has(`private:${peerId}`) || !canAccessChat(config, { scope: 'private', peerId })) continue
         try {
           await manager.obtain({ scope: 'private', peerId, label: `私聊 ${peerId}` })
           n += 1
@@ -240,9 +243,10 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
   }
 
   /** 一分钟看一遍：谁安静够久了、能不能开口。 */
-  async function tick(now = new Date()) {
+  async function tick(now = new Date(clock())) {
+    sync()
     if (stopped) return
-    if (config?.proactiveEnabled === false) return
+    if (config?.proactiveEnabled !== true) return
     // 桥断了就别自说自话：说了也发不出去，白烧一轮
     if (bridge?.isUp?.() === false) return
     const quota = maxPerDay()
@@ -260,10 +264,10 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
       // 满足条件的有几个就在同一毫秒打出去几个（2026-10-30 19:40 那次 8 个）。
       const candidates = []
       for (const record of manager.list()) {
+        if (!canAccessChat(config, record) || !canAct(record)) continue
         const st = stateOf(record)
-        // 上一轮机会投出去，却既没发话也没给 [SILENT]（那一轮报错退出了）：
-        // 过了投递超时就当没发生过，别让 pending 一直挂着。
-        if (st.pending && now.getTime() - st.pending > FIRE_TIMEOUT_MS * 2) st.pending = 0
+        if (st.blocked) continue
+        if (st.pending) continue
         if (record.busy > 0) continue
         // record.lastActive 是队列层的活动时间：工具直接发消息（qq_reply 之类）也走任务，
         // 任务结束就会刷新它，所以拿它兜底比只靠 noteOutbound 更准。
@@ -276,9 +280,11 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
         if (st.dayKey !== dk) {
           st.dayKey = dk
           st.count = 0
+          st.misses = 0
+          if (!save(record, st)) continue
         }
         if (st.count >= quota) continue
-        // 连着几次主动都没人接，就别自说自话了
+        // 连续投递异常达到上限，收到新消息或跨日后恢复
         if (st.misses >= MAX_SILENT_MISSES) continue
         candidates.push({ record, st, silentMin: Math.round(idleMs / 60000) })
       }
@@ -288,7 +294,7 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
 
       const opened = candidates.slice(0, MAX_FIRES_PER_TICK)
       for (let i = 0; i < opened.length; i += 1) {
-        if (stopped) return
+        if (stopped || config.proactiveEnabled !== true) return
         if (inflight >= MAX_INFLIGHT) {
           logger.info?.(`[dsh-qq] 主动轮还有 ${inflight} 个没聊完，剩下 ${candidates.length - i} 个下轮再说`)
           break
@@ -314,7 +320,7 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
     if (!stopped) return
     stopped = false
     logger.info?.(
-      `[dsh-qq] 主动说话已启动：安静 ${Math.round(silentMs() / 60000)} 分钟起，每天最多 ${maxPerDay()} 次，静默时段 ${config?.proactiveQuietHours || '（不限）'}`,
+      `[dsh-qq] 主动发言调度已加载，当前${config?.proactiveEnabled === true ? '开启' : '关闭'}：安静 ${Math.round(silentMs() / 60000)} 分钟起，每天最多 ${maxPerDay()} 次，静默时段 ${config?.proactiveQuietHours || '（不限）'}`,
     )
     // 2026-10-30：三只进程原来都在各自的「整分」上 tick —— 同一秒一起扫、
     // 一起发现冷场、一起撒口。现在第一次 tick 随机散开 0–55 秒，
@@ -323,8 +329,9 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
     startTimer = setTimeout(() => {
       startTimer = null
       if (stopped) return
-      void tick()
-      timer = setInterval(() => tick(), TICK_MS)
+      const run = () => tick().catch(err => logger.error?.('主动发言调度失败:', err.message))
+      void run()
+      timer = setInterval(run, TICK_MS)
       timer.unref?.()
     }, phase)
     startTimer.unref?.()
@@ -336,17 +343,19 @@ export function createWake({ config, manager, logger, bridge, staggerMs }) {
     startTimer = null
     if (timer) clearInterval(timer)
     timer = null
-    states.clear()
+
   }
 
   return {
     start,
     stop,
     tick,
+    sync,
     noteInbound,
     noteOutbound,
     noteProactiveDelivered,
     noteProactiveSilent,
+    noteProactiveFailed,
     forget,
     silentMs,
     maxPerDay,

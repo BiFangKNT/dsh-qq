@@ -2,6 +2,16 @@
 
 给打算试装 dsh-qq 的人（也给我自己发版前复查用）。每一步都有「怎么算过」，过不了就看对应的日志行。
 
+本轮自动行为与共享文件的本地回归：
+
+```powershell
+node --test test/automation-state.test.mjs test/sleep.test.mjs test/sleep-delivery.test.mjs test/memo-write.test.mjs
+pnpm test
+pnpm test:e2e
+```
+
+以上使用 mock，不调用真实模型或 QQ。真实部署升级后按需核对：休息私聊在重启、换会话、关闭作息后仍完整交付一次；主动发言额度不因重启清零；共享目录修改提示重启，获准聊天可读但群聊和普通私聊不能写。模型措辞是否合适由使用者反馈，不作为这些逻辑检查的通过条件。
+
 > 全程建议用小号。NapCat 是协议端，账号有被风控的可能，这条不再重复。
 
 ---

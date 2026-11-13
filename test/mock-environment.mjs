@@ -77,7 +77,7 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
     privateMode: 'open', ownerIds: ['11001'],
     mergeWindowMs: 0, groupMinGapMs: 0, groupReplyGapMs: 0, replyDelayMeanMs: 0,
     splitDelayMeanMs: 0, splitDelayMs: 0, rateLimitPerMin: 0,
-    sleepMode: false, proactiveEnabled: false, readingEnabled: false,
+    sleepMode: false, proactiveEnabled: false,
     reconnectMs: 100, ...overrides,
   })
   // 连接和落盘位置始终固定为模拟器自身，不接受真实地址覆盖。

@@ -18,25 +18,7 @@ function pickSession(args) {
   return { session: raw?.session, raw }
 }
 
-import { markDoorRead } from './door.js'
 import { SILENT_MARKER } from './prompts.js'
-
-/**
- * 从 `tool/call` 里捞 read 的文件路径。各家字段名不一样（`input` / `arguments` / `args`，
- * 里面又叫 `file_path` / `path` / `filePath`），宽松取；取不到就当没读。
- */
-function readPathOf(data) {
-  let args = data?.input ?? data?.arguments ?? data?.args ?? data?.params ?? null
-  if (typeof args === 'string') {
-    try {
-      args = JSON.parse(args)
-    } catch {
-      return ''
-    }
-  }
-  if (!args || typeof args !== 'object') return ''
-  return String(args.file_path ?? args.path ?? args.filePath ?? args.file ?? '').trim()
-}
 
 function sessionIdOf(session, raw) {
   const id =
@@ -777,6 +759,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
       if (record._proactiveAt) record._proactiveAt = 0
       const reason = data.reason
       if (reason?.kind === 'error') {
+        wake?.noteProactiveFailed?.(record)
         const message =
           reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
         if (blocked || reason.error?.code === 'QQ_SENSITIVE_CONTENT' || reason.failure?.code === 'QQ_SENSITIVE_CONTENT') return
@@ -793,16 +776,6 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
     if (type === 'tool/call') {
       const name = String(data.name ?? '')
       if (SELF_SENDING_TOOLS.has(name)) selfSent.add(sessionId)
-      // 她 read 了门口的信 → 记一笔「这封拆过了」。
-      // 2026-10-27 姐姐发现：她读过之后，下次提示还是「挂着 3 封没拆」——
-      // 因为门口只数文件在不在，read 不会让文件消失。于是每轮都在骗她，还可能让她反复读同一封。
-      if (/^read$/i.test(name)) {
-        try {
-          markDoorRead(config, readPathOf(data))
-        } catch {
-          // 记不上就算了：门口那行提示每轮都跑，不能因为这里出错整只鲸鲸不说话
-        }
-      }
       if (config.showToolResults) {
         await emit(record, `🔧 调用 ${name || 'tool'}`)
       }

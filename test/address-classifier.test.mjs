@@ -437,6 +437,24 @@ test('重启后恢复的整批消息仍保留前面的点名要求', async t => 
   assert.equal(llm.calls.length, 2, '恢复交付不重新分类')
 })
 
+test('休息积压轮询不获取会话或刷新闲置时间，醒来后才恢复交付', async t => {
+  const home = await directory(t), config = configOf()
+  const privateMeta = { ...meta, scope: 'private', peerId: '10001' }
+  const gate = createAddressClassifier({ home, config, llm: model('yes'), logger })
+  await gate.accept({ ...input(1), meta: privateMeta }, async () => false)
+  let holding = true, checks = 0, obtains = 0
+  const h = inboundHarness(t, gate, { sleep: { shouldHold() { checks++; return holding } } })
+  const obtain = h.manager.obtain
+  h.manager.obtain = args => { obtains++; return obtain(args) }
+  await waitFor(() => checks > 0)
+  assert.equal(obtains, 0, '休息时不因恢复队列而常驻会话')
+  assert.equal(h.delivered.length, 0)
+  holding = false
+  await waitFor(() => h.delivered.length === 1)
+  assert.equal(obtains, 1)
+  assert.match(textOf(h.delivered[0]), /正文1/)
+})
+
 for (const { text, config, maySilent } of [
   { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'] }, maySilent: true },
   { text: '测试机器人，帮我看看这里', config: { groupWakeNames: ['测试机器人'], groupWakeNameMention: false }, maySilent: true },

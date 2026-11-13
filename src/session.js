@@ -33,10 +33,8 @@ export class SessionManager {
     this.closed = false
     this.systemPrompts = createSystemPromptStore(home)
     // 「reset 到第几代 / 这一代落在哪个 sessionId」的账本：也落盘。
-    // 不落盘的后果见 session-state.js 顶上那段 —— 重启即退回 reset 前的老会话 + 每次多一个空壳。
+    // 持久保存重置代数和实际 ID，避免重启后恢复已重置的会话。
     this.sessionState = createSessionState(home ? join(String(home), 'session-state.json') : '', logger)
-    /** 回收前的保留判断（由 sleep 模块注入）：返回 true 就不回收。 */
-    this.keeper = null
   }
 
   get size() {
@@ -115,12 +113,18 @@ export class SessionManager {
     if (current.memoryError) throw new Error('记忆维护进度未能保存，请修复存储后再新建会话；当前会话已保留')
     const snapshot = this.systemPrompts.get(current.sessionId)
     if (snapshot) this.systemPrompts.save({ ...snapshot, retired: true })
-    current.promptDispose?.()
     const baseKey = this.#baseKey(current.scope, current.peerId)
     // 代数读内存优先、盘兜底：宿主重启后内存空了，靠盘记住「已经 reset 过一次」
     const next = (this.#gens.get(baseKey) ?? this.sessionState.gen(baseKey)) + 1
+    try {
+      this.sessionState.setGen(baseKey, next, { forgetSession: current.key })
+    } catch (error) {
+      // 映射保存失败时旧 record 仍有效，保留其监听器并恢复快照状态。
+      if (snapshot) this.systemPrompts.save(snapshot)
+      throw error
+    }
     this.#gens.set(baseKey, next)
-    this.sessionState.setGen(baseKey, next)
+    current.promptDispose?.()
     if (current.owned && current.dispose) {
       try {
         Promise.resolve(current.dispose()).catch(() => {})
@@ -130,8 +134,6 @@ export class SessionManager {
     }
     this.#records.delete(current.sessionId)
     if (this.#byPeer.get(current.key) === current.sessionId) this.#byPeer.delete(current.key)
-    // 上一代那笔账划掉：reset 之后是全新的 sessionId，老 sessions 记录也不会再用上
-    this.sessionState.forgetSession(current.key)
     this.logger.info?.(`[dsh-qq] 重置会话 ${current.label}（gen → ${this.#gens.get(baseKey) ?? 0}）`)
     return true
   }
@@ -419,10 +421,6 @@ export class SessionManager {
       if (record.busy > 0) continue
       const ttl = record.scope === 'private' ? privateTtl : baseTtl
       if (now - record.lastActive <= ttl) continue
-      // ⭐ 2026-10-25 修：睡着/攒着消息的会话别回收。
-      // 回收后 sleep.tick 和 wake.tick 都只遍历 list()，够不着它 —— 夜里攒的话第二天没人交，
-      // 早上也不会主动开口。等睡醒、pending 交完，下一轮 sweep 再正常回收。
-      if (this.keeper?.(record)) continue
       if (record.owned && record.dispose) {
         try {
           Promise.resolve(record.dispose()).catch(() => {})

@@ -41,8 +41,6 @@ export const OVERRIDABLE = [
   'reconnectMs',
   'localApiPort',
   'acceptedDshVersions',
-  'doorReplyPrefix',
-  'doorSenderLabel',
   // Agent 工具预设（现有会话保持原选择，新会话生效）
   'preset',
   // 人设 / 称呼
@@ -56,6 +54,7 @@ export const OVERRIDABLE = [
   // 工作区与记忆
   'workspaceRoot',
   'isolateByPeer',
+  'memoryRoot',
   'memoryProvider',
   'memoryModel',
   'memoryTimeoutMs',
@@ -261,7 +260,7 @@ function validateOverrides(patch) {
   for (const key of ['memoryTimeoutMs', 'memoryTaskTtlHours']) {
     if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] <= 0)) throw new Error(`${key} 必须为正数`)
   }
-  for (const key of ['memoryProvider', 'memoryModel']) {
+  for (const key of ['memoryProvider', 'memoryModel', 'memoryRoot']) {
     if (patch[key] != null && typeof patch[key] !== 'string') throw new Error(`${key} 必须为字符串`)
   }
   for (const key of ['addressClassifierProvider', 'addressClassifierModel', 'addressClassifierReasoningEffort']) {
@@ -272,9 +271,6 @@ function validateOverrides(patch) {
 
   if (patch.localApiPort != null && (!Number.isInteger(patch.localApiPort) || patch.localApiPort < 0 || patch.localApiPort > 65535)) {
     throw new Error('localApiPort 必须为 0–65535 的整数')
-  }
-  if (patch.doorReplyPrefix != null && (typeof patch.doorReplyPrefix !== 'string' || !patch.doorReplyPrefix.trim() || /[\\/:*?"<>|\r\n]/.test(patch.doorReplyPrefix) || /^[._]/.test(patch.doorReplyPrefix.trim()))) {
-    throw new Error('doorReplyPrefix 必须是有效且非隐藏的文件名前缀')
   }
   for (const key of ['splitDelayMs', 'splitDelayMeanMs']) {
     if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] < 0)) throw new Error(`${key} 必须为非负数`)
@@ -329,7 +325,7 @@ export function applyOverrides(config, overrides, logger) {
   return applied
 }
 
-const restartKeys = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'imageCacheDir']
+const restartKeys = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'imageCacheDir', 'memoryRoot']
 export function settingsEffects(changed) {
   return {
     reconnect: changed.filter(key => ['wsUrl', 'accessToken'].includes(key)),
@@ -560,6 +556,9 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       }
       applyOverrides(config, saved.overrides, logger)
       compatibility?.sync()
+      const currentRuntime = getRuntime?.()
+      currentRuntime?.wake?.sync()
+      currentRuntime?.bedtime?.sync()
       const personaNow = resolvePersonaFile(config, logger, { home: homeDirOf(ctx, logger) })
       if (personaRef) personaRef.current = personaNow
 
@@ -731,7 +730,7 @@ export function loadFactsFor(record) {
   }
 }
 
-/** 群词典文件的完整路径。跟 `learning.js` 写入的位置必须是同一个，改这里也要改那边。 */
+/** 旧群词典的文件路径；仅保留旧格式读取，不再由定时扫描维护。 */
 export function glossaryFileFor(record) {
   const dir = String(record?.dir ?? '').trim()
   return dir ? join(dir, '记忆区', '群词典.md') : ''

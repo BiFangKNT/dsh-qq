@@ -13,6 +13,7 @@ import { createMockDsh, createMockPromptScope, waitFor } from './mock-dsh.mjs'
 import { createMockEnvironment } from './mock-environment.mjs'
 import { Config } from '../src/index.js'
 import { createInbound } from '../src/inbound.js'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const logger = { info() {}, warn() {}, debug() {} }
 async function directory(t) {
@@ -130,12 +131,16 @@ test('旧词典与群近况不再经持久动态 context 注入', async t => {
   group.dispose(); privateChat.dispose()
 })
 
-async function runtime(t, { borrowed = false } = {}) {
+async function runtime(t, { borrowed = false, runtimeContext = '' } = {}) {
   const root = await directory(t), home = join(root, 'dsh-qq')
   const host = createMockDsh({ home: root })
   const config = Config({ persona: '旧人设', isolateByPeer: false, cwd: root })
   if (borrowed) await host.ctx.agents.create({ sessionId: deriveSessionId(sessionKey(meta.selfId, meta.scope, meta.peerId)) })
   const manager = new SessionManager({ ctx: host.ctx, agents: host.ctx.agents, selfId: '10001', config, logger, home })
+  if (runtimeContext) {
+    manager.memory = { store: { migrate() {} }, prepare: async () => {} }
+    manager.runtimeContext = () => runtimeContext
+  }
   const sync = createPromptSync({ ctx: host.ctx, home, config, manager, logger })
   sync.start()
   t.after(async () => { sync.stop(); manager.stop(); await host.dispose() })
@@ -307,6 +312,44 @@ test('借用会话切换时保存快照失败，保留旧 system 并释放准备
   assert.doesNotMatch(await systemOf(oldAgent), /旧人设/)
   assert.equal(h.host.agents.get(oldId), oldAgent)
 })
+
+for (const borrowed of [false, true]) {
+  test(`会话映射写失败保留旧会话、system与状态区，恢复后可重试；borrowed=${borrowed}`, async t => {
+    const h = await runtime(t, { borrowed, runtimeContext: '测试状态区：此事项仍有效' })
+    const oldId = h.record.sessionId, oldAgent = h.record.agent, oldKey = h.record.key
+    const request = async () => {
+      oldAgent.followup(createUserMessage({ content: [{ type: 'text', text: '测试消息' }] }))
+      await oldAgent.whenIdle()
+      return oldAgent.requests.at(-1)
+    }
+    const original = await request()
+    assert.match(original.context, /此事项仍有效/)
+    h.manager.sessionState.setSessionId(oldKey, oldId)
+    const file = join(h.home, 'session-state.json')
+    const persisted = await readFile(file, 'utf8'), state = h.manager.sessionState.all()
+    const snapshot = h.manager.systemPrompts.get(oldId)
+    await mkdir(file + '.tmp')
+    h.config.persona = '尚未同步的新设定'
+    await assert.rejects(h.manager.replaceSession(h.record), error => ['EISDIR', 'EACCES', 'EPERM'].includes(error.code))
+    assert.equal(h.record.sessionId, oldId)
+    assert.equal(h.record.agent, oldAgent)
+    assert.equal(h.manager.find(oldId), h.record)
+    assert.equal(await h.manager.obtain(meta), h.record)
+    assert.deepEqual(h.manager.sessionState.all(), state)
+    assert.equal(await readFile(file, 'utf8'), persisted)
+    assert.deepEqual(h.manager.systemPrompts.get(oldId), snapshot)
+    assert.deepEqual([...h.host.agents.keys()], [oldId], '释放准备中的新会话，保留旧Agent')
+    const after = await request()
+    assert.equal(after.system, original.system)
+    assert.match(after.context, /此事项仍有效/)
+    await rm(file + '.tmp', { recursive: true })
+    await h.manager.replaceSession(h.record)
+    assert.notEqual(h.record.sessionId, oldId)
+    const saved = JSON.parse(await readFile(file, 'utf8'))
+    assert.equal(saved.gens[oldKey], 1, '失败不推进重置代数')
+    assert.equal(Object.hasOwn(saved.sessions, oldKey), false, '同次写入移除旧映射')
+  })
+}
 
 test('等待新建会话时收到的消息，切换后仍交付且保留本条消息来源', async t => {
   const h = await runtime(t), oldId = h.record.sessionId

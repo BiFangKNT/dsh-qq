@@ -133,27 +133,7 @@ export function proactiveRule(config, { label = '', silentMin = 0, isGroup = fal
   ].join('\n')
 }
 
-export function readingAskRule(config, { book = '', next = 0, max = 0, clock = '' } = {}) {
-  const progress = next > 0 && max > 0 ? `当前读到第 ${next} 章，全书到第 ${max} 章。` : ''
-  return [
-    `【阅读机会】现在是${clock || '夜间'}。本轮不向 QQ 发送消息，正文和发送工具都发不出去。`,
-    book ? `当前书籍：《${book}》。${progress}` : '',
-    '可以选择继续阅读一章，最多两章；按实际阅读结果更新书签、日期和简短心得。不想读就结束，不用回话或解释。',
-    '不要推测对方是否正在睡觉，也不要把未阅读的内容记成已读。',
-  ].filter(Boolean).join('\n')
-}
-
 export function bedtimeRule(config, { label = '', now = new Date(), clock = '' } = {}) {
   const at = clock || `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
   return `【睡前提醒】现在 ${at}，已到配置的提醒时间（${label || '这个会话'}）。简短提醒一次即可，不反复催促，也不假定对方已经入睡。`
-}
-
-export function morningRule(config, { label = '', items = [], now = new Date() } = {}) {
-  const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`
-  const list = items.map(item => `- ${item.at} ${item.text}`).join('\n')
-  return [
-    `【夜间消息】现在 ${clock}（${label || '这个会话'}）。以下 ${items.length} 条消息在夜间暂存，尚未回复：`,
-    list,
-    '结合时间和上下文回应仍需要处理的内容，不将旧消息当作刚发生的事，也不逐条重复回应已经结束的话题。',
-  ].join('\n')
 }

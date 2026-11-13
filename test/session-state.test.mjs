@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createSessionState } from '../src/session-state.js'
@@ -78,15 +78,31 @@ test('换代时 forgetSession 掉上一代，但代数还在', () => {
   }
 })
 
-test('账本坏了：重置为第 0 代，不炸', () => {
+test('重置代数和移除旧映射一起保存，写失败时内存与磁盘均保留原值', t => {
+  const { dir, file } = tmpFile()
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const state = createSessionState(file)
+  state.setSessionId('k', 'old-session')
+  const before = state.all(), persisted = readFileSync(file, 'utf8')
+  mkdirSync(file + '.tmp')
+  assert.throws(() => state.setGen('k', 1, { forgetSession: 'k' }))
+  assert.deepEqual(state.all(), before)
+  assert.equal(readFileSync(file, 'utf8'), persisted)
+  rmSync(file + '.tmp', { recursive: true })
+  state.setGen('k', 1, { forgetSession: 'k' })
+  assert.equal(state.gen('k'), 1)
+  assert.equal(state.sessionId('k'), '')
+  assert.deepEqual(createSessionState(file).all(), state.all())
+})
+
+test('映射损坏：显式失败，保留文件，不恢复旧会话', () => {
   const { dir, file } = tmpFile()
   try {
     writeFileSync(file, 'not json at all', 'utf8')
     const warnings = []
-    const s = createSessionState(file, { warn: (...a) => warnings.push(a.join(' ')) })
-    assert.equal(s.gen('k'), 0)
-    assert.equal(s.sessionId('k'), '')
-    assert.ok(warnings.length >= 1)
+    assert.throws(() => createSessionState(file, { error: (...a) => warnings.push(a.join(' ')) }), /原文件保留/)
+    assert.equal(readFileSync(file, 'utf8'), 'not json at all')
+    assert.equal(warnings.length, 1)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

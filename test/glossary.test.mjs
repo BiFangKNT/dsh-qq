@@ -7,15 +7,7 @@ import { join } from 'node:path'
 import { clipGlossary, glossaryFileFor, loadGlossaryFor } from '../src/settings.js'
 import { buildChatPrompt } from '../src/prompts.js'
 
-/**
- * 2026-10-27 姐姐说「群词典放在老三能够着的地方」。
- *
- * 查出来的是：`learning.js` 每 20 分钟扫群记录、把卡壳点追加进
- * `QQ会话/群_<gid>/记忆区/群词典.md`，**写完没有任何地方读它**——
- * `grep 群词典 src/` 只命中写的那一头。写了没人看，等于白写。
- *
- * 所以：群聊时把本群那本词念叨一小段（截断），再给路径让它自己 read。
- */
+/** 旧群词典格式读取测试；不代表仍有定时扫描或自动注入。 */
 
 const SAMPLE = `# 群词典 · 群聊黑话与角色
 

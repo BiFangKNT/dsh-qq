@@ -240,7 +240,7 @@
 | [`src/prompts.js`](../src/prompts.js) | 动态风格每轮渲染，不能只放首次 `buildChatPrompt` 注入 |
 | [`src/wake.js`](../src/wake.js) | 自愿主动、求助、心愿共享调度与发送限制，区分业务状态 |
 | [`src/sleep.js`](../src/sleep.js) | 统一扩展睡眠状态机，定义旧配置兼容，避免两套作息同时拦消息 |
-| [`src/reading.js`](../src/reading.js) | 保留 `quietRound` 硬限制；真实阅读完成与问询事件分开 |
+| 定时阅读（已移除） | 后续功能取舍已确认移除，原阅读轮次与 `quietRound` 安排不再实施；保留旧书籍和书签文件 |
 | [`src/settings.js`](../src/settings.js)、[`client.js`](../client.js) | 参数开关、状态查询和展示；分离 UI 进程读取运行端状态 |
 | [`src/config.js`](../src/config.js)、[`cordis.patch.yml`](../cordis.patch.yml) | 新增参数同步；未定义值不能伪装成用户已确认默认值 |
 | [`src/private-history.js`](../src/private-history.js) | 解除好感与历史查询权限的耦合，保留明确授权边界 |

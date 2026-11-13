@@ -604,15 +604,19 @@ window.__ModuleLoader__.load({
           boolField('botChatEnabled', '允许它和其他机器人聊天', '默认关闭：已标记的其他机器人即使 @ 也不触发。开启后沿用相同的触发规则，不要求回怼或持续接话。'),
           listField('peerBots', '其他机器人的 QQ 号', { hint: '按此名单识别机器人账号，用逗号分隔。' })),
 
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '共享文件'),
+          textField('memoryRoot', '共享文件目录', { mono: true, hint: '填写运行端的本地目录后启用 qq_memo，留空关闭。获准聊天可读；只有授权账号私聊可写。仅支持 md/txt，与各聊天的统一记忆分开。修改后重启宿主。' })),
+
         /* ── 主动说话 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '定时主动发言'),
-          boolField('proactiveEnabled', '启用定时主动发言', '默认开启。会话安静到指定时长后调用主模型，模型可选择沉默；沉默仍产生模型调用。'),
+          boolField('proactiveEnabled', '启用定时主动发言', '默认关闭。开启后，会话安静到指定时长时调用主模型；模型选择沉默仍产生模型调用。'),
           textField('proactiveSilentMs', '会话安静时长（毫秒）', {
             hint: '默认 1200000（20 分钟）。仅检查仍在内存中的会话；会话被回收后不再触发。',
             type: 'number',
           }),
-          textField('proactiveMaxPerDay', '每个会话每天主动发言上限', { hint: '默认 6，按成功发言计数，不是模型请求次数。目前计数只保存在内存中，重启会重置。', type: 'number' }),
+          textField('proactiveMaxPerDay', '每个会话每天主动发言上限', { hint: '默认 6，按成功发言计数，不是模型请求次数。按聊天保存，重启或新建会话不会重置；跨天重置。', type: 'number' }),
           textField('proactiveQuietHours', '静默时段（这期间不主动）', {
             hint: '默认 23:00-08:00。格式「开始-结束」，24 小时制。',
             mono: true,
@@ -621,8 +625,8 @@ window.__ModuleLoader__.load({
         /* ── 作息 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '作息'),
-          boolField('sleepMode', '启用作息', '控制睡前提醒和休息时段处理；关闭前先让已有私聊暂存消息完成交付。'),
-          textField('bedtimeAt', '睡前提醒时间', { hint: '默认 23:30；会调用主模型，每个会话每天提醒一次。', mono: true }),
+          boolField('sleepMode', '启用作息', '控制睡前提醒和休息时段处理；关闭后，已有私聊暂存消息继续交付。'),
+          textField('bedtimeAt', '睡前提醒时间', { hint: '默认 23:30；留空关闭提醒。会调用主模型，每个私聊每天至多一次，只在到点后 30 分钟内补发。', mono: true }),
           boolField('holdNightMessages', '休息时段静默', '私聊攒到醒来后回复，群聊直接略过；默认关闭。'),
           textField('sleepFrom', '默认休息开始', {
             hint: '默认 00:00。启用休息时段静默后，私聊暂存至结束，群聊不触发回复。',
@@ -638,15 +642,13 @@ window.__ModuleLoader__.load({
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '发送与诊断'),
           textField('localApiPort', '独立设置服务端口', { type: 'number', hint: '默认 34569；0 关闭。多实例使用不同端口，修改后重启宿主；连接时在页面顶部选择对应端口。' }),
-          textField('doorReplyPrefix', '门口回信前缀', { hint: '默认 回复-；以此前缀命名的文件不计入未读。' }),
-          textField('doorSenderLabel', '门口来信来源名称'),
           textField('voiceName', '语音声音名称', { hint: 'Windows SAPI 声音名称；留空使用系统默认声音。' }),
           boolField('debug', '输出调试日志', '保存后生效。日志按天写入 <workspaceRoot>/logs/dsh-qq-YYYY-MM-DD.log；未设置 workspaceRoot 时使用进程工作目录。'),
           textField('textChunkLimit', '单条消息最大字数', { hint: '超出按段落/句号切成多条发。', type: 'number' }),
           textField('splitDelayMeanMs', '分条随机间隔均值（毫秒）', { type: 'number', hint: '默认 500。大于 0 时使用随机间隔；设为 0 才使用下方固定间隔。' }),
           textField('splitDelayMs', '分条固定间隔（毫秒）', { type: 'number', hint: '默认 400。仅在随机间隔均值为 0 时生效。' }),
           textField('mergeWindowMs', '私聊连发合并等待（毫秒）', { type: 'number', hint: '默认 5000。同一人连续发送的消息合为一轮处理。' }),
-          h('div', { 'data-qq-note': '' }, '部署项需在运行 QQ 的 profile 中配置：主模型 provider/model、共享文件 memoryRoot、文件信箱 doorDir、定时阅读 reading*。此页的信箱前缀和来源名称不会单独启用信箱。')),
+          h('div', { 'data-qq-note': '' }, '部署项需在运行 QQ 的 profile 中配置：主模型 provider/model。')),
       )
     }
 

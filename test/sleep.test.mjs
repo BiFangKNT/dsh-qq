@@ -1,252 +1,120 @@
-/**
- * 作息（睡前提醒 / 晚安静默 / 夜里消息留到早上）的单元测试。
- *
- * 跟 wake.test.mjs 同一个套路：纯逻辑 + 假 manager，时钟靠参数注入，不碰真网络。
- * 盯住两条：
- *   1. 夜里收到的消息**一条都不能漏**，早上要一次性交出去（漏了就是丢消息）。
- *   2. 投递的必须是完整消息对象，不是裸字符串（2026-10-24 那次 reading 'kind' 的事故）。
- */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createSleep, parseHm, inRange, looksLikeGoodnight } from '../src/sleep.js'
+import { createAutomationState } from '../src/automation-state.js'
 
-import { pathToFileURL } from 'node:url'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+const logger = { warn() {}, error() {} }
+const configOf = () => ({ replyToPrivate: true, sleepMode: true, holdNightMessages: true,
+  bedtimeAt: '23:30', sleepFrom: '00:00', sleepTo: '08:00' })
+const recordOf = () => ({ selfId: '9', scope: 'private', peerId: '10001', sessionId: 's',
+  busy: 0, label: '测试', agent: { followup() {}, whenIdle: async () => {} } })
+const date = (day, hour, min = 0) => new Date(2026, 10, day, hour, min)
 
-const here = dirname(fileURLToPath(import.meta.url))
-const src = (name) => pathToFileURL(resolve(here, '..', 'src', name)).href
-const { createSleep, parseHm, inRange, looksLikeGoodnight } = await import(src('sleep.js'))
+test('时间与晚安判断不把疑问、否定或长句当成休息通知', () => {
+  assert.equal(parseHm('23:30'), 1410)
+  assert.equal(parseHm('25:00'), null)
+  assert.equal(parseHm(''), null)
+  assert.equal(inRange(1380, 480, 90), true)
+  assert.equal(inRange(1380, 480, 480), false)
+  for (const text of ['晚安？', '睡了吗', '不想睡', '还没睡']) assert.equal(looksLikeGoodnight(text, ['晚安', '睡了', '睡']), false)
+  assert.equal(looksLikeGoodnight('晚安', ['晚安']), true)
+})
 
-let pass = 0
-let fail = 0
-function check(name, got, want) {
-  const ok = JSON.stringify(got) === JSON.stringify(want)
-  if (ok) pass += 1
-  else {
-    fail += 1
-    console.log(`✗ ${name}: 期望 ${JSON.stringify(want)}，实际 ${JSON.stringify(got)}`)
-  }
-  return ok
-}
+test('晚安状态跨重启与换会话保留；关闭即解除，旧消息不重新休息', t => {
+  const home = mkdtempSync(join(tmpdir(), 'qq-sleep-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  let now = date(13, 22).getTime()
+  const config = configOf(), record = recordOf()
+  const boot = () => createSleep({ config, manager: {}, logger,
+    automation: createAutomationState(home), clock: () => now })
+  let sleep = boot()
+  assert.equal(sleep.noteText(record, '晚安'), true)
+  record.sessionId = 'new-session'
+  now = date(13, 23).getTime()
+  sleep = boot()
+  assert.equal(sleep.shouldHold(record), true)
+  config.holdNightMessages = false
+  sleep.sync()
+  assert.equal(sleep.shouldHold(record), false)
+  config.holdNightMessages = true
+  assert.equal(sleep.shouldHold(record), false)
+  now = date(14, 10).getTime()
+  assert.equal(sleep.noteText(record, '晚安', date(13, 22)), false)
+  assert.equal(sleep.shouldHold(record), false)
+})
 
-// ── 时间解析 ──
-check('23:30', parseHm('23:30'), 1410)
-check('08:00', parseHm('08:00'), 480)
-check('00:00', parseHm('00:00'), 0)
-check('乱写', parseHm('夜里'), null)
-check('25:00', parseHm('25:00'), null)
+test('提醒可单独关闭，群聊不提醒，补发只在30分钟内且重启不重复', t => {
+  const home = mkdtempSync(join(tmpdir(), 'qq-bedtime-'))
+  t.after(() => rmSync(home, { recursive: true, force: true }))
+  const config = configOf(), record = recordOf()
+  const boot = () => createSleep({ config, manager: {}, logger, automation: createAutomationState(home) })
+  const sleep = boot()
+  assert.equal(sleep.takeLateBedtime(record, date(13, 23, 29)), '')
+  assert.ok(sleep.takeLateBedtime(record, date(13, 23, 30)))
+  record.sessionId = 'new-session'
+  assert.equal(boot().takeLateBedtime(record, date(13, 23, 31)), '')
+  assert.equal(sleep.takeLateBedtime({ ...record, scope: 'group' }, date(13, 23, 31)), '')
+  config.bedtimeAt = ''
+  assert.equal(sleep.takeLateBedtime({ ...record, peerId: '10002' }, date(13, 23, 31)), '')
+  config.bedtimeAt = '23:00'
+  assert.equal(sleep.takeLateBedtime({ ...record, peerId: '10002' }, date(13, 23, 30)), '')
+})
 
-// ── 区间（含跨零点） ──
-check('00:00-08:00 内 01:30', inRange(0, 480, 90), true)
-check('00:00-08:00 边界 08:00', inRange(0, 480, 480), false)
-check('23:00-08:00 跨零点 01:30', inRange(1380, 480, 90), true)
-check('23:00-08:00 白天 12:00', inRange(1380, 480, 720), false)
+test('跨午夜补发属于前一天的提醒，不重复；关闭后首次读到的休息状态清除', () => {
+  const config = { ...configOf(), bedtimeAt: '23:50', sleepFrom: '01:00' }, record = recordOf()
+  const automation = createAutomationState()
+  const boot = () => createSleep({ config, manager: {}, logger, automation })
+  assert.ok(boot().takeLateBedtime(record, date(13, 23, 55)))
+  assert.equal(boot().takeLateBedtime(record, date(14, 0, 5)), '')
+  automation.set('sleep', record, { sleeping: true, wakeAt: date(14, 8).getTime(), remindedOn: '' })
+  config.sleepMode = false
+  const sleep = boot()
+  assert.equal(sleep.shouldHold(record, date(13, 23)), false)
+  config.sleepMode = true
+  assert.equal(sleep.shouldHold(record, date(13, 23)), false)
+})
 
-// ── 晚安识别 ──
-const words = ['晚安', '睡了', '睡觉', '去睡', '我先睡', '困了', '睡啦']
-check('晚安', looksLikeGoodnight('晚安', words), true)
-check('我去睡啦', looksLikeGoodnight('我去睡啦，明天聊', words), true)
-check('聊晚安话题不算', looksLikeGoodnight('你上次说的晚安是什么意思来着我想听听你的解释', words), false)
-check('空', looksLikeGoodnight('', words), false)
-
-// ── 假环境 ──
-function fakeManager(records) {
-  const delivered = []
-  return {
-    delivered,
-    list: () => records,
-    enqueue: (record, task) => Promise.resolve(task()).catch(() => {}),
-    capture: (record) => {
-      record.agent.followup = (message) => delivered.push(message)
-    },
-  }
-}
-
-function fakeRecord(label, scope = 'private') {
-  return {
-    sessionId: `s-${label}`,
-    label,
-    scope,
-    peerId: '1',
-    busy: 0,
-    lastActive: Date.now(),
-    agent: { followup: () => {}, whenIdle: async () => {} },
-  }
-}
-
-function makeConfig(over = {}) {
-  return {
-    sleepMode: true,
-    // 测试的是「夜里捂住」这条路径；线上的默认值现在是 false（半夜说话说明她醒了）
-    holdNightMessages: true,
-    bedtimeAt: '23:30',
-    sleepFrom: '00:00',
-    sleepTo: '08:00',
-    goodnightWords: words.join(','),
-    ...over,
-  }
-}
-
-const textOf = (message) => message?.content?.[0]?.text ?? ''
-
-// 1) 开启静默时，群聊和私聊都遵循休息时段
-{
-  const r = fakeRecord('私聊甲')
-  const m = fakeManager([r])
-  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
-  check('凌晨 01:30 要捂住', s.shouldHold(r, new Date(2026, 9, 25, 1, 30)), true)
-  check('早上 09:00 不捂', s.shouldHold(r, new Date(2026, 9, 25, 9, 0)), false)
-  const g = fakeRecord('群甲', 'group')
-  check('群聊休息时静默', s.shouldHold(g, new Date(2026, 9, 25, 1, 30)), true)
-}
-
-// 2) 白天说晚安 → 之后捂住，直到明早
-{
-  const r = fakeRecord('私聊乙')
-  const m = fakeManager([r])
-  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
-  const at = new Date(2026, 9, 24, 23, 30)
-  check('说晚安前不捂', s.shouldHold(r, at), false)
-  s.noteText(r, '本姑娘去睡啦', at)
-  check('说完晚安要捂', s.shouldHold(r, new Date(2026, 9, 24, 23, 45)), true)
-  check('第二天 08:00 之后放开', s.shouldHold(r, new Date(2026, 9, 25, 8, 30)), false)
-}
-
-// 3) 夜里的消息攒着，早上一次性交出去（一条都不许漏）
-{
-  const r = fakeRecord('私聊丙')
-  const m = fakeManager([r])
-  m.capture(r)
-  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
-  s.start()
-  s.hold(r, '睡不着', new Date(2026, 9, 25, 2, 10))
-  s.hold(r, '你睡了吗', new Date(2026, 9, 25, 2, 40))
-  check('夜里没投递', m.delivered.length, 0)
-  s.tick(new Date(2026, 9, 25, 7, 50))
-  check('还没出窗口不投', m.delivered.length, 0)
-  s.tick(new Date(2026, 9, 25, 8, 0))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('早上投了一轮', m.delivered.length, 1)
-  const text = textOf(m.delivered[0])
-  check('投递的是完整消息对象', typeof m.delivered[0], 'object')
-  check('带上了第一条', text.includes('睡不着'), true)
-  check('带上了第二条', text.includes('你睡了吗'), true)
-  check('说明消息在夜间暂存', text.includes('夜间暂存'), true)
-  check('没重复投递', (s.tick(new Date(2026, 9, 25, 8, 5)), m.delivered.length), 1)
-  s.stop()
-}
-
-// 4) 到点提醒睡觉：一天只提醒一次，且休息时段内不提醒
-{
-  const r = fakeRecord('私聊丁')
-  const m = fakeManager([r])
-  m.capture(r)
-  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
-  s.start()
-  s.tick(new Date(2026, 9, 24, 23, 29))
-  check('没到点不提醒', m.delivered.length, 0)
-  s.tick(new Date(2026, 9, 24, 23, 30))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('到点提醒一次', m.delivered.length, 1)
-  check('投递睡前提醒', textOf(m.delivered[0]).includes('【睡前提醒】'), true)
-  s.tick(new Date(2026, 9, 24, 23, 31))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('同一天不念第二遍', m.delivered.length, 1)
-  s.stop()
-}
-
-// 4b) 到点时会话正忙：先别记账，等它空下来补（2026-10-26 修）
-{
-  const r = fakeRecord('私聊忙')
-  const m = fakeManager([r])
-  m.capture(r)
-  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
-  s.start()
-  r.busy = 1
-  s.tick(new Date(2026, 9, 25, 23, 30))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('忙的时候不投递', m.delivered.length, 0)
-  r.busy = 0
-  s.tick(new Date(2026, 9, 25, 23, 32))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('空下来补发这一次', m.delivered.length, 1)
-  check('补的仍是睡前提醒', textOf(m.delivered[0]).includes('【睡前提醒】'), true)
-  s.tick(new Date(2026, 9, 25, 23, 33))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('补完不再念第二遍', m.delivered.length, 1)
-  s.stop()
-}
-
-// 4c) 过了补发窗口（默认 30 分钟）就不补了，免得半夜催睡
-{
-  const r = fakeRecord('私聊晚')
-  const m = fakeManager([r])
-  m.capture(r)
-  const s = createSleep({ config: makeConfig({ bedtimeAt: '21:00' }), manager: m, logger: {} })
-  s.start()
-  s.tick(new Date(2026, 9, 25, 21, 40))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('过了 30 分钟不再催睡', m.delivered.length, 0)
-  s.stop()
-}
-
-// 4d) 群里到点不催睡（2026-10-26 夜：那句「该睡了」丢进群聊，
-//     接的是陌生群友的话，她于是对着人家喊「姐姐，快十一点半啦」）
-{
-  const g = fakeRecord('群乙', 'group')
-  const m = fakeManager([g])
-  m.capture(g)
-  const s = createSleep({ config: makeConfig(), manager: m, logger: {} })
-  s.start()
-  s.tick(new Date(2026, 9, 26, 23, 30))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('群里到点也不催睡', m.delivered.length, 0)
-  s.stop()
-}
-
-// 5) 总开关关掉：什么都不做
-{
-  const r = fakeRecord('私聊戊')
-  const m = fakeManager([r])
-  m.capture(r)
-  const s = createSleep({ config: makeConfig({ sleepMode: false }), manager: m, logger: {} })
-  s.start()
-  check('关掉后不捂', s.shouldHold(r, new Date(2026, 9, 25, 2, 0)), false)
-  s.hold(r, '夜里的话', new Date(2026, 9, 25, 2, 0))
-  s.tick(new Date(2026, 9, 25, 23, 30))
-  await new Promise((r2) => setTimeout(r2, 10))
-  check('关掉后不投递', m.delivered.length, 0)
-  s.stop()
-}
-
-// 6) 错过睡前提醒的补刀（2026-10-25：会话是有人说话才建的，23:30 那一刻可能一个会话都没有）
-{
-  const r = fakeRecord('私聊己')
-  const s = createSleep({ config: makeConfig(), manager: fakeManager([r]), logger: {} })
-
-  check('还没到点不补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 20)), '')
-  check('23:29 不补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 29)), '')
-  const late = s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 34))
-  check('过了点补一句', late.includes('23:30'), true)
-  check('补的话带上现在几点', late.includes('23:34'), true)
-  check('同一天不重复补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 40)), '')
-  check('群聊不催睡', s.takeLateBedtime(fakeRecord('群', 'group'), new Date(2026, 9, 25, 23, 34)), '')
-  s.stop()
-}
-
-// 进了休息窗口就别再说「该睡了」
-{
-  const r = fakeRecord('私聊庚')
-  const s = createSleep({ config: makeConfig(), manager: fakeManager([r]), logger: {} })
-  check('凌晨不补提醒', s.takeLateBedtime(r, new Date(2026, 9, 26, 1, 0)), '')
-  s.stop()
-}
-
-// 总开关关掉就不补
-{
-  const r = fakeRecord('私聊辛')
-  const s = createSleep({ config: makeConfig({ sleepMode: false }), manager: fakeManager([r]), logger: {} })
-  check('关掉后不补', s.takeLateBedtime(r, new Date(2026, 9, 25, 23, 34)), '')
-  s.stop()
-}
-
-console.log(`\n作息测试：${pass} 项通过${fail ? `，${fail} 项失败` : ''}`)
-process.exit(fail ? 1 : 0)
+test('排队提醒执行前复查开关、权限、会话；实际结束才释放任务', async t => {
+  let now = date(13, 23, 30).getTime(), tasks = [], messages = [], idle
+  const config = configOf(), record = recordOf()
+  record.agent = { followup: m => messages.push(m), whenIdle: () => new Promise(resolve => { idle = resolve }) }
+  const manager = { list: () => [record], enqueue: (_r, fn) => { tasks.push(fn); return Promise.resolve() } }
+  const sleep = createSleep({ config, manager, logger, clock: () => now })
+  t.after(() => sleep.stop())
+  sleep.start()
+  sleep.tick()
+  config.sleepMode = false
+  sleep.sync()
+  config.sleepMode = true
+  sleep.sync()
+  await tasks.shift()()
+  assert.equal(messages.length, 0)
+  await new Promise(resolve => setImmediate(resolve))
+  sleep.tick()
+  config.privateMode = 'disabled'
+  await tasks.shift()()
+  assert.equal(messages.length, 0)
+  config.privateMode = 'open'
+  await new Promise(resolve => setImmediate(resolve))
+  sleep.tick()
+  record.sessionId = 'new-session'
+  await tasks.shift()()
+  assert.equal(messages.length, 0)
+  await new Promise(resolve => setImmediate(resolve))
+  sleep.tick()
+  const done = tasks.shift()()
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0].source.form, 'sleep')
+  let finished = false
+  done.then(() => { finished = true })
+  now += 60 * 60_000
+  sleep.tick()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(finished, false)
+  assert.equal(tasks.length, 0)
+  idle()
+  await done
+})

@@ -70,7 +70,7 @@ function fakeRecord(label, idleMs, scope = 'group') {
     sessionId: `s-${label}`,
     label,
     scope,
-    peerId: '1',
+    peerId: label,
     busy: 0,
     lastActive: Date.now() - idleMs,
     agent: { followup: () => {}, whenIdle: async () => {} },
@@ -79,6 +79,7 @@ function fakeRecord(label, idleMs, scope = 'group') {
 
 function makeConfig(over = {}) {
   return {
+    replyToPrivate: true,
     proactiveEnabled: true,
     proactiveSilentMs: 20 * 60 * 1000,
     proactiveMaxPerDay: 3,
@@ -174,10 +175,10 @@ function makeConfig(over = {}) {
   r.lastActive = base.getTime() - 60 * 60 * 1000
   const m = fakeManager([r])
   const w = createWake({ config: makeConfig({ proactiveMaxPerDay: 1 }), manager: m, logger: {} })
+  r.agent.followup = () => w.noteProactiveDelivered(r)
   w.start()
   w.tick(base)
   await new Promise((r2) => setTimeout(r2, 10))
-  w.noteProactiveDelivered(r) // 真发了一句
   w.tick(new Date(base.getTime() + 31 * 60_000))
   await new Promise((r2) => setTimeout(r2, 10))
   check('说过一次后配额就满了', m.fired, ['说过的'])

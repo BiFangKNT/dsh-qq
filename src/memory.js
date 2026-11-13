@@ -126,18 +126,6 @@ export function createMemory({ home, config, getLlm = () => undefined, logger, n
       logger?.warn?.('请求前记忆维护未完成', { peerId: record.peerId, reason: err.message })
     }),
     onSessionEvent,
-    collect(record, hits) {
-      const data = store.migrate(record)
-      let added = 0
-      for (const hit of hits) {
-        const text = String(hit.trigger?.text ?? '').trim()
-        if (!text || data.entries.some(e => e.kind === 'candidate' && e.text === text)) continue
-        store.change(data, { kind: 'candidate', text }, { source: 'group-learning' })
-        added++
-      }
-      if (added) store.write(record, data, data.revision)
-      return added
-    },
     noteSent(record, text, messageId) { (record.memorySent ??= []).push({ id: `sent:${messageId || randomUUID()}`, type: 'qq/sent', text }) },
     query(record, { kind, status, text = '' } = {}) {
       return store.read(record).entries.map(store.effective).filter(e => (!kind || e.kind === kind) && (!status || e.status === status) && e.text.includes(text))

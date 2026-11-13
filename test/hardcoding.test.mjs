@@ -6,8 +6,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:net'
 import vm from 'node:vm'
 import { ensurePeerWorkspace } from '../src/workspace.js'
-import { doorLine, doorList, markDoorRead } from '../src/door.js'
-import { buildChatPrompt, proactiveRule, readingAskRule } from '../src/prompts.js'
+import { buildChatPrompt, proactiveRule } from '../src/prompts.js'
 import { createOutbound, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
 import { installSettingsApi } from '../src/settings.js'
 import { waitFor } from './mock-dsh.mjs'
@@ -40,28 +39,9 @@ test('已有用户 AGENTS.md 不再自动追加模板或覆盖自定义内容', 
   assert.equal(await readFile(join(dir, 'AGENTS.md'), 'utf8'), text)
 })
 
-test('门口来源和回信前缀可配置，切换前缀立即刷新列表且已读逻辑一致', async t => {
-  const dir = await temporary(t)
-  await writeFile(join(dir, '回复-今天.md'), '默认回信')
-  await writeFile(join(dir, '助理-今天.md'), '自定义回信')
-  const config = { doorDir: dir }
-  assert.deepEqual(doorList(config).map(item => item.name), ['助理-今天.md'])
-  config.doorReplyPrefix = '助理-'
-  config.doorSenderLabel = '写作会话'
-  assert.deepEqual(doorList(config).map(item => item.name), ['回复-今天.md'])
-  assert.equal(markDoorRead(config, '助理-今天.md'), false)
-  const text = doorLine(config)
-  assert.match(text, /来自写作会话/)
-  assert.match(text, /助理-哪天.md/)
-  assert.doesNotMatch(text, /大姐|老三|姐姐|一个钟头/)
-  assert.equal(markDoorRead(config, '回复-今天.md'), true)
-  assert.deepEqual(doorList(config), [])
-  assert.throws(() => doorList({ ...config, doorReplyPrefix: '../' }), /前缀/)
-})
-
 test('通用提示词不强加私人关系或固定账号', () => {
   const config = { ownerLabel: '组长', ownerIds: ['11001'], aiGirls: false }
-  const text = [buildChatPrompt(config, { isGroup: true }), proactiveRule(config), readingAskRule(config)].join('\n')
+  const text = [buildChatPrompt(config, { isGroup: true }), proactiveRule(config)].join('\n')
   assert.doesNotMatch(text, /2710586329|姐姐|另一只鲸鲸/)
 })
 

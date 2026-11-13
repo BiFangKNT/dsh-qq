@@ -115,13 +115,10 @@ test('群与私聊作息独立，私聊按专用结束时间交付，群不排�
     manager: { list: () => [privateRecord], enqueue: (_r, task) => task() }, logger })
   assert.equal(s.shouldHold(groupRecord, new Date(2026, 0, 1, 23)), true)
   assert.equal(s.shouldHold(privateRecord, new Date(2026, 0, 1, 23)), false)
-  assert.equal(s.hold(groupRecord, '群消息'), false)
-  s.hold(privateRecord, '私聊消息')
-  s.start()
-  try {
-    s.tick(new Date(2026, 0, 2, 9)); assert.equal(messages.length, 0)
-    s.tick(new Date(2026, 0, 2, 10)); assert.equal(messages.length, 1)
-  } finally { s.stop() }
+  assert.equal(s.shouldHold(privateRecord, new Date(2026, 0, 2, 9)), true)
+  assert.equal(s.shouldHold(privateRecord, new Date(2026, 0, 2, 10)), false)
+  assert.equal(s.shouldHold(groupRecord, new Date(2026, 0, 2, 6)), false)
+  assert.equal(messages.length, 0, '作息模块不另开早晨汇总请求')
 })
 
 test('上下文超限保留原会话和消息，提示压缩或明确新建', async () => {
@@ -228,7 +225,7 @@ test('空间超时只发一次，保留额度；并发发布不能突破日限�
   assert.equal(JSON.parse(await readFile(join(home, 'qzone-state.json'), 'utf8')).count, 2)
 })
 
-test('新增工具沿用真实会话权限和静默闸', async t => {
+test('空间发布工具仅允许授权账号私聊调用', async t => {
   const home = await temporary(t)
   const tools = new Map()
   const record = { scope: 'group', peerId: '10001' }
@@ -238,9 +235,8 @@ test('新增工具沿用真实会话权限和静默闸', async t => {
   })
   const exec = { agent: { session: { id: 's' } } }
   await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /授权账号私聊/)
-  record.scope = 'private'; record.quietRound = true
-  await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /夜里/)
-  await assert.rejects(tools.get('qq_send_voice').execute({ text: '正文' }, exec), /夜里/)
+  record.scope = 'private'; record.peerId = '10002'
+  await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /授权账号私聊/)
 })
 
 test('入站实例释放后取消私聊合并定时器，不再投递', async () => {

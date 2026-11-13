@@ -8,7 +8,7 @@ import { readPrivateHistory } from './private-history.js'
 import { createQzonePublisher } from './qzone.js'
 
 /** 新工具只负责参数与会话适配，读记录、合成和发布各有独立边界。 */
-export function registerExtraTools(tools, { client, manager, config, home, needRecord, assertQuiet, assertText, noteToolSent }) {
+export function registerExtraTools(tools, { client, manager, config, home, needRecord, assertText, noteToolSent }) {
   const publisher = createQzonePublisher({ client, home })
   tools.register({
     name: 'qq_send_voice',
@@ -23,7 +23,6 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
-      assertQuiet(record)
       const text = cleanOutboundText(args.text)
       await assertText(text, record, 'qq_send_voice')
       let scope = record.scope
@@ -90,7 +89,6 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
       if (record.scope !== 'private' || !listOf(config.ownerIds).includes(String(record.peerId))) {
         throw new Error('只有授权账号私聊可以发布空间说说')
       }
-      assertQuiet(record)
       const text = cleanOutboundText(args.text)
       if (text) await assertText(text, record, 'qq_qzone_send')
       if (args.images && !Array.isArray(args.images)) throw new Error('images 必须为数组')

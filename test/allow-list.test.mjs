@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { listOf } from '../src/config.js'
+import { allowPrivate, allowGroup } from '../src/access.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = dirname(here)
@@ -57,29 +58,15 @@ eq('布尔不炸', listOf(true), [])
 eq('空数组', listOf([]), [])
 
 console.log('\n[2] 四个文件里那几处裸 .map 已经换掉')
-ok(
-  'inbound.js 私聊门控用 listOf',
-  flat('inbound.js').includes('listOf(config.privateAllow)') &&
-    !flat('inbound.js').includes('privateAllow??[]).map'),
-  '还在直接 .map()',
-)
-ok(
-  'inbound.js 群门控用 listOf',
-  flat('inbound.js').includes('listOf(config.groupAllow)') &&
-    !flat('inbound.js').includes('groupAllow??[]).map'),
-  '还在直接 .map()',
-)
+eq('私聊门控接受字符串名单', allowPrivate({ replyToPrivate: true, privateMode: 'allowlist', privateAllow: '123,456' }, '123'), true)
+eq('私聊门控拒绝名单外账号', allowPrivate({ replyToPrivate: true, privateMode: 'allowlist', privateAllow: '123' }, '456'), false)
+eq('群门控接受字符串名单', allowGroup({ groupMode: 'allowlist', groupAllow: '123,456' }, '456'), true)
+eq('群门控拒绝名单外群', allowGroup({ groupMode: 'allowlist', groupAllow: '123' }, '456'), false)
 ok(
   'index.js 启动检查用 listOf',
   flat('index.js').includes('listOf(config.privateAllow)') &&
     !flat('index.js').includes('privateAllow??[]).map'),
   '还在直接 .map()',
-)
-ok(
-  'reading.js 取第一个 peered 用 listOf',
-  flat('reading.js').includes('listOf(config?.privateAllow)[0]') &&
-    !flat('reading.js').includes('privateAllow?.[0]'),
-  '还在 ?.[0]，字符串会取到第一个字符',
 )
 ok(
   'wake.js 复活冷会话用 listOf',

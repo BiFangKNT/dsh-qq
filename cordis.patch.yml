@@ -63,5 +63,6 @@
         splitDelayMs: 400
 
         # ── 其他 ──
+        proactiveEnabled: false
         sessionIdleTimeout: 1800000
         debug: false

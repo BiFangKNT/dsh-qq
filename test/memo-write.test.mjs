@@ -1,39 +1,37 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { registerTools } from '../src/tools.js'
 
-/**
- * 2026-10-30 姐姐要的「打通记忆」。
- *
- * 病根：agent 自己的 write / edit 只落在它那一格的工作目录里（文件沙箱按会话
- * 工作目录算），`本地记忆区` 在外面，写了就是 denied —— 而 QQ 那边没有审批
- * 通道，连提权的框都弹不出来（她 10-29 23:46 的原话）。
- *
- * 解法：插件代笔。笔写在宿主进程里，直接碰文件系统。但笔必须窄 ——
- * 只认 .md/.txt、路径不许跳出记忆区。不靠它自觉，靠函数就写不了别处。
- */
-
 const quiet = { info() {}, warn() {}, debug() {}, error() {} }
 
 /** 按真插件的方式注册一遍，把工具都收进 Map。 */
-function boot(config) {
+function boot(overrides) {
+  const config = { replyToPrivate: true, privateMode: 'all', groupMode: 'all', ownerIds: ['10001'], ...overrides }
+  const record = { scope: 'private', peerId: '10001', sessionId: 'memo' }
   const tools = new Map()
   const ctx = {
     get: (name) => (name === 'tools' ? { register: (t) => tools.set(t.name, t) } : undefined),
   }
   registerTools(ctx, {
     client: {},
-    manager: {},
+    manager: { find: id => id === 'memo' ? record : null },
     config,
     logger: quiet,
     pin: {},
     wake: {},
     noteSelfSaid() {},
   })
+  const memo = tools.get('qq_memo')
+  if (memo) {
+    const execute = memo.execute.bind(memo)
+    memo.execute = (args, exec = { agent: { session: { id: 'memo' } } }) => execute(args, exec)
+    memo.record = record
+    memo.config = config
+  }
   return tools
 }
 
@@ -89,7 +87,7 @@ test('read 一个还没有的文件：不抛，返回 ok:false', async () => {
   const memo = boot({ memoryRoot: root }).get('qq_memo')
   const r = await memo.execute({ action: 'read', path: '日记/1999-01-01.md' })
   assert.equal(r.ok, false)
-  assert.ok(r.message.includes('还没有'))
+  assert.match(r.message, /ENOENT/)
 })
 
 test('路径跳不出记忆区（.. / 绝对路径都不行）', async () => {
@@ -99,7 +97,7 @@ test('路径跳不出记忆区（.. / 绝对路径都不行）', async () => {
   for (const bad of ['../偷渡.md', '日记/../../偷渡.md', outside, '/etc/passwd.md']) {
     const r = await memo.execute({ action: 'append', path: bad, text: 'x' })
     assert.equal(r.ok, false, `「${bad}」不该写得出去`)
-    assert.ok(/记忆区外面/.test(r.message), `「${bad}」的拒绝理由要说清: ${r.message}`)
+    assert.ok(/超出共享目录/.test(r.message), `「${bad}」的拒绝理由要说清: ${r.message}`)
     assert.equal(existsSync(join(root, '..', '偷渡.md')), false, '真的没写出去')
   }
 })
@@ -149,4 +147,47 @@ test('三只共用一个 memoryRoot：谁写都落在同一份文件里', async 
   await b.execute({ action: 'append', path: '今天.md', text: '老二写的' })
   const text = readFileSync(join(root, '今天.md'), 'utf8')
   assert.ok(text.includes('老大写的') && text.includes('老二写的'), '两份都在，没互相盖掉')
+})
+
+test('共享文件按当前聊天权限访问：群与普通私聊只读，授权私聊可写', async t => {
+  const root = mkRoot()
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(join(root, '公开.md'), '共享内容')
+  const memo = boot({ memoryRoot: root }).get('qq_memo')
+  for (const record of [{ scope: 'group', peerId: '10001' }, { scope: 'private', peerId: '10002' }]) {
+    Object.assign(memo.record, record)
+    assert.equal((await memo.execute({ action: 'list' })).ok, true)
+    assert.equal((await memo.execute({ action: 'read', path: '公开.md' })).message, '共享内容')
+    for (const action of ['write', 'append']) {
+      assert.equal((await memo.execute({ action, path: '公开.md', text: '不应写入' })).ok, false)
+    }
+  }
+  assert.equal(readFileSync(join(root, '公开.md'), 'utf8'), '共享内容')
+  Object.assign(memo.record, { scope: 'private', peerId: '10001' })
+  assert.equal((await memo.execute({ action: 'write', path: '公开.md', text: '授权写入' })).ok, true)
+  memo.config.ownerIds = []
+  assert.equal((await memo.execute({ action: 'write', path: '公开.md', text: '已撤销' })).ok, false)
+  memo.config.privateMode = 'disabled'
+  assert.equal((await memo.execute({ action: 'read', path: '公开.md' })).ok, false)
+  memo.record.scope = 'group'
+  memo.config.groupMode = 'allowlist'
+  memo.config.groupAllow = ['70001']
+  assert.equal((await memo.execute({ action: 'list' })).ok, false)
+  assert.equal((await memo.execute({ action: 'list' }, {})).ok, false, '普通Agent没有QQ上下文时不可访问')
+})
+
+test('共享目录不存在时授权写入可创建，链接不能指向目录外', async t => {
+  const dir = mkRoot(), outside = mkRoot()
+  t.after(() => { rmSync(dir, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }) })
+  const root = join(dir, 'new-root')
+  const memo = boot({ memoryRoot: root }).get('qq_memo')
+  assert.equal((await memo.execute({ action: 'write', path: 'new.md', text: '创建' })).ok, true)
+  writeFileSync(join(outside, 'secret.md'), '不可读取')
+  symlinkSync(outside, join(root, 'escape'), 'junction')
+  for (const action of ['read', 'write', 'append', 'list']) {
+    const result = await memo.execute({ action, path: action === 'list' ? 'escape' : 'escape/secret.md', text: '不可写' })
+    assert.equal(result.ok, false, action)
+    assert.match(result.message, /链接指向共享目录之外/)
+  }
+  assert.equal(readFileSync(join(outside, 'secret.md'), 'utf8'), '不可读取')
 })

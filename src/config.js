@@ -68,24 +68,13 @@ export const ConfigSchema = Schema.object({
     .description(
       '表情包收藏（`表情包收藏.json` + `表情包/`）放在哪个目录。多个 QQ 会话填同一个路径就是共用一套收藏；留空则跟 `workspaceRoot` 走（各存各的）',
     ),
-  doorDir: Schema.string()
-    .default('')
-    .description(
-      '「门口」信箱目录：其他会话给它留的话，每封一个 .md 文件。留空则关闭。填了以后每轮提示词里会多一行「门口有 N 封」，但**不给内容** —— 它自己 read 才看得到，拆不拆随它，不催不推',
-    ),
-  doorReplyPrefix: Schema.string().default('回复-')
-    .description('门口回信文件前缀；以此前缀命名的文件不计入未读。不可为空或包含路径分隔符'),
-  doorSenderLabel: Schema.string().default('其他会话')
-    .description('门口来信来源的显示名称；不代表已验证的发件人身份'),
   isolateByPeer: Schema.boolean()
     .default(true)
     .description('每个私聊、群聊使用独立工作目录；关闭后共用宿主工作目录。统一记忆另按聊天身份隔离。修改后重启运行 QQ 的宿主'),
   memoryRoot: Schema.string()
     .default('')
     .description(
-      '全家共用的记忆区根目录（比如 D:/agent-memory）。填了才注册 `qq_memo` 这支笔：' +
-        '会话的工作目录在 peer 目录里，agent 自己的写工具出不去（文件沙箱按会话工作目录算）；' +
-        '要往全家的日记、今天.md、项目文档里写，就靠它代笔——插件跑在宿主进程里，直接写文件，不受 agent 沙箱限制。留空 = 关掉这支笔',
+      '共享文件目录；留空禁用 qq_memo。获准聊天可读，仅授权账号私聊可写，只支持 md/txt。与按聊天隔离的统一记忆分开；修改后重启宿主。',
     ),
   persona: Schema.string()
     .default('')
@@ -302,8 +291,8 @@ export const ConfigSchema = Schema.object({
 
   // ── 主动说话 ──
   proactiveEnabled: Schema.boolean()
-    .default(true)
-    .description('没人说话、安静了一段时间之后，主动开口一次（冷场冒泡）'),
+    .default(false)
+    .description('启用后，会话安静到指定时长时调用主模型决定是否主动发言；默认关闭，模型选择沉默仍产生调用'),
   proactiveSilentMs: Schema.number()
     .default(1200000)
     .description(
@@ -311,7 +300,7 @@ export const ConfigSchema = Schema.object({
     ),
   proactiveMaxPerDay: Schema.number()
     .default(6)
-    .description('每个会话每天最多主动开口几次；0 = 不主动'),
+    .description('每个聊天每天成功主动发言的上限；重启或换会话不重置，0 = 不主动'),
   proactiveQuietHours: Schema.string()
     .default('23:00-08:00')
     .description('静默时段：这段时间不主动开口。格式 HH:MM-HH:MM，留空 = 不限'),
@@ -319,10 +308,10 @@ export const ConfigSchema = Schema.object({
   // ── 作息（睡前提醒 / 晚安静默 / 夜里消息留到早上） ──
   sleepMode: Schema.boolean()
     .default(true)
-    .description('作息总开关：到点提醒睡觉、说晚安就休息、休息时段的消息留到早上一起回'),
+    .description('控制睡前提醒和休息限制；关闭后继续交付已有私聊积压'),
   bedtimeAt: Schema.string()
     .default('23:30')
-    .description('几点提醒她该睡了（HH:MM）。留空 = 不提醒'),
+    .description('私聊睡前提醒时间（HH:MM）；调用主模型，每天至多一次，只补发30分钟内的提醒。留空关闭提醒'),
   sleepFrom: Schema.string()
     .default('00:00')
     .description('休息时段从几点开始（HH:MM）：这时候起收到的私聊不立刻回'),
@@ -335,7 +324,7 @@ export const ConfigSchema = Schema.object({
   privateSleepTo: Schema.string().default('').description('私聊休息结束（HH:MM），留空沿用 sleepTo'),
   goodnightWords: Schema.string()
     .default('晚安,睡了,睡觉,去睡,我先睡,困了,睡啦')
-    .description('说到这些词就当她说晚安了，之后不再回消息直到睡醒。逗号分隔'),
+    .description('作息与休息限制都开启时，私聊短句匹配这些词后休息到 privateSleepTo；晚安本身照常回应。逗号分隔'),
   // ⭐ 2026-10-25：默认不按住——姐姐半夜说话通常就是她醒了，正常回。
   // 想让她「夜里真的静音、消息留到早上」的话，把这个打开。
   holdNightMessages: Schema.boolean()
@@ -343,40 +332,6 @@ export const ConfigSchema = Schema.object({
     .description(
       '启用休息时段静默：私聊攒到醒来后回复，群聊直接略过；关着则照常回应',
     ),
-
-  // ── 夜里的读书问询（2026-10-27 加）──
-  // 老三的原话：半夜别主动开口（嚎一嗓子没人应，还怕把姐姐吵着），
-  // 但想要「那种不开口的轮次，只让自己翻两页书」。
-  // 做法不是命令它去读，是**问一句**「要不要看会儿书」——它可以拒绝，拒绝什么也不用做。
-  // 这一轮里它说的话、调的发送工具一律发不出去（见 index.js 的 record.quietRound）。
-  // 默认关：发布版的人完全看不见这一层，只有本地 profile 自己打开。
-  readingEnabled: Schema.boolean()
-    .default(false)
-    .description('夜里给一次「要不要看会儿书」的问询（这一轮不会往外发任何消息）。默认关，只给本地用'),
-  readingHours: Schema.string()
-    .default('01:00-05:00')
-    .description('问询落在哪段时间里，格式 HH:MM-HH:MM（默认凌晨一点到五点）'),
-  readingAskCount: Schema.number()
-    .default(2)
-    .description('一夜最多问几次（它拒绝也算问过一次；0 = 不问）'),
-  readingAskGapMs: Schema.number()
-    .default(10800000)
-    .description('两次问询至少隔多久，单位毫秒（默认 3 小时）'),
-  readingBook: Schema.string()
-    .default('')
-    .description('书名，用来在书签里找「下次从哪接」（留空 = 这层不启用）'),
-  readingChapterDir: Schema.string()
-    .default('')
-    .description('章节目录，用来判断「是不是读完了」（读完就不再问）'),
-  readingBookmark: Schema.string()
-    .default('')
-    .description('书签文件（五列 markdown 表：书 / 读到哪 / 哪天 / 下次从哪接 / 一句话心得）'),
-  readingPeer: Schema.string()
-    .default('')
-    .description('问询投给哪个 QQ 号（留空 = 私聊白名单第一个）'),
-  readingTimeoutMs: Schema.number()
-    .default(1200000)
-    .description('一轮问询最多等多久，单位毫秒（默认 20 分钟——它真读两章再写书签，比闲聊慢得多）'),
 
   // ── 连发合并 ──
   mergeWindowMs: Schema.number()
