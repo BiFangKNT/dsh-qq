@@ -1,4 +1,29 @@
-import { parseMessageId } from './tool-send.js'
+import { requireMessageId } from './tool-send.js'
+
+const toolSends = new WeakMap()
+
+export const toolSendTexts = record => toolSends.get(record) ?? []
+export const clearToolSends = record => toolSends.delete(record)
+
+async function trackToolSend(tracking, operation) {
+  const { record, target = record, text } = tracking ?? {}
+  const current = record && target.scope === record.scope && String(target.peerId) === String(record.peerId)
+  const sessionId = record?.sessionId
+  const entries = current ? toolSends.get(record) ?? [] : null
+  if (current) toolSends.set(record, entries)
+  const note = () => {
+    if (!current || record.sessionId !== sessionId || toolSends.get(record) !== entries || !text) return
+    entries.push(String(text).trim())
+  }
+  try {
+    const result = await operation()
+    note()
+    return result
+  } catch (error) {
+    if (!['rejected', 'not-sent'].includes(error.onebotDelivery)) note()
+    throw error
+  }
+}
 
 export const TOOL_RESULT_LIMIT = 12000
 export const jsonSize = value => JSON.stringify(value).length
@@ -27,23 +52,22 @@ export function fitToolText(text, offset, build, limit = TOOL_RESULT_LIMIT) {
 }
 
 /** 仅把协议明确拒绝或调用前未连接归为失败，其余异常保留结果未确认。 */
-export async function callToolAction(client, action, params, logger) {
-  try {
-    return await client.call(action, params)
-  } catch (err) {
-    logger?.warn?.(`${action} 工具调用失败：${err?.message ?? err}`)
-    const state = err?.onebotDelivery === 'rejected'
-      ? `协议拒绝${Number.isSafeInteger(err.retcode) ? `（retcode=${err.retcode}）` : ''}`
-      : err?.onebotDelivery === 'not-sent' ? '未发送：连接不可用' : '结果未确认'
-    throw new Error(state)
-  }
+export async function callToolAction(client, action, params, logger, tracking) {
+  return trackToolSend(tracking, async () => {
+    try {
+      return await client.call(action, params)
+    } catch (err) {
+      logger?.warn?.(`${action} 工具调用失败：${err?.message ?? err}`)
+      const state = err?.onebotDelivery === 'rejected'
+        ? `协议拒绝${Number.isSafeInteger(err.retcode) ? `（retcode=${err.retcode}）` : ''}`
+        : err?.onebotDelivery === 'not-sent' ? '未发送：连接不可用' : '结果未确认'
+      throw Object.assign(new Error(state), { onebotDelivery: err?.onebotDelivery ?? 'uncertain' })
+    }
+  })
 }
 
-export async function sendToolMessage(client, action, params, logger) {
-  const result = await callToolAction(client, action, params, logger)
-  const messageId = parseMessageId(result?.message_id ?? result?.data?.message_id)
-  if (messageId === null) throw new Error('发送未确认：回执缺少消息 ID')
-  return messageId
+export async function sendToolMessage(client, action, params, logger, tracking) {
+  return trackToolSend(tracking, async () => requireMessageId(await callToolAction(client, action, params, logger)))
 }
 
 export const EXTERNAL_ACTION_RULE = '异常分为未发送、协议拒绝和结果未确认；未确认可能已执行，先核对，不自动重试。'

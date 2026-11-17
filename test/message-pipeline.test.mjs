@@ -54,7 +54,7 @@ test('分段发送保存全部计划与进度，失败后不重做主模型，�
   const sends = store.sends(meta)
   assert.equal(sends.filter(row => row.status === 'sent').length, 1)
   assert.equal(sends.filter(row => row.status === 'rejected').length, 1)
-  assert.ok(sends.some(row => row.status === 'queued'), '后续未发段落仍有记录')
+  assert.ok(sends.some(row => row.status === 'not-sent'), '后续未调用段落明确记为未发送')
   const calls = env.napcat.calls.filter(call => call.action === 'send_private_msg').length
   await env.reload()
   await new Promise(resolve => setTimeout(resolve, 1100))

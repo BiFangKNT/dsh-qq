@@ -8,6 +8,7 @@ import { createMockEnvironment } from './mock-environment.mjs'
 import { startMockNapcat } from './mock-napcat.mjs'
 import { waitFor, textOf } from './mock-dsh.mjs'
 import { listFaces } from '../src/faces.js'
+import { createMessageStore } from '../src/message-store.js'
 
 const sent = env => env.napcat.calls.filter(c => c.action === 'send_private_msg' || c.action === 'send_group_msg')
 async function setup(t, options) {
@@ -150,7 +151,7 @@ test('真实工具调用、预设文件读写和发图下载夹具，失败不�
     { type: 'tool', name: 'write', args: { path: '测试.md', content: '测试文件' } },
     { type: 'tool', name: 'read', args: { path: '测试.md' } },
     { type: 'tool', name: 'qq_send', args: { text: '<text>工具回复</text>' } },
-    { type: 'text', text: '不能重复发送的正文' },
+    { type: 'text', text: '工具回复' },
   ])
   env.emitMessage({ text: '请调用工具', image: true })
   await waitFor(() => sent(env).length === 1); await idle(env)
@@ -158,7 +159,8 @@ test('真实工具调用、预设文件读写和发图下载夹具，失败不�
   assert.equal(agent.results[1].result.text, '测试文件')
   assert.match(textOf(agent.received[0]), /已保存到本机|图片|\.png/)
   assert.match(JSON.stringify(sent(env)[0]), /工具回复/)
-  assert.doesNotMatch(JSON.stringify(sent(env)), /不能重复发送|<text>/)
+  assert.equal(sent(env).length, 1)
+  assert.doesNotMatch(JSON.stringify(sent(env)), /<text>/)
   env.host.queueTurn([{ type: 'tool', name: 'read', args: { path: '../不能越界.md' } }])
   env.emitMessage({ text: '越界测试' })
   await waitFor(() => agent.received.length === 2); await idle(env)
@@ -449,6 +451,62 @@ test('消息实际发出但回执缺少消息 ID 时，工具和历史均标为�
   assert.equal(env.napcat.calls.filter(call => call.action === 'send_group_msg').length, 1)
 })
 
+for (const mode of ['missing-id', 'rejected', 'signed-id', 'zero-id']) {
+  test(`普通正文 ${mode}：发送记录、记忆依据和默认撤回目标按回执确认`, async t => {
+    const memoryRequests = []
+    const env = await setup(t, { autoReply: false, config: { chatLog: false, memoryProvider: 'mock', memoryModel: 'mock' },
+      llm: { async *stream(options) {
+        memoryRequests.push(options)
+        yield { type: 'text-delta', index: 0, text: '{"changes":[]}' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      } } })
+    const meta = { selfId: '10001', scope: 'private', peerId: '11001' }
+    const store = createMessageStore(join(env.root, 'dsh-qq'))
+    env.emitMessage({ text: '先发一条', steps: [{ type: 'text', text: '之前确认发送的正文' }] })
+    await waitFor(() => sent(env).length === 1); await idle(env)
+    const agent = [...env.host.agents.values()][0]
+    const oldMessage = store.query(meta).find(row => row.direction === 'outgoing')
+    const oldId = Number(oldMessage.messageId)
+    if (mode === 'rejected') env.napcat.failNext('send_private_msg', { wording: '模拟拒绝' })
+    else env.napcat.failNext('send_private_msg', { afterApply: true, data: mode === 'missing-id' ? {} : { message_id: mode === 'zero-id' ? 0 : -71 } })
+    const beforeMemory = memoryRequests.length
+    env.emitMessage({ text: '再发一条', steps: [{ type: 'text', text: '这条正文需要核对发送状态' }] })
+    await waitFor(() => agent.received.length === 2); await idle(env)
+    await waitFor(() => memoryRequests.slice(beforeMemory).some(request => textOf(request.messages[0]).includes('这条正文需要核对发送状态')))
+    const outgoing = store.query(meta).filter(row => row.direction === 'outgoing' && row.body === '这条正文需要核对发送状态')
+    assert.equal(outgoing.length, 1)
+    const confirmed = ['signed-id', 'zero-id'].includes(mode)
+    assert.equal(outgoing[0].status, confirmed ? 'sent' : mode === 'rejected' ? 'rejected' : 'uncertain')
+    const evidence = memoryRequests.slice(beforeMemory).flatMap(request => JSON.parse(textOf(request.messages[0])).evidence)
+    assert.equal(evidence.some(item => item.type === 'qq/sent' && item.text === '这条正文需要核对发送状态'), confirmed)
+    if (confirmed) assert.ok(evidence.some(item => item.id === `sent:${mode === 'zero-id' ? 0 : -71}`))
+    // 模拟协议消息实际 ID 与故障返回 ID 不同，未知/失败时默认撤回仍须指向上一条。
+    env.emitMessage({ text: '撤回检查', steps: [{ type: 'tool', name: 'qq_recall', args: {} }] })
+    await waitFor(() => agent.results.length === 1); await idle(env)
+    if (!confirmed) assert.equal(env.napcat.calls.find(call => call.action === 'delete_msg').params.message_id, oldId)
+    else assert.equal(env.napcat.calls.find(call => call.action === 'get_msg' && call.params.message_id === (mode === 'zero-id' ? 0 : -71))?.params.message_id, mode === 'zero-id' ? 0 : -71)
+    assert.equal(sent(env).length, 2, '失败或未确认不自动补发')
+    if (!confirmed) assert.match(textOf(agent.received.at(-1)), mode === 'rejected' ? /协议拒绝/ : /结果未确认/)
+  })
+}
+
+for (const uncertain of [false, true]) {
+  test(`当前聊天发送工具${uncertain ? '回执缺失' : '被拒绝'}后，模型可发送后续结果说明`, async t => {
+    const env = await setup(t, { autoReply: false })
+    env.napcat.failNext('send_private_msg', uncertain ? { afterApply: true, data: {} } : { wording: '模拟拒绝' })
+    env.emitMessage({ text: '测试失败后的正文', steps: [
+      { type: 'tool', name: 'qq_send', args: { text: '尝试发送的原文' } },
+      ...(uncertain ? [{ type: 'text', text: '尝试发送的原文' }] : []),
+      { type: 'text', text: uncertain ? '发送结果未知，请核对记录。' : '发送被拒绝，请检查配置。' },
+    ] })
+    await waitFor(() => sent(env).length === 2); await idle(env)
+    const agent = [...env.host.agents.values()][0]
+    assert.equal(agent.results[0].isError, true)
+    assert.match(JSON.stringify(sent(env).at(-1)), uncertain ? /结果未知/ : /发送被拒绝/)
+    assert.equal(sent(env).length, 2)
+  })
+}
+
 test('重载恢复会话和预设，后续一条消息只处理一次；上下文超限保留会话', async t => {
   const env = await setup(t)
   env.emitMessage({ text: '重载前' })
@@ -487,7 +545,7 @@ test('断线重连与 API 失败可控，模拟地址不能通过设置改成真
   env.emitMessage({ text: '恢复后' })
   await waitFor(() => [...env.host.agents.values()][0].received.length === 2)
   await idle(env)
-  assert.match(textOf([...env.host.agents.values()][0].received[1]), /没送出去|没能送出去/)
+  assert.match(textOf([...env.host.agents.values()][0].received[1]), /协议拒绝/)
 })
 
 test('NapCat 严格处理鉴权、未知 action 和已处理但回执丢失', async t => {

@@ -9,6 +9,13 @@ export function parseMessageId(value) {
   return Number.isSafeInteger(id) ? id : null
 }
 
+/** 普通正文和工具消息共用确认规则；缺少 ID 不能证明未发送。 */
+export function requireMessageId(result) {
+  const id = parseMessageId(result?.message_id ?? result?.data?.message_id)
+  if (id !== null) return id
+  throw Object.assign(new Error('发送未确认：回执缺少消息 ID'), { onebotDelivery: 'uncertain' })
+}
+
 /** 解析工具发送目标；显式填写当前聊天不算跨聊天发送。 */
 export function resolveSendTarget(record, to) {
   if (to === undefined || to === '') return { selfId: record.selfId, scope: record.scope, peerId: String(record.peerId) }

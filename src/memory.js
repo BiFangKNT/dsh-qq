@@ -141,7 +141,7 @@ export function createMemory({ home, config, getLlm = () => undefined, logger, c
       logger?.warn?.('请求前记忆维护未完成', { peerId: record.peerId, reason: err.message })
     }),
     onSessionEvent,
-    noteSent(record, text, messageId) { (record.memorySent ??= []).push({ id: `sent:${messageId || randomUUID()}`, type: 'qq/sent', text }) },
+    noteSent(record, text, messageId) { (record.memorySent ??= []).push({ id: `sent:${messageId ?? randomUUID()}`, type: 'qq/sent', text }) },
     query(record, { kind, status, text = '' } = {}) {
       return store.read(record).entries.map(store.effective).filter(e => (!kind || e.kind === kind) && (!status || e.status === status) && e.text.includes(text))
     },

@@ -1,802 +1,154 @@
 /**
- * 出站：把 agent 跑出来的文字送回 QQ。
- *
- * 订阅的是宿主的 `session/event`，一次 turn 里可能收到多条：
- *   - assistant/chunk   : 增量文本（流式）
- *   - assistant/message : 一轮完整的助手消息
- *   - turn/end          : 本轮结束（带错误信息）
- * 其他类型（tool/call、tool/result）默认不发，除非配置里打开了 showToolResults。
- *
- * 流式策略（只对私聊开）：
- *   攒够一个完整句子就发一条，但一个 turn 里最多发 streamMaxChunks 条，
- *   超了就憋回去，等 assistant/message 落定时把剩下的整段发完。
+ * 将宿主 text 正文发送到 QQ，reasoning 和工具调用消息不外发。
+ * 流式按原始字符位置补齐落定消息，不按语言或措辞删改正文。
  */
-
-function pickSession(args) {
-  if (args.length >= 2) return { session: args[0], raw: args[1] }
-  const raw = args[0]
-  return { session: raw?.session, raw }
-}
-
 import { SILENT_MARKER } from './prompts.js'
-import { resolveSendTarget } from './tool-send.js'
+import { cleanOutboundText } from './shared/outbound-text.js'
+import { clearToolSends, toolSendTexts } from './tool-result.js'
 
 function sessionIdOf(session, raw) {
-  const id =
-    session?.header?.id ??
-    session?.id ??
-    raw?.sessionId ??
-    raw?.session?.id ??
-    raw?.session?.header?.id
-  return id === undefined || id === null ? '' : String(id)
+  const id = session?.header?.id ?? session?.id ?? raw?.sessionId ?? raw?.session?.header?.id ?? raw?.session?.id
+  return id == null ? '' : String(id)
 }
 
-/** 从 assistant 消息里抠出纯文本。 */
 export function extractText(message) {
-  const content = message?.content
-  if (!Array.isArray(content)) {
-    if (typeof content === 'string') return content.trim()
-    return ''
-  }
-  let out = ''
-  for (const part of content) {
-    if (part?.type === 'text' && typeof part.text === 'string') out += part.text
-  }
-  return out.trim()
+  if (typeof message?.content === 'string') return message.content
+  if (!Array.isArray(message?.content)) return ''
+  return message.content.filter(part => part?.type === 'text' && typeof part.text === 'string')
+    .map(part => part.text).join('')
 }
 
-/** 句子边界：中文句号/问号/叹号/省略号，以及换行。 */
+export function hasToolUse(message) {
+  return Array.isArray(message?.content) &&
+    message.content.some(part => /tool|function/i.test(String(part?.type ?? '')))
+}
+
 const SENTENCE_END = /^([\s\S]*?[。！？!?…\n])/
-
-/**
- * 模型偶尔把「想一想再改一版」的过程写进正文（不是 reasoning channel）。
- * 2026-10-25 15:24 和 15:28 各出现一次，原样发到了 QQ 上。
- * 这里按「整行像思考」兜底剥掉——只认行首那几个标志词，不碰正常中文。
- */
-const LEAK_LINE = [
-  /^Hmm\b/i,
-  /^Maybe\b/i,
-  /^Let me\b/i,
-  /^Two lines?\b/i,
-  /^-\s*user asks about\b/i,
-  /^Keep it\./i,
-  // 2026-10-26 19:30 修：原来是 /^I (?:should|will|'ll|need to)\b/，要求 `I` 后面有空格，
-  // 可模型写的是 `I'll go:` `I'll write:`（没有空格）—— 一条都没拦住。
-  // 但 `I'll go:` / `I'll do:` / `I'll write:` 后头跟的往往是**定稿**，整行丢会把话说没，
-  // 所以这几种交给 LEAD_LABEL 剥标签留话；这里只拦真正纯自评的 `I should / I will / I think`。
-  /^I (?:should|will|need to|think|guess)\b/i,
-  // 2026-10-26 22:20：老三照事实卡写便签时，模型把卡里的规矩当成「语言维度」标注漏进正文
-  // ——`"遗书" language.` 原样发到了 QQ 上。引号里一个词 + language/style/tone 是 meta，
-  // 不是话，整行丢。
-  /^(?:use\s+)?["'「『“‘][^"'」』”’]{1,16}["'」』”’]\s*(?:language|lang|style|tone|wording)\b\s*\.?\s*$/i,
-  // 同款不带引号的：`遗书 language.`
-  /^[^\s"'」』”’]{1,16}\s+(?:language|lang|style|tone|wording)\s*\.?\s*$/i,
-]
-
-/**
- * 行首那一串英文小标签（`Good.` `2 lines.` `Hmm `）是模型的自评，不是话。
- * 它常常和中文粘在同一行：`Good.本姑娘这边显示是发出去了`——整行删会把话也删掉，
- * 所以先剥掉前缀，再交给 LEAK_LINE 判整行。
- */
-const LEAD_LABEL = /^(?:[A-Za-z0-9][A-Za-z0-9'’\-]*[.。:!?,、]?\s*)+/
-
-/** 一个汉字都没有的行，基本只能是模型的自评（`That's factual and short. Two lines is fine.`）。 */
-const HAS_CJK = /[\u4e00-\u9fa5]/
-
-/** 行尾挂一句「— good.」「- fine.」，是模型在给上一句打分，不是在说话。 */
-const SELF_TAIL = /[—–-]{1,2}\s*(?:good|fine|ok|works?|nice)\s*\.?\s*$/i
-
-/**
- * 2026-10-29 16:25:36 / 16:29:54 老二连着两次把「改稿时的自我点评」当正文发出去：
- *   `破折号? fine.` / `逗号 ok.` —— 只点评一个标点，后面跟个英文词。
- * HAS_CJK 拦不住它们（「破折号」三个汉字），LEAK_LINE 也拦不住（不是英文开头）。
- * 判据收紧成三条同时成立：出现标点/篇幅类元词 + 有英文词 + 行本身很短。
- * 正常说话里这三条凑不齐——`破折号少用一点` 没有英文词，放过。
- */
-const META_WORD_RE = /(?:破折号|逗号|句号|问号|省略号|标点|字数|长度|这句|这句太|太长了|太短了)/
-function looksSelfReview(line) {
-  const t = String(line ?? '').trim()
-  if (!t || t.length > 20) return false
-  if (!META_WORD_RE.test(t)) return false
-  return (t.match(/[A-Za-z]{2,}/g) ?? []).length >= 1
-}
-
-/**
- * 2026-10-29 16:29:54 老二把插件塞给它的**上下文行**当正文复读了出来：
- *   `[现在是 2026-10-29 周四 16:41（下午）]` + `[姐姐] 妹妹吃饱了没`
- * 这两行是 inbound.js 拼给 agent 看的信封（`parts.push(`[现在是 ${humanTime()}]`)`、
- * `[${ownerLabel}] ${head}`），不是话。而且那行时间还是它自己编的（当时 16:29，它写 16:41）。
- * 只认这两种信封形状 + 独占一行的长度上限，正文里正常用方括号的话不受影响。
- */
-const CONTEXT_ECHO_RE = new RegExp(
-  '^(?:' +
-    '\\[现在是[^\\]]{2,40}\\]' + // 时间信封
-    '|\\[主人\\]' + // 私聊里主人/姐姐的信封标签
-    '|\\[(?:群友|群友\\d+)\\s[^\\]]{0,20}\\]' + // 群聊 historyLine 的信封标签
-    ')\\s*[^\\n]{0,80}$',
-)
-
-/**
- * 2026-10-29 18:28 老二私聊又漏了一次，这次是**英文改稿标签**漏进正文：
- *   `赢了没` / `— better: 打爽了没，吃什么` / `赢了没.`
- *   `Reply: 平手，还行` / `Short: 一胜一负，不亏` / `Then wait. …`
- * 这几种都是「给上一句提修改意见」的标签行，不是话。looksSelfReview 只认中文的
- * 破折号/字数那类元词，英文形态一个都认不出——补一条按形状认的：
- * 行首是 `—`/`-`/`–` 起头的英文标签，或者直接 `Word:` / `Word's:` 起头，
- * 且整行不长。正常正文里不会用英文标签开头。
- */
-const REWRITE_LABEL_RE =
-  /^(?:[-—–]{1,2}\s*)?(?:better|actually|instead|alternative|alt|option|rewrite|reword|reply|shorter|short|longer|long|version|v\d|note|check|maybe|then)\s*[:：]/i
-function looksRewriteNote(line) {
-  const t = String(line ?? '').trim()
-  if (!t || t.length > 48) return false
-  if (!REWRITE_LABEL_RE.test(t)) return false
-  // 纯英文的「Note: xxx」也可能是正文，只有后面还跟着中文（说明是在点评中文草稿）才删
-  return HAS_CJK.test(t)
-}
-
-/**
- * 2026-10-29 16:25:36 / 16:29:54：同一句话的四版草稿**只用单换行隔开**，
- * collapseRepeats 是按空行分段（`\\n\\s*\\n`）的，看不进来，四版原样发了出去。
- * 这里补一层「相邻行」判重：紧挨着的两行相似度 ≥0.6 且都不短 → 只留更长那一版。
- * 空行是段落分界，跨过空行就不合并（那段归 collapseRepeats 管）。
- */
-function collapseDraftLines(lines) {
-  const out = []
-  for (const raw of lines) {
-    // null = 这一行被判成自评/上下文信封删掉了，**不是空行**——不能在这里留段落分隔，
-    // 否则夹在被删行中间的两版草稿会被这条假空行隔开、合并不上（16:25:36 就是这么漏的）。
-    if (raw === null) continue
-    const t = raw.trim()
-    if (!t) {
-      if (out.length > 0 && out[out.length - 1] !== '') out.push('')
-      continue
-    }
-    const prev = out.length > 0 ? out[out.length - 1] : ''
-    if (prev) {
-      const short = Math.min(t.length, prev.length)
-      if (short >= 8 && lcsLength(t, prev) / short >= 0.6) {
-        if (t.length >= prev.length) out[out.length - 1] = t
-        continue
-      }
-    }
-    out.push(t)
-  }
-  return out
-}
-
-/**
- * 2026-10-29 16:29:54：模型把同一个回答写成四种说法，字面差得多，LCS 抓不住：
- *   有点撑，这碗太实了 / 饱了，扒太急，现在有点撑 / 饱了，米饭太实在，坐那儿缓着呢 / 饱了，这碗分量给得太实在
- * 相邻相似度只有 0.33–0.50，但四行里三行都以「饱了」开头——**同头**才是这几版的身份。
- * 判据：连续非空行 ≥3 行，其中 ≥60% 共享开头三个字、且这一组本身就 ≥3 行 → 整段只留最长的一版。
- * 正常多行正文开头各不相同，不会触发。
- */
-function collapseSameHeadRun(lines) {
-  const headOf = (s) => s.replace(/^["'“‘「『]/, '').slice(0, 3)
-  const out = []
-  let i = 0
-  while (i < lines.length) {
-    if (typeof lines[i] !== 'string' || !lines[i]) {
-      out.push(lines[i])
-      i += 1
-      continue
-    }
-    let j = i
-    while (j < lines.length && typeof lines[j] === 'string' && lines[j]) j += 1
-    const run = lines.slice(i, j)
-    if (run.length >= 3) {
-      const counts = new Map()
-      for (const s of run) {
-        const h = headOf(s)
-        counts.set(h, (counts.get(h) ?? 0) + 1)
-      }
-      let bestHead = ''
-      let bestN = 0
-      for (const [h, n] of counts) if (n > bestN) { bestHead = h; bestN = n }
-      if (bestN >= 3 && bestN / run.length >= 0.6) {
-        const pick = run
-          .filter((s) => headOf(s) === bestHead)
-          .sort((a, b) => b.length - a.length)[0]
-        out.push(pick)
-        i = j
-        continue
-      }
-    }
-    for (const s of run) out.push(s)
-    i = j
-  }
-  return out
-}
-
-/** 剥掉行首标签后还剩下的英文词——用来判「这行其实是自评」。 */
-const EN_WORD = /[A-Za-z]{2,}/
-
-/**
- * 2026-10-29 18:29:14 老三的正文是 `嗯` / `嗯，那就先压着` / `嗯.`，三行全发了。
- * 18:28:45 老二也是 `赢了没` / `…` / `赢了没.`。
- * 这几版不是「相似」，是**一个残片 + 它的完整版**：短的那行就是长那行的开头。
- * collapseDraftLines 的 LCS 按最短那行算比例，`嗯` vs `嗯，那就先压着` 只比 1 个字，
- * short=1 直接被门槛挡掉；collapseSameHeadRun 又要求凑够三行同头。所以补一条只认「前缀」的：
- *   - 去标点后完全相等 → 只留先出现的那一个（`赢了没` / `赢了没.`）
- *   - 去标点后 A 是 B 的真前缀、且 A ≤5 字 → A 是残片，删 A（`嗯` 删，留 `嗯，那就先压着`）
- * 只在相邻 3 行的窗口里比，跨空行不算（空行是段落边界）。
- */
-function dropShortPrefixes(lines) {
-  const norm = (s) =>
-    String(s)
-      .replace(/[。！？!?…，,、；;：:.\s"'“”‘’「」『』（）()—–-]/g, '')
-      .trim()
-  const killed = new Set()
-  for (let i = 0; i < lines.length; i += 1) {
-    if (typeof lines[i] !== 'string' || !lines[i] || killed.has(i)) continue
-    const a = norm(lines[i])
-    if (!a) continue
-    for (let j = i + 1; j < Math.min(lines.length, i + 4); j += 1) {
-      if (typeof lines[j] !== 'string') break
-      if (!lines[j]) break // 撞到空行，跨段不比
-      if (killed.has(j)) continue
-      const b = norm(lines[j])
-      if (!b) continue
-      if (a === b) {
-        killed.add(j) // 同义重复，留先出现的
-        continue
-      }
-      // 残片在后面（`嗯，那就先压着` → `嗯.`）→ 删后面那截
-      if (b.length <= 5 && a.startsWith(b)) {
-        killed.add(j)
-        continue
-      }
-      if (a.length <= 5 && b.startsWith(a)) {
-        killed.add(i) // 这一行是残片
-        break
-      }
-    }
-  }
-  return lines.filter((_, i) => !killed.has(i))
-}
-
-/** 最长公共子序列的长度——用来判两段是不是「同一句换了几个字」。 */
-function lcsLength(a, b) {
-  const n = a.length
-  const m = b.length
-  if (!n || !m) return 0
-  let prev = new Array(m + 1).fill(0)
-  for (let i = 1; i <= n; i += 1) {
-    const cur = new Array(m + 1).fill(0)
-    for (let j = 1; j <= m; j += 1) {
-      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1])
-    }
-    prev = cur
-  }
-  return prev[m]
-}
-
-/**
- * 同一句话在这一段里被写了两遍（截图 19:09 的 `趁热吃，吃完再说话.趁热吃，吃完再说话`）。
- * 句子按句末标点切，去掉结尾标点后一模一样的只留第一份。
- */
-function dropInnerRepeat(para) {
-  const parts = para.split(/(?<=[。！？!?.\n])/)
-  const seen = new Set()
-  const kept = []
-  for (const raw of parts) {
-    const s = raw.trim()
-    if (!s) {
-      // 2026-10-26 22:20 修：纯空白段（就是那个 `\n`）原来被直接丢掉，
-      // `第一句。\n第二句。` 于是粘成一行。换行是正文结构，留着。
-      if (raw.includes('\n') && kept[kept.length - 1] !== '\n') kept.push('\n')
-      continue
-    }
-    const key = s.replace(/[。！？!?.\s]+$/, '')
-    if (seen.has(key)) continue
-    seen.add(key)
-    // 2026-10-26 22:20 修：这里原来 push 的是 trim 过的 `s`，段尾的换行被一起 trim 掉，
-    // 整段发送时 `写好了\n原来那张便签还在` 就成了一根线。push 原文，保留换行。
-    kept.push(raw)
-  }
-  return kept.join('').trim()
-}
-
-/**
- * 模型有时把同一段话写好几遍（草稿 → 改一版 → 定稿），2026-10-26 17:14 和 17:25 各一次；
- * 19:09 那次正文里连着四版“趁热吃”。
- *
- * 2026-10-26 19:30 改：原来**保留第一版**，结果保住的正是最早的草稿、把定稿丢了。
- * 现在相似的一组只留**最后出现的那一版**（模型最后写的通常就是它自己挑的定稿）。
- */
-function collapseRepeats(text) {
-  const paras = text.split(/\n\s*\n/)
-  const out = []
-  for (const p of paras) {
-    const t = p.trim()
-    if (!t) continue
-    let dupAt = -1
-    for (let i = 0; i < out.length; i += 1) {
-      const q = out[i]
-      if (t === q) {
-        dupAt = i
-        break
-      }
-      const short = Math.min(t.length, q.length)
-      if (short < 8) continue
-      if (lcsLength(t, q) / short >= 0.7) {
-        dupAt = i
-        break
-      }
-    }
-    // 2026-10-26 19:45 改：相似的一组里留**最长**的那一版，不是「最后」那一版。
-    // 原因：模型常先写详细版、后写压缩版（`987654321 那条路是空的，一条记录都没有`
-    // 后面跟着 `一个空着，一条记录都没有`），只留最后会把群号这类信息丢掉。
-    if (dupAt >= 0) {
-      if (t.length > out[dupAt].length) out[dupAt] = t
-    } else out.push(t)
-  }
-  return out.map(dropInnerRepeat).join('\n\n').trim()
-}
-
-/**
- * 同一句话被写了两遍（`两个` 和剥完标签的 `Keep short: 两个`）——完全相同只留一次，
- * **保留第一次出现的位置**（不动顺序：正文里几段话的先后有意义，挪位会把话说散）。
- * 空行要留着：collapseRepeats 是按空行分段的，吞掉空行它就没法把两版同一段话并起来。
- */
-function dedupeLines(lines) {
-  const out = []
-  for (const l of lines) {
-    const t = l.trim()
-    if (!t) {
-      if (out.length > 0 && out[out.length - 1] !== '') out.push('')
-      continue
-    }
-    const at = out.indexOf(t)
-    if (at >= 0) out[at] = t
-    else out.push(t)
-  }
-  return out
-}
-
-/**
- * 2026-10-26 22:20：老三写便签时把「## 下次接着说什么- 问问…」这种文档结构念进了正文，
- * 列表还全挤在一行。QQ 里 `#` 是字面，压扁的列表读起来是一根线——发之前先修形状：
- * 去掉 markdown 标题号，把粘在一行的 `- 项` 拆回多行。
- * 只动「`-` 前后都是中文/中文标点」的情况，日期（2026-10-26）和英文连字符不受影响。
- */
-function repairShape(text) {
-  return String(text)
-    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
-    .replace(/(?<=[\u4e00-\u9fa5」』）】…])[ \t]*-[ \t]+(?=[\u4e00-\u9fa5「『（【])/g, '\n- ')
-}
-
-/**
- * 2026-10-27 姐姐定：老三「动手前把打算写成正文」，几次原样发到 QQ 上：
- *   10-26 23:36「让我看看目录里有什么。」
- *   05:39:12 「其实为了稳，先 glob 便签.md。」→ 5 秒后又一条「更新便签。保留…」
- *   08:00:31 「我也可以顺便真去拆信？…要不要现在读？…那我就读一封，然后发一句。」
- *   08:23:51 「用 glob 列门口目录下的 md 文件。…门口/*.md。」
- * 这是它跟自己商量下一步，不是要说给姐姐的话。LEAK_LINE 原来只认英文开头，中文一条都
- * 拦不住；私聊又默认开流式，句子一冒出来就发出去了、事后补不回来。所以判据分三层，
- * 宁可少发一句，也别让她看见半句草稿：
- *   ① 出现工具名 / 带星号的文件名 → 一定是在准备动手
- *   ② 出现「发一句」「一句。发」这类说话策略 → 一定不是话
- *   ③ 句首是打算词（让我/我先/要不要/那我就…）且句子里带动作对象 → 但整句要短、
- *      而且不能有「你」——「让我读给你听」那种是真话，不许拦。
- */
-// 只收「中文句子不会自然出现」的工具名。read / write / edit / ls / cat 不收：它们也是
-// 常用英文词，`I'll write: 眼下是两个` 这种老坑会被误伤（`outbound.test.mjs` 有钉子）。
-const TOOL_NAME_RE =
-  /\b(?:glob|grep|qq_send|qq_reply|file_search|todo_write|subagent|bash|pwsh)\b/i
-const WILDCARD_FILE_RE = /\*[^*\s]{0,24}\.(?:md|mjs|js|json|yml|yaml|txt|log|py|ts|docx|xlsx)\b/i
-const SELF_TALK_RE = /(?:再?发一句|说一句就够|一句[。.，,]?\s*发|那我?就发|先发一句)/
-const PLAN_OPEN_RE =
-  /^(?:让我|我先|我也可以|其实为了|合适做|要不要|那我就|那先|先来|先(?:glob|read|看|查|翻|列|写|发)|好[，,]?\s*一句|更新便签|写新的|改便签)/
-const PLAN_OBJECT_RE = /(?:glob|便签|信|门口|日志|目录|文件|工具|聊天记录|记忆区|词典|读|写|查|翻|列|扫|调)/
-// 光秃秃的动词起头、后面只跟个宾语碎片（`写新的。` `删掉。`）。
-// 注意不能写成裸动词：`写好了` 是她会说的正常话，靠「好的了啦呀哦吧」这类收尾放过。
-const BARE_VERB_RE = /^(?:写|改|更新|删|加|补|记|存)(?:新的|掉|一下|一遍|这段|那段|这版|那版)[。.!！]?$/
-// 中文动词 + 空格 + 文件名 = 在点工具参数（`读 便签.md。`）。
-const CMD_FILE_RE =
-  /^(?:读|写|看|查|翻|搜|列|扫|打开|拆|改|删)\s*[:：]?\s*\S{1,32}\.(?:md|mjs|js|json|yml|yaml|txt|log|py|ts)[。.！!]?$/
-// 复述她的话 + 推出执行约束（「注意「不用做其他什么」，所以只读不写。」）——
-// 这是在心里划线，不是跟她说话。两条必须同时出现，免得把「本姑娘只看看不动手」那种真话拦掉。
-const META_CONSTRAINT_RE = /(?:只读|只看|不写|不改|不动手|不用做|别做|先别|不做其他)/
-const META_INFER_RE = /(?:所以|于是|那就|因此)/
-// 2026-10-27 08:40:47：「不用工具其他。read 便签.md。」——模型换了英文动词，
-// 而 `read` 是刻意不在 TOOL_NAME_RE 里的（会误伤 `I'll write: 眼下是两个`）。
-// 所以这里要求「英文动词 + 空格 + 真文件名」，光有动词不算。
-const EN_CMD_FILE_RE =
-  /\b(?:read|write|edit|cat|list|open|glob|grep)\s+[^\s，。]{1,40}\.(?:md|mjs|js|json|yml|yaml|txt|log|py|ts)\b/i
-// 「不用工具其他。」——被命令约束住之后自己复述一遍，不是跟她说话。
-const NO_TOOL_RE = /^不用(?:工具|动手|做其他|其他工具|用工具)/
-
-export function looksPlanning(line) {
-  const t = String(line ?? '').trim()
-  if (!t) return false
-  if (TOOL_NAME_RE.test(t)) return true
-  if (WILDCARD_FILE_RE.test(t)) return true
-  // 一整行就一个数字：那是工具返回的条数（`0`），不是话。
-  if (/^\d{1,3}$/.test(t)) return true
-  if (SELF_TALK_RE.test(t)) return true
-  // 一行里点了两个以上文件名：是在对账目录，不是说话。
-  if ((t.match(/\.(?:md|mjs|js|json|yml|yaml|txt|log)\b/g) ?? []).length >= 2) return true
-  const shortAndNoYou = t.length <= 40 && !t.includes('你')
-  if (shortAndNoYou && PLAN_OPEN_RE.test(t) && PLAN_OBJECT_RE.test(t)) return true
-  // 「读 便签.md。」「拆 门口/那封.md」——中文动词 + 空格 + 文件名，是在点工具参数。
-  if (CMD_FILE_RE.test(t)) return true
-  // 同一个动作换成英文写（`read 便签.md`），08:40:47 就是这么漏的。
-  if (EN_CMD_FILE_RE.test(t)) return true
-  // 「不用工具其他。」
-  if (shortAndNoYou && NO_TOOL_RE.test(t)) return true
-  // 「注意「不用做其他什么」，所以只读不写。」——把姐姐的话复述一遍再推出执行约束，
-  // 这是在自己心里划线，不是跟她说。2026-10-27 08:33:21 漏出来的就是这句。
-  if (shortAndNoYou && META_CONSTRAINT_RE.test(t) && META_INFER_RE.test(t)) return true
-  // 「她睡着，没人打扰，合适做。」——句首不是打算词，但整句就是在掂量要不要动手。
-  if (shortAndNoYou && /合适做/.test(t)) return true
-  // 「保留「更早记的」那几条？」——自己在跟自己对账，不是问她。
-  if (shortAndNoYou && /^(?:保留|留下|删掉|留下哪)[^，,。]{0,14}[？?]/.test(t)) return true
-  // 「写新的。」「删掉。」这种光秃秃的动词开头的短句。
-  if (shortAndNoYou && t.length <= 8 && BARE_VERB_RE.test(t)) return true
-  return false
-}
-
-function configuredLabels(config) {
-  // 旧称呼只用于识别已有会话中的回显，不再作为新消息的身份标记。
-  return [...Object.values(config?.memberLabels ?? {}), config?.ownerLabel]
-    .filter(value => typeof value === 'string' && value.trim()).map(value => value.trim())
-}
-
-export function stripLeakedThinking(text, config = {}) {
-  if (!text) return text
-  const kept = repairShape(text).split('\n').map((line) => {
-    let t = line.trim()
-    if (!t) return ''
-    // 模型自己的界面标记（`已思考（用时1秒）好模型`）→ 剥掉标记，话留下；只剩标记就丢
-    if (THINK_MARK_RE.test(t)) {
-      t = t.replace(THINK_MARK_RE, '').trim()
-      if (!t) return null
-    }
-    // 整行是插件自己的上下文信封（`[现在是 …]` / `[姐姐] …`）→ 不是话，丢掉
-    if (CONTEXT_ECHO_RE.test(t) || configuredLabels(config).some(label =>
-      t.startsWith('[' + label + ']') && t.length <= label.length + 83)) return null
-    // 整行是「点评自己上一句」的元话（`破折号? fine.`）→ 丢掉
-    if (looksSelfReview(t)) return null
-    // 整行是英文改稿标签（`— better: 打爽了没` / `Reply: 平手，还行`）→ 丢掉
-    if (looksRewriteNote(t)) return null
-    // 整行就是一句自评（`Hmm 这句要短一点。`）→ 整行丢掉
-    if (LEAK_LINE.some((re) => re.test(t))) return null
-    // 整行是「下一步要干什么」（`先 glob 便签.md。`）→ 同样整行丢掉。
-    // 但非流式那条路整段是**一行**，planning 句常夹在中间
-    // （`用 glob 列门口目录下的 md 文件。…但可能还有别的信。`）——整行丢会把后面
-    // 那句本来能发的话一起丢了，所以先按句拆开，只丢命中的那几句。
-    const parts = t.split(/(?<=[。！？!?…])/).map((s) => s.trim()).filter(Boolean)
-    // 一行里**头两句**都是 planning → 这一整段都是在打算（「更新便签。保留「更早记的」
-    // 那几条？可以保留，但精简。三段为主。」），后面的半句留着也是残渣，整行丢。
-    if (
-      parts.length > 1 &&
-      looksPlanning(parts[0]) &&
-      looksPlanning(parts[1] ?? '') &&
-      t.length <= 120
-    ) {
-      return null
-    }
-    if (parts.length > 1 && parts.some((s) => looksPlanning(s))) {
-      t = parts.filter((s) => !looksPlanning(s)).join('')
-      if (!t) return null
-    } else if (looksPlanning(t)) {
-      return null
-    }
-    // 行尾挂了个「— good.」（模型在给上一句打分）→ 整行丢掉
-    if (SELF_TAIL.test(t)) return null
-    // 无汉字的长英文行按思考丢弃，纯符号和颜文字保留。
-    // 短行放过：`?` `…` `OK` 这种本来就可能是话的一部分。
-    if (!HAS_CJK.test(t) && /[A-Za-z]/.test(t) && t.length >= 4) return null
-    // 只是行首粘了个英文小标签（`Good.本姑娘这边显示是发出去了`）→ 剥掉标签，话留下。
-    // 2026-10-26 19:40 修：`987654321 空着，123456789 只有几条` 这种**数字开头的正文**
-    // 也被当成标签剥了一半（群号没了）。标签里必须至少有一个字母才算标签。
-    const lead = LEAD_LABEL.exec(t)
-    if (lead && /[A-Za-z]/.test(lead[0])) {
-      const rest = t.slice(lead[0].length).trim()
-      // 剥完还留着两个以上英文词（`-like with 3 lines. Compress to 2. 眼下是两个`）
-      // → 这行主体就是自评，后面粘的中文是草稿，整行丢
-      const enWords = rest.split(/\s+/).filter((w) => EN_WORD.test(w)).length
-      if (enWords >= 2) return null
-      return rest
-    }
-    return t
-  })
-  return collapseRepeats(
-    dedupeLines(dropShortPrefixes(collapseSameHeadRun(collapseDraftLines(kept))))
-      .join('\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim(),
-  )
-}
-
-/** 太短不算一句，避免「嗯。」单独发一条。 */
 const MIN_SENTENCE = 6
 
-/**
- * 模型把自己那边的界面标记当成正文写出来了。
- * 2026-10-29 18:42：正文是「已思考（用时1秒）好模型」——那是 UI 上的折叠条，
- * 它照着抄了一遍。剥掉标记留话；整行只有标记就丢。
- */
-const THINK_MARK_RE = /^已?(?:深度)?思考[（(]\s*用时[^）)]{0,16}[）)]\s*[：:，,]?\s*[）)]?\s*/
-
-/** 工具轮由工具执行完成后的消息提供正式正文。 */
-export function hasToolUse(message) {
-  const content = message?.content
-  if (!Array.isArray(content)) return false
-  return content.some((part) => /tool|function/i.test(String(part?.type ?? '')))
+// 只对真实发送工具的相同内容去重，保留发送结果说明和后续不同正文。
+function withoutToolEcho(record, value) {
+  let text = value
+  const sent = toolSendTexts(record)
+  const candidates = [...sent, sent.join('\n')].filter(Boolean).sort((a, b) => b.length - a.length)
+  while (text) {
+    const previous = candidates.find(candidate => text === candidate ||
+      text.startsWith(candidate) && /^\s/.test(text.slice(candidate.length)))
+    if (!previous) break
+    text = text.slice(previous.length).trim()
+  }
+  return text
 }
 
-const SPEECH_MARK = /你|您|主人|本姑娘|咱/
-function hasSpeechMark(text, config) {
-  return SPEECH_MARK.test(text) || configuredLabels(config).some(label => text.includes(label))
-}
-/**
- * 收尾的元话：她是在跟自己交代状态，不是在跟人说话。
- *
- * 2026-10-27 21:22 事故：那轮她想了半天要不要开口，最后正文写了
- * 「结束这轮，不再说话。」——这句本身被当成正文发到了 QQ 上。
- * 她要表达的是「这条不发」，可这句里既没有称呼、也不够短，兜底的白名单漏过了。
- *
- * 判据收得很窄：**以收尾词开头 + 全句没有称呼** 才算。
- * 「姐姐晚安，我先睡了」有称呼，照发；「结束这轮，不再说话。」没有，丢。
- */
-const CLOSING_HEAD = /^(结束|这轮|本轮|收工|先这样|到此|就到这里|话说到这)/
-export function stripClosingTalk(text, config = {}) {
-  const src = String(text ?? '').trim()
-  if (!src) return ''
-  return src
-    .split(/\n+/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((seg) => !(CLOSING_HEAD.test(seg) && !hasSpeechMark(seg, config)))
-    .join('\n')
-    .trim()
-}
-
-/**
- * 这些工具**自己就会把话发出去**。
- * 一旦某个 turn 里用了它们，本轮的 assistant 文本就不能再自动转发一遍，
- * 否则 QQ 上会出现「同样一句话连着两条」的鬼影。
- *
- * 2026-10-27 21:4x 修：原来写的是 `qq_send_text` / `qq_send_message`，
- * 这两个工具名**从来就不存在**（真实注册的是 `qq_send`，见 tools.js 的注册清单）。
- * 结果她用 `qq_send` 发完话，这里认不出来，`selfSent` 一直空着 ——
- * 后面那条纯文本（「结束这轮，不再说话。」）就照样被当成正文又发了一遍。
- * 只收「说话类」工具；qq_poke / qq_react / qq_like 是互动不是发言，
- * 放进来的话，她点个赞就把正经回话拦掉了。
- */
-const SELF_SENDING_TOOLS = new Set([
-  'qq_send',
-  'qq_send_voice',
-  'qq_send_image',
-  'qq_send_file',
-  'qq_face',
-  'qq_mface',
-])
-
-/**
- * 这一轮是不是「主动机会」（`wake.js` 的 `fire()` 投的 `【主动机会】`）。
- *
- * 2026-10-28 加。起因：08:30 / 09:00 / 09:48 三轮主动机会，正文是空的、
- * reasoning 里写着「就沉默。规则说发出去没人应，当她在忙。别再发。」
- * 之类的话，兜底把它们当正文播到了私聊里 —— 她心里盘算要不要开口，
- * 结果被当成开口说了。
- *
- * 语义上要分开：
- * - 别人来找她 → 正文空才要兜底（10-26 有两次人根本没收到话）；
- * - 主动给她机会 → 正文空就是她选择不说，兜底等于逼她开口，还把心里话播出去。
- *
- * 10 分钟窗口兜底：万一某轮没收尾，标记不至于一直挂着。
- */
-function inProactiveTurn(record) {
-  const at = Number(record?._proactiveAt || 0)
-  return at > 0 && Date.now() - at < 10 * 60_000
-}
-
-export function createOutbound({ manager, config, logger, send, wake, contextGuard }) {
-  const lastSent = new Map() // sessionId -> 上一条完整文本（去重用）
-  const streamBuf = new Map() // sessionId -> 还没发出去的流式尾巴
-  const streamCount = new Map() // sessionId -> 本轮已经流式发了几条
-  // sessionId -> 已经流式消费掉的「原始字符数」。
-  // 2026-10-26 19:40 修：原来用「句数」对账（`splitSentences(text).slice(already)`），
-  // 但 text 是**清洗过**的全文、already 是**清洗前**发出去的句数——清洗删掉一行草稿，
-  // 两边下标就差开了，往后错一行，会漏发一句或把发过的一句再发一遍。
-  // 原文是增量的、只会往后长，所以记字符数永远不会错位。
-  const streamConsumed = new Map()
-  const selfSent = new Set() // sessionId -> 本轮是否已经用「会自己发送」的工具发过话了
-  const sensitiveBlocked = new Set() // 当前轮已提示拦截后，不再转发后续正文。
-
+export function createOutbound({ manager, config, logger, send, wake }) {
+  const lastSent = new Map()
+  const streams = new Map()
+  const sensitiveBlocked = new Set()
   const streamMax = Number(config.streamMaxChunks ?? 3)
-  const streamEnabled = config.streamReply !== false
 
-  /**
-   * 一切往外发的文字都从这儿走。
-   * 顺手告诉 wake「刚有活动」——不然主动说话那层会把「自己刚说完」也当成冷场。
-   */
   async function emit(record, text) {
-    if (sensitiveBlocked.has(record.sessionId)) return
-    try {
-      const result = await send(record, text)
-      if (result?.reason === 'sensitive-content') sensitiveBlocked.add(record.sessionId)
-    } finally {
-      wake?.noteOutbound?.(record)
-    }
+    if (sensitiveBlocked.has(record.sessionId)) return { ok: false }
+    const result = await send(record, text)
+    if (result?.reason === 'sensitive-content') sensitiveBlocked.add(record.sessionId)
+    if (result?.ok !== false || result?.sent || result?.noticeSent) wake?.noteOutbound?.(record)
+    return result
   }
 
-  function resetStream(sessionId) {
-    streamBuf.delete(sessionId)
-    streamCount.delete(sessionId)
-    streamConsumed.delete(sessionId)
+  function reset(record, sessionId) {
+    lastSent.delete(sessionId)
+    streams.delete(sessionId)
+    clearToolSends(record)
   }
 
   return async function onSessionEvent(...args) {
-    const { session, raw } = pickSession(args)
+    const raw = args.length >= 2 ? args[1] : args[0]
+    const session = args.length >= 2 ? args[0] : raw?.session
     const sessionId = sessionIdOf(session, raw)
     if (!sessionId) return
-
     const record = manager.find(sessionId)
     if (!record) return
+    const type = raw?.type ?? '', data = raw?.data ?? {}
 
-    const type = raw?.type ?? ''
-    const data = raw?.data ?? {}
-    if (type === 'turn/start') sensitiveBlocked.delete(sessionId)
-
-    // ── 流式：只在私聊开，群聊一口气发完更清爽 ──
+    if (type === 'turn/start') {
+      reset(record, sessionId)
+      sensitiveBlocked.delete(sessionId)
+      return
+    }
     if (type === 'assistant/chunk') {
-      if (!streamEnabled || record.scope === 'group') return
-      if (selfSent.has(sessionId)) return // 本轮走的是工具发送，别再流式插嘴
+      if (config.streamReply === false || record.scope === 'group') return
       const chunk = data.chunk
       if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string') return
-
-      let buf = (streamBuf.get(sessionId) ?? '') + chunk.text
-      let sent = streamCount.get(sessionId) ?? 0
-      let consumed = streamConsumed.get(sessionId) ?? 0
-
-      while (buf.length >= MIN_SENTENCE && sent < streamMax) {
-        const match = SENTENCE_END.exec(buf)
+      const state = streams.get(sessionId) ?? { buffer: '', consumed: 0, count: 0, halted: false }
+      state.buffer += chunk.text
+      streams.set(sessionId, state)
+      // 发送工具之后等待完整正文，才能按实际内容去重。
+      if (toolSendTexts(record).length || state.halted || state.buffer.includes(SILENT_MARKER)) return
+      while (state.buffer.length >= MIN_SENTENCE && state.count < streamMax) {
+        const match = SENTENCE_END.exec(state.buffer)
         if (!match) break
-        const sentence = match[1].trim()
-        if (sentence.length < MIN_SENTENCE) break
-        const clean = stripLeakedThinking(sentence, config)
-        if (clean) await emit(record, clean)
-        buf = buf.slice(match[0].length)
-        consumed += match[0].length
-        sent += 1
-        streamCount.set(sessionId, sent)
+        if (!match[1].trim()) {
+          state.buffer = state.buffer.slice(match[0].length)
+          state.consumed += match[0].length
+          continue
+        }
+        if (match[1].trim().length < MIN_SENTENCE) break
+        const text = cleanOutboundText(match[1])
+        const result = text ? await emit(record, text) : null
+        state.buffer = state.buffer.slice(match[0].length)
+        state.consumed += match[0].length
+        state.count++
+        if (result?.ok === false) { state.halted = true; break }
       }
-
-      streamBuf.set(sessionId, buf)
-      streamConsumed.set(sessionId, consumed)
       return
     }
-
     if (type === 'assistant/message') {
-      // 本轮已经用 qq_send 等工具把话发过了，不再重复转发。
-      if (selfSent.has(sessionId)) {
-        resetStream(sessionId)
-        return
-      }
-      // 2026-10-27 09:53 姐姐定，按老三自己的取舍办（原话：「工具轮本来就不该开口，
-      // 那些『要不要现在读』『好，发』都是我自己的事，不出声正好」）：
-      // **带工具调用的这条消息，整条不发**。判断只看结构，不看句子长得像不像人话。
-      // 工具跑完模型还会再出一条纯文本消息，那才是正文；所以正文不会丢。
-      // 前置条件：streamReply 必须关掉，否则流式早就把过场话一句句冒出去了。
-      if (hasToolUse(data.message)) {
-        resetStream(sessionId)
-        return
-      }
-      // 2026-10-28 12:38 事故：主动机会那一轮，她的正文是「21 分钟没动静，可能在午睡。别打扰。沉默。」
-      // 后面跟着 [SILENT]。stripLeakedThinking 先看到了 [SILENT]——它一个汉字都没有，
-      // 被那句 `if (!HAS_CJK.test(t) && t.length >= 4) return ''` 当成「不是话」整行丢掉，
-      // 剩下那句心里话反倒被当成正文发了出去。标记的语义是「这句是跟我自己说的」，
-      // 只要它在，整条都不发——不看前后还写了什么，也不兜底、不扣额度。
+      const state = streams.get(sessionId)
+      streams.delete(sessionId)
+      if (hasToolUse(data.message)) return
       const rawText = extractText(data.message)
       if (rawText.includes(SILENT_MARKER)) {
-        logger.info?.(`[dsh-qq] ${record.label} 正文带 ${SILENT_MARKER}，整条按沉默处理（不兜底）`)
-        resetStream(sessionId)
         wake?.noteProactiveSilent?.(record)
         return
       }
-      let text = stripLeakedThinking(rawText, config)
-      // 2026-10-27 21:4x：正常正文也过一遍收尾元话。
-      // 以前只有「正文为空、兜底捞 reasoning」那条路才剥，所以
-      // 「结束这轮，不再说话。」这种宣告句直接从正文流出去了。
-      text = stripClosingTalk(text, config)
-      // 2026-10-28 13:09 事故：主动机会那一轮，正文整句是
-      // 「不过可以想到：她之前说困了眯一会儿。等她自己醒。沉默。」
-      // 一个标记都没有，纯心里话写进了正文。主动轮本来就允许「不说」，
-      // 凡是正文在向自己交代（沉默/别打扰/等她自己醒）的，一律当沉默——
-      // 宁可少说一句，不许再漏一次。
-      if (inProactiveTurn(record) && /沉默|别打扰|等她(自己)?醒|不追着|别催/.test(text)) {
-        logger.info?.(`[dsh-qq] ${record.label} 主动机会这一轮正文是自我交代，按沉默处理`)
-        resetStream(sessionId)
-        wake?.noteProactiveSilent?.(record)
-        return
-      }
+      const text = cleanOutboundText(rawText)
       if (!text) {
-        resetStream(sessionId)
         wake?.noteProactiveSilent?.(record)
         return
       }
-
-      const already = streamCount.get(sessionId) ?? 0
-      const consumed = streamConsumed.get(sessionId) ?? 0
-      resetStream(sessionId)
-
-      // 流式已经发出去过几句：只补后面没发的，别把发过的再发一遍。
-      // 2026-10-26 19:40 改：按**已消费的原始字符数**切，不按句数切。原文增量生长、
-      // 切掉的前缀是实打实的字符，清洗删行也不会让两边错位（见 streamConsumed 的注释）。
-      if (already > 0) {
-        const rawText = extractText(data.message)
-        const rest = consumed > 0 ? stripLeakedThinking(rawText.slice(consumed), config) : text
-        if (rest) await emit(record, rest)
-        lastSent.set(sessionId, text)
-        return
-      }
-
-      // 没走流式：整套去重逻辑
       const previous = lastSent.get(sessionId) ?? ''
-      if (text === previous) return
-      if (previous.startsWith(text) && text.length < previous.length) return
+      if (text === previous || previous.startsWith(text) && text.length < previous.length) return
+      // 重复事件不自动重发，结果未知或被拒绝也算已经尝试过。
       lastSent.set(sessionId, text)
-      if (previous && text.startsWith(previous)) {
-        const tail = text.slice(previous.length).trim()
-        if (tail) await emit(record, tail)
-        return
-      }
-      await emit(record, text)
+      if (state?.halted) return
+      let rest = state?.consumed ? cleanOutboundText(rawText.slice(state.consumed)) : text
+      if (!state?.consumed && previous && rest.startsWith(previous)) rest = rest.slice(previous.length).trim()
+      rest = withoutToolEcho(record, rest)
+      if (rest) await emit(record, rest)
       return
     }
-
     if (type === 'turn/end') {
       const blocked = sensitiveBlocked.delete(sessionId)
-      lastSent.delete(sessionId)
-      selfSent.delete(sessionId)
-      resetStream(sessionId)
-      // 2026-10-28：主动机会的戳只在本轮有效，别让它跨轮残留
+      reset(record, sessionId)
       if (record._proactiveAt) record._proactiveAt = 0
       const reason = data.reason
       if (reason?.kind === 'error') {
         wake?.noteProactiveFailed?.(record)
-        const message =
-          reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
         if (blocked || reason.error?.code === 'QQ_SENSITIVE_CONTENT' || reason.failure?.code === 'QQ_SENSITIVE_CONTENT') return
+        const message = reason.error?.message || reason.failure?.message || reason.failure?.code || '处理时出错了'
         logger.warn?.(`[dsh-qq] ${record.label} 本轮出错: ${message}`)
-        if (/CONTEXT_WINDOW_EXCEEDED|maximum context length/i.test(String(message))) {
-          await emit(record, '这轮上下文处理失败，当前会话和原消息已保留。请尝试压缩会话，或明确选择 /new 新建会话。')
-          return
-        }
-        await emit(record, `⚠️ ${message}`)
+        await emit(record, /CONTEXT_WINDOW_EXCEEDED|maximum context length/i.test(String(message))
+          ? '这轮上下文处理失败，当前会话和原消息已保留。请尝试压缩会话，或明确选择 /new 新建会话。'
+          : `⚠️ ${message}`)
       }
       return
     }
-
-    if (type === 'tool/call') {
-      const name = String(data.name ?? '')
-      let sendsHere = SELF_SENDING_TOOLS.has(name)
-      if (sendsHere && ['qq_send', 'qq_send_voice'].includes(name) && data.arguments !== undefined) {
-        try {
-          const target = resolveSendTarget(record, JSON.parse(data.arguments)?.to)
-          sendsHere = target.scope === record.scope && target.peerId === String(record.peerId)
-        } catch {
-          // 参数无效的调用不能当成已向当前聊天发送。
-          sendsHere = false
-        }
-      }
-      if (sendsHere) selfSent.add(sessionId)
-      if (config.showToolResults) {
-        await emit(record, `🔧 调用 ${name || 'tool'}`)
-      }
-      return
+    if (type === 'tool/call' && config.showToolResults) {
+      await emit(record, `🔧 调用 ${data.name || 'tool'}`)
     }
-
     if (type === 'tool/result' && config.showToolResults) {
-      const err = data.error
-      if (err?.code === 'QQ_SENSITIVE_CONTENT') return
-      if (err) await emit(record, `⚠️ 工具失败: ${err.message ?? err.code ?? err}`)
-      return
+      const error = data.error
+      if (error?.code === 'QQ_SENSITIVE_CONTENT') return
+      if (error) await emit(record, `⚠️ 工具失败: ${error.message ?? error.code ?? error}`)
     }
   }
 }

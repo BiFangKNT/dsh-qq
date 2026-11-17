@@ -25,7 +25,7 @@ import { splitText, sleep } from './shared/chunk.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerTools } from './tools.js'
 import { createKnowledge } from './knowledge.js'
-import { parseMessageId } from './tool-send.js'
+import { parseMessageId, requireMessageId } from './tool-send.js'
 import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
 import {
@@ -378,13 +378,8 @@ function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
   }
 
   async function send(record, text, { sensitiveNotice = false } = {}) {
-    // 「这次不接话」：模型只输出 [SILENT] 就当作它选择潜水 —— 不发、不进历史、不报错。
-    // 出口只在「这条不一定是在叫它」时给（见 inbound.js 的 mustReply），
-    // 被 @、被引用、私聊都不会走到这里。
+    // 正文事件中的沉默标记已由 outbound 处理；其他发送入口剥除标记，空文不发送。
     const trimmed = cleanOutboundText(text)
-    // 2026-10-27 21:4x 修：原来只认「整条恰好就是 [SILENT]」，
-    // 她要是写成「结束这轮，不再说话。[SILENT]」，标记根本不生效，前半句照发。
-    // 现在先把标记剥掉：剥完只剩空白＝她选了潜水；还剩话＝照发剩下的。
     let spoken = stripSilentMark(trimmed)
     if (!spoken) {
       if (trimmed.includes(SILENT_MARKER)) {
@@ -411,6 +406,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
     const rateKey = `${record.scope}:${record.peerId}`
     let sentAny = false
     const sentChunks = []
+    let failure = null
 
     // 群聊：两条回复之间拉开一点。一群人追着问的时候，
     // 连着往外吐最容易被人当成刷屏，也最容易被风控。
@@ -435,13 +431,15 @@ function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
       // 限流优先于一切：宁可不回，也不要在被围攻时跟着刷屏
       if (!rateOk(rateKey, config.rateLimitPerMin)) {
         logger.warn(`[dsh-qq] ${record.label} 触到每分钟上限，本条不再发（剩 ${chunks.length - index} 段）`)
+        for (const pending of pendingSends.slice(index)) messageStore.sentEnd(pending.sendId, 'not-sent', { reason: 'rate-limit' })
+        failure = 'rate-limit'
         break
       }
       try {
         const result = await client.call(action, pendingSends[index].payload, undefined, { sendId: pendingSends[index].sendId })
         // 记下自己发的消息 id，撤回工具要用
-        const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
-        if (sentId > 0) record.lastSentMessageId = sentId
+        const sentId = requireMessageId(result)
+        record.lastSentMessageId = sentId
         manager.memory.noteSent(record, chunks[index], sentId)
         sentAny = true
         sentChunks.push(chunks[index])
@@ -449,9 +447,11 @@ function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
         wake.noteProactiveDelivered(record)
         logger.info(`→ ${record.label}: ${chunks[index].slice(0, 60)}`)
       } catch (err) {
+        failure = err.onebotDelivery ?? 'uncertain'
         logger.warn(`发送到 ${record.label} 失败:`, err?.message ?? err)
-        // 回执：这句没送出去。下一轮投递时会告诉她「是通道断了，不是对方不理你」。
+        // 下一轮提供发送状态；缺少确认不能推断对方未收到。
         bridge.noteSendFailure(record, chunks[index], err)
+        for (const pending of pendingSends.slice(index + 1)) messageStore.sentEnd(pending.sendId, 'not-sent', { reason: 'previous-chunk-failed' })
         break
       }
       if (index < chunks.length - 1) {
@@ -470,7 +470,9 @@ function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
     if (!isGroup) {
       client.call('set_input_status', { user_id: Number(record.peerId), event_type: 0 }, 5000).catch(() => {})
     }
-    return verdict.ok ? { ok: sentAny } : { ok: false, reason: 'sensitive-content', rule: verdict.rule, noticeSent: sentAny }
+    return verdict.ok
+      ? { ok: sentChunks.length === chunks.length, sent: sentAny, reason: failure }
+      : { ok: false, reason: 'sensitive-content', rule: verdict.rule, noticeSent: sentAny }
   }
 
   const approval = new ApprovalChannel({ manager, config, logger, send })

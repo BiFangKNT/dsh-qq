@@ -7,7 +7,7 @@ import { createServer } from 'node:net'
 import vm from 'node:vm'
 import { ensurePeerWorkspace } from '../src/workspace.js'
 import { buildChatPrompt, proactiveRule } from '../src/prompts.js'
-import { createOutbound, stripLeakedThinking, stripClosingTalk } from '../src/outbound.js'
+import { createOutbound } from '../src/outbound.js'
 import { installSettingsApi } from '../src/settings.js'
 import { waitFor } from './mock-dsh.mjs'
 
@@ -44,15 +44,13 @@ test('通用提示词不强加私人关系或固定账号', () => {
 
 test('自定义称呼用于上下文回显和收尾过滤，正常话不丢失', async () => {
   const config = { ownerLabel: '组长[甲]' }
-  assert.equal(stripLeakedThinking('[组长[甲]] 今天忙吗', config), '')
-  assert.equal(stripClosingTalk('结束这轮，组长[甲]晚安。', config), '结束这轮，组长[甲]晚安。')
   const sent = []
   const onEvent = createOutbound({ manager: { find: () => ({ scope: 'private' }) }, config,
     logger: {}, send: async (_record, text) => sent.push(text) })
   await onEvent({ id: 'test' }, { type: 'assistant/message', data: { message: { content: [
     { type: 'text', text: '[组长[甲]] 今天忙吗\n今天有空，可以聊聊。' },
   ] } } })
-  assert.deepEqual(sent, ['今天有空，可以聊聊。'])
+  assert.deepEqual(sent, ['[组长[甲]] 今天忙吗\n今天有空，可以聊聊。'])
 })
 
 async function unusedPort() {

@@ -11,6 +11,7 @@ const WS_OPEN = 1
  */
 export class OneBotClient extends EventEmitter {
   #ws = null
+  #connectionConfig = null
   #seq = 0
   #pending = new Map()
   #stopped = false
@@ -31,7 +32,13 @@ export class OneBotClient extends EventEmitter {
   }
 
   start() {
+    if (this.#ws) {
+      if (this.#connectionConfig.url === this.url && this.#connectionConfig.token === this.token) return this
+      this.stop()
+    }
     this.#stopped = false
+    clearTimeout(this.#retryTimer)
+    this.#retryTimer = null
     this.#connect()
     return this
   }
@@ -39,36 +46,43 @@ export class OneBotClient extends EventEmitter {
   stop() {
     this.#stopped = true
     clearTimeout(this.#retryTimer)
-    for (const [, p] of this.#pending) p.reject(new Error('onebot client stopped'))
+    this.#retryTimer = null
+    for (const [, p] of this.#pending) p.reject(Object.assign(new Error('onebot client stopped，结果未确认'), { onebotDelivery: 'uncertain' }))
     this.#pending.clear()
-    if (this.#ws) {
+    const ws = this.#ws
+    this.#ws = null
+    this.#connectionConfig = null
+    if (ws) {
       try {
-        this.#ws.close()
+        ws.terminate()
       } catch {
         /* ignore */
       }
     }
-    this.#ws = null
   }
 
   #connect() {
-    if (this.#stopped) return
-    const headers = this.token ? { Authorization: `Bearer ${this.token}` } : undefined
+    if (this.#stopped || this.#ws) return
+    const config = { url: this.url, token: this.token }
+    const headers = config.token ? { Authorization: `Bearer ${config.token}` } : undefined
     let ws
     try {
-      ws = new WebSocket(this.url, { headers, handshakeTimeout: 10_000 })
+      ws = new WebSocket(config.url, { headers, handshakeTimeout: 10_000 })
     } catch (err) {
       this.emit('error', err)
       this.#scheduleReconnect()
       return
     }
     this.#ws = ws
+    this.#connectionConfig = config
 
     ws.on('open', () => {
+      if (this.#stopped || this.#ws !== ws) return
       this.#retryDelay = Math.max(1000, Number(this.reconnectMs) || 5000)
       this.emit('open')
     })
     ws.on('message', (raw) => {
+      if (this.#stopped || this.#ws !== ws) return
       try {
         this.#onMessage(raw)
       } catch (err) {
@@ -76,23 +90,29 @@ export class OneBotClient extends EventEmitter {
       }
     })
     ws.on('close', (code, reason) => {
+      if (this.#ws !== ws) return
       this.#ws = null
-      for (const [, pending] of this.#pending) pending.reject(new Error('onebot 连接已断开，结果未确认'))
+      this.#connectionConfig = null
+      for (const [, pending] of this.#pending) pending.reject(Object.assign(new Error('onebot 连接已断开，结果未确认'), { onebotDelivery: 'uncertain' }))
       this.#pending.clear()
       this.emit('close', code, String(reason ?? ''))
       this.#scheduleReconnect()
     })
     ws.on('error', (err) => {
+      if (this.#stopped || this.#ws !== ws) return
       // ws 在连接失败时会先 error 再 close，这里只记录，重连交给 close
       this.emit('error', err)
     })
   }
 
   #scheduleReconnect() {
-    if (this.#stopped) return
+    if (this.#stopped || this.#ws || this.#retryTimer) return
     clearTimeout(this.#retryTimer)
     const delay = this.#retryDelay
-    this.#retryTimer = setTimeout(() => this.#connect(), delay)
+    this.#retryTimer = setTimeout(() => {
+      this.#retryTimer = null
+      this.#connect()
+    }, delay)
     this.#retryTimer.unref?.()
     this.#retryDelay = Math.min(this.#retryDelay * 2, 60_000)
   }
@@ -139,7 +159,7 @@ export class OneBotClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(echo)
-        reject(new Error(`onebot 超时（action=${action}）`))
+        reject(Object.assign(new Error(`onebot 超时（action=${action}）`), { onebotDelivery: 'uncertain' }))
       }, timeoutMs)
       this.#pending.set(echo, {
         resolve: (value) => {

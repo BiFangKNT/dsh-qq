@@ -631,9 +631,9 @@ mock2b.emitPrivateText({ userId: 88001, nickname: '小桥的人', text: '你刚�
 await waitFor(() => bridgeAgent.received.length >= 2, { what: '断线后再次投递' })
 const bridgeText = textOf(bridgeAgent.received[bridgeAgent.received.length - 1])
 assert.match(bridgeText, /\[通道\]/, '断线丢过话，下一轮投递必须告诉她')
-assert.match(bridgeText, /没送出去|没能送出去/, '要说清是没送出去（不是没人理）')
+  assert.match(bridgeText, /未发送/, '调用前未连接应明确标为未发送')
 assert.match(bridgeText, /我一直在等你/, '要能对上她到底哪句话丢了')
-assert.match(bridgeText, /不是对方不理你/, '要点明这是通道的问题，不是对方的态度')
+  assert.match(bridgeText, /不据此判断对方/, '不能由通道状态推断对方的态度')
 console.log('✓ 通道回执：断线丢过的话，下一轮投递里会告诉她')
 
 await mock2b.close()

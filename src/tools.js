@@ -369,7 +369,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const gate = faceSendState(config)
       if (!gate.allowed) throw new Error(gate.reason)
       const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
-      const messageId = await sendToolMessage(client, action, { ...peerOf(record), message: [{ type: 'image', data: { file } }] }, logger)
+      const messageId = await sendToolMessage(client, action, { ...peerOf(record), message: [{ type: 'image', data: { file } }] }, logger, { record, text: '[图片]' })
       markFaceSent()
       noteToolSent(record, '[图片]', record, messageId)
       return { ok: true, target: record.label }
@@ -403,7 +403,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const id = String(args?.id ?? '').trim()
       if (!id) throw new Error('qq_face: id 不能为空')
       const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
-      const messageId = await sendToolMessage(client, action, { ...peerOf(record), message: [{ type: 'face', data: { id } }] }, logger)
+      const messageId = await sendToolMessage(client, action, { ...peerOf(record), message: [{ type: 'face', data: { id } }] }, logger, { record, text: `[表情 ${id}]` })
       noteToolSent(record, `[表情 ${id}]`, record, messageId)
       return { ok: true, id }
     },
@@ -439,7 +439,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const name = String(args?.name ?? '').trim() || file.split(/[\\/]/).pop()
       await callToolAction(client, record.scope === 'group' ? 'upload_group_file' : 'upload_private_file', {
         ...peerOf(record), file, name,
-      }, logger)
+      }, logger, { record, text: `[文件] ${name}` })
       noteToolSent(record, `[文件] ${name}`)
       return { ok: true, target: record.label }
     },
@@ -530,7 +530,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const sentId = await sendToolMessage(client, action, {
         ...target,
         message: [...(quoted === null ? [] : [{ type: 'reply', data: { id: String(quoted) } }]), { type: 'text', data: { text } }],
-      }, logger)
+      }, logger, { record, target: destination, text })
       noteToolSent(record, text, destination, sentId)
       return { ok: true, messageId: sentId, target: targetLabel }
     },
@@ -643,7 +643,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       }
       const messageId = await sendToolMessage(client, record.scope === 'group' ? 'send_group_msg' : 'send_private_msg', {
         ...peerOf(record), message: [segment],
-      }, logger)
+      }, logger, { record, text: `[表情包] ${face.summary || '图片'}` })
       markFaceSent()
       noteToolSent(record, `[表情包] ${face.summary || '图片'}`, record, messageId)
       return { ok: true, mode: face.kind, messageId }

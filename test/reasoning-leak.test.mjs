@@ -19,7 +19,7 @@ for (const scope of ['group', 'private']) {
         logger: { info() {}, warn: (...args) => warnings.push(args) }, send: async (_record, text) => sent.push(text) })
       const fire = (type, data) => outbound({ id: 's1' }, { type, sessionId: 's1', data })
       for (const proactive of [false, true]) {
-        for (const text of ['', 'Hmm 这句要短一点。', '[SILENT]', '这次就不接话。[SILENT]']) {
+        for (const text of ['', '[SILENT]', '这次就不接话。[SILENT]']) {
           record._proactiveAt = proactive ? Date.now() : 0
           await fire('turn/start', {})
           await fire('assistant/chunk', { chunk: { type: 'reasoning-delta', text: '你说得对，这是一段不应外发的推理。' } })

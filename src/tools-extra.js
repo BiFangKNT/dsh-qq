@@ -35,7 +35,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
       const messageId = await sendToolMessage(client, target.scope === 'group' ? 'send_group_msg' : 'send_private_msg', {
         ...(target.scope === 'group' ? { group_id: Number(target.peerId) } : { user_id: Number(target.peerId) }),
         message: [{ type: 'record', data: { file: `base64://${audio.toString('base64')}` } }],
-      }, logger)
+      }, logger, { record, target, text })
       noteToolSent(record, text, target, messageId)
       return { ok: true, messageId }
     },

@@ -7,7 +7,7 @@ import { sanitizeOverrides } from '../src/settings.js'
 import { createInbound } from '../src/inbound.js'
 import { createSleep } from '../src/sleep.js'
 import { createContextGuard } from '../src/context-guard.js'
-import { createOutbound, stripLeakedThinking } from '../src/outbound.js'
+import { createOutbound } from '../src/outbound.js'
 import { cleanOutboundText } from '../src/shared/outbound-text.js'
 import { createQzonePublisher } from '../src/qzone.js'
 import { SessionManager } from '../src/session.js'
@@ -137,15 +137,15 @@ test('上下文超限保留原会话和消息，提示压缩或明确新建', as
   assert.match(sent[0], /已保留.*压缩会话/)
 })
 
-test('语音工具抑制后续正文重复；包装标签统一清理，颜文字保留', async () => {
+test('工具调用事件不屏蔽结果说明；包装标签统一清理，颜文字保留', async () => {
   const sent = []
   const outbound = createOutbound({ manager: { find: () => ({ scope: 'private' }) }, logger,
     config: { streamReply: false }, send: async (_r, text) => sent.push(text) })
   await outbound({ id: 's' }, { type: 'tool/call', data: { name: 'qq_send_voice' } })
   await outbound({ id: 's' }, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '已经念过的话' }] } } })
-  assert.deepEqual(sent, [])
+  assert.deepEqual(sent, ['已经念过的话'])
   assert.equal(cleanOutboundText('<text>你好</TEXT>'), '你好')
-  assert.equal(stripLeakedThinking('(*^▽^*)'), '(*^▽^*)')
+  assert.equal(cleanOutboundText('(*^▽^*)'), '(*^▽^*)')
 })
 
 test('preset 在 create 和 resume 的 setup 中挂载，缺服务显式报错', async () => {
