@@ -211,6 +211,8 @@ window.__ModuleLoader__.load({
       const [syncExcluded, setSyncExcluded] = useState([])
       const saveQueue = useRef(Promise.resolve())
       const savedValues = useRef(val)
+      const [sources, setSources] = useState(null)
+      const [sourceDraft, setSourceDraft] = useState({ scope: 'chat', kind: 'file', label: '', path: '', targets: '', selfId: '' })
       savedValues.current = val
       const syncPending = st?.promptSync?.pending ?? []
       const syncOperations = st?.promptSync?.operations ?? []
@@ -223,6 +225,8 @@ window.__ModuleLoader__.load({
           setVal(cfg.values)
           setDraft({})
           setPersona(cfg.persona ?? null)
+          try { setSources(await jget('/sources')) }
+          catch (e) { setMsg({ text: '读取资料入口失败：' + e.message, tone: 'warn' }) }
         } catch (e) {
           setMsg({ text: '读设置失败：' + e.message, tone: 'warn' })
         }
@@ -319,6 +323,36 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy('')
         }
+      }
+
+      const sourceField = (key, label, options) => h('div', { 'data-qq-col': '' },
+        h('label', { htmlFor: 'qq-source-' + key }, label),
+        options ? h('select', { id: 'qq-source-' + key, 'data-qq-input': '', value: sourceDraft[key],
+          onChange: e => setSourceDraft({ ...sourceDraft, [key]: e.target.value }) },
+          options.map(([value, name]) => h('option', { key: value, value }, name))) :
+          h('input', { id: 'qq-source-' + key, 'data-qq-input': '', value: sourceDraft[key] || (key === 'selfId' ? st?.selfId || '' : ''),
+            onChange: e => setSourceDraft({ ...sourceDraft, [key]: e.target.value }) }))
+      const changeSource = async body => {
+        setBusy('sources')
+        try {
+          const result = await jpost('/sources', body)
+          setSources(result)
+          setSourceDraft({ scope: 'chat', kind: 'file', label: '', path: '', targets: '', selfId: '' })
+          setMsg({ text: '资料入口已更新，下次查询生效；原文件保留。', tone: 'good' })
+        } catch (e) { setMsg({ text: '资料操作失败：' + e.message, tone: 'warn' }) }
+        finally { setBusy('') }
+      }
+      const saveSource = () => {
+        try {
+          const targets = sourceDraft.targets.split(/[,，\n]/).map(value => value.trim()).filter(Boolean).map(value => {
+            const match = /^(private|group):(\d+)$/.exec(value)
+            if (!match) throw new Error('聊天格式为 group:群号 或 private:QQ号，用逗号分隔')
+            return { scope: match[1], peerId: match[2] }
+          })
+          if (sourceDraft.scope === 'chat' && targets.length !== 1) throw new Error('聊天私有资料须选择一个聊天')
+          changeSource({ action: 'save', source: { ...sourceDraft, selfId: sourceDraft.selfId || st?.selfId || '',
+            chat: targets[0], chats: targets, pack: 'ai-girls' } })
+        } catch (e) { setMsg({ text: e.message, tone: 'warn' }) }
       }
 
       const localConnection = h('div', { 'data-qq-col': '' },
@@ -605,8 +639,32 @@ window.__ModuleLoader__.load({
           listField('peerBots', '其他机器人的 QQ 号', { hint: '按此名单识别机器人账号，用逗号分隔。' })),
 
         h('div', { 'data-qq-sec': '' },
-          h('div', { 'data-qq-h': '' }, '共享文件'),
-          textField('memoryRoot', '共享文件目录', { mono: true, hint: '填写运行端的本地目录后启用 qq_memo，留空关闭。获准聊天可读；只有授权账号私聊可写。仅支持 md/txt，与各聊天的统一记忆分开。修改后重启宿主。' })),
+          h('div', { 'data-qq-h': '' }, '参考资料'),
+          h('div', { 'data-qq-note': '' }, '只检索明确选入的资料，不扫描整个工作目录，不作为聊天记忆。支持运行端 UTF-8 md/txt 文件、目录和可选角色包；无需额外模型或检索服务。公共资料仅对指定聊天可见，不自动共享给其他机器人。'),
+          sourceField('selfId', '资料所属机器人 QQ 号'),
+          sourceField('label', '资料名称'),
+          sourceField('scope', '资料访问范围', [['chat', '指定聊天私有'], ['public', '公共资料（仅指定聊天可查）']]),
+          sourceField('targets', '可访问聊天'),
+          h('div', { 'data-qq-note': '' }, '填写 group:群号 或 private:QQ号。私有资料只填一个；公共资料用逗号分隔，留空时任何聊天都不可查。共用工作目录也不会自动共享资料。'),
+          sourceField('kind', '资料来源类型', [['file', '文本文件'], ['directory', '文本目录'], ['pack', '可选角色资料包'], ['legacy-meme', '导入旧梗词库（SQLite）']]),
+          sourceDraft.kind !== 'pack' ? sourceField('path', '资料绝对路径（运行端）') :
+            h('div', { 'data-qq-note': '' }, 'AI 拟人同人角色参考：沿用现有角色名称、别称、外貌及来源说明，按需查询，不加入 system。'),
+          h('div', { 'data-qq-note': '' }, '单个文本最多 512 KiB，一个来源最多 128 个文件、8 MiB；目录不跟随链接。文件更新或删除后，下次查询更新索引；读取失败不使用旧片段。'),
+          h('button', { 'data-qq-btn': '', disabled: !!busy, onClick: saveSource }, sourceDraft.id ? '保存资料修改' : '添加资料来源'),
+          sourceDraft.id ? h('button', { 'data-qq-btn': '', onClick: () => setSourceDraft({ scope: 'chat', kind: 'file', label: '', path: '', targets: '', selfId: '' }) }, '取消编辑') : null,
+          h('button', { 'data-qq-btn': '', disabled: !!busy, onClick: async () => {
+            try { setSources(await jget('/sources')) } catch (e) { setMsg({ text: e.message, tone: 'warn' }) }
+          } }, '刷新资料列表'),
+          (sources?.sources || []).map(source => h('div', { key: source.id, 'data-qq-row': '' },
+            h('div', null, `${source.label} · 机器人 ${source.selfId} · ${source.scope === 'chat' ? '私有' : '公共'} · ` +
+              (source.scope === 'chat' ? [source.chat] : source.chats).map(target => target.scope + ':' + target.peerId).join(', ')),
+            h('div', { 'data-qq-note': '' }, source.path || '可选角色资料包'),
+            h('button', { 'data-qq-btn': '', disabled: !!busy, onClick: () => setSourceDraft({ ...source,
+              targets: (source.scope === 'chat' ? [source.chat] : source.chats).map(target => target.scope + ':' + target.peerId).join(', ') }) }, '编辑资料范围'),
+            h('button', { 'data-qq-btn': '', disabled: !!busy, onClick: () => changeSource({ action: 'remove', id: source.id, selfId: source.selfId }) }, '移除资料入口'))),
+          h('div', { 'data-qq-note': '' }, '旧 qq_memo、qq_meme 和 aiGirls 自动注入已停用，旧文件不删除、不自动公开。旧 system 中的角色资料按原同步流程移除，当前会话不会被悄悄改写。'),
+          sources?.legacy?.memoryRoot ? h('div', { 'data-qq-note': '' }, '旧共享目录（未自动导入）：' + sources.legacy.memoryRoot) : null,
+          sources?.legacy?.memeDb ? h('div', { 'data-qq-note': '' }, '旧梗词库（未自动导入）：' + sources.legacy.memeDb) : null),
 
         /* ── 主动说话 ── */
         h('div', { 'data-qq-sec': '' },
@@ -646,8 +704,7 @@ window.__ModuleLoader__.load({
           textField('faceCollectHint', '普通图片自动收藏规则', { hint: '例如“只收藏猫猫梗图”。留空不自动收藏，但用户明确要求时仍可收藏。商城表情由程序自动登记，无需填写规则。' }),
           boolField('voiceEnabled', '合成语音', '默认关闭；当前只支持 Windows SAPI。与收到语音后的转文字无关。'),
           textField('voiceName', '语音声音名称', { hint: 'Windows SAPI 声音名称；留空使用系统默认声音。' }),
-          boolField('qzoneEnabled', '发布空间', '默认关闭；仅授权账号私聊可用。须先确认文案、图片和可见范围，每天最多两次尝试，结果不明时不自动重发。'),
-          textField('memeDb', '旧梗词库路径', { hint: '兼容已有 SQLite 词库；留空读取 DSH_QQ_MEME_DB，文件存在时才提供查询工具。普通文件、目录和资料包的统一导入另行实现。', mono: true })),
+          boolField('qzoneEnabled', '发布空间', '默认关闭；仅授权账号私聊可用。须先确认文案、图片和可见范围，每天最多两次尝试，结果不明时不自动重发。')),
 
         /* ── 其它 ── */
         h('div', { 'data-qq-sec': '' },

@@ -57,12 +57,12 @@
 | 语音发送 | Windows SAPI 合成后发送；受操作系统和可用声音限制 | 页面提供合成语音开关（默认关闭）和声音名，Windows 才提供 qq_send_voice | [voice](../src/voice.js)、[tools-extra](../src/tools-extra.js) |
 | 聊天记录查询（已统一） | 默认查询当前获准聊天的收发记录；跨聊天仅授权账号私聊可用，目标也须获准；不再读取好感文件授权 | `qq_history`；旧查询工具退出，旧流水一次性导入 SQLite | [message-tools](../src/message-tools.js)、[history-import](../src/history-import.js) |
 | 空间发布 | 仅授权账号私聊；每日最多两次尝试，未知结果不隐式重发。工具说明要求先确认，发布函数没有独立确认票据校验 | qq_qzone_send，页面开关默认关闭 | [tools-extra](../src/tools-extra.js)、[qzone](../src/qzone.js) |
-| 梗查询 | 兼容本地梗数据库；配置路径存在且为普通文件时才提供工具 | memeDb 在设置页和 profile，或环境变量 DSH_QQ_MEME_DB | [meme](../src/meme.js)、[tools](../src/tools.js) |
-| 同人角色资料 | `aiGirls` 默认 true，将特定角色图鉴放入提示词；不是从聊天自动学来的知识 | 只在 profile 配置；增加提示词内容 | [gijinka](../src/gijinka.js)、[prompts](../src/prompts.js) |
+| 参考资料查询 | 文件、目录、可选角色包和旧词库显式导入；只返回当前聊天可见片段 | 设置页“参考资料”，或授权账号私聊 qq_sources；查询不增加模型调用 | [knowledge](../src/knowledge.js)、[knowledge-tools](../src/knowledge-tools.js) |
+| 同人角色资料 | 可选资料包，显式选择访问范围后按需检索；不加入新 system | 默认未启用；旧 system 按原同步规则更新 | [gijinka](../src/gijinka.js)、[knowledge](../src/knowledge.js) |
 | 聊天流水 | 默认将收发文本按日期落盘；不等于宿主会话历史，也不是统一记忆 | `chatLog` 只在 profile | [chatlog](../src/chatlog.js) |
 | 群词候选扫描 | 启动时及之后每 20 分钟扫描近期群流水，收集机器人表示不理解的内容；当前运行入口写统一记忆候选，本身不调用模型 | 无独立开关或页面；候选不是已确认词义 | `src/learning.js`（已移除，见 Git 历史）、[memory](../src/memory.js) |
 
-2026-11-17 工具整理第 1～3 步已完成，当前共 18 个工具，qq_memo 只在配置共享目录后注册。qq_reply 已并入 qq_send；所有 QQ 工具使用宿主每步选择接口，按聊天、开关、平台和资料路径决定是否提供，执行时也复查。普通图片自动收藏规则已补设置入口，留空只禁止自动收藏，商城表情自动登记保持不变。完整清单见[QQ 工具整理计划](tool-cleanup-plan.md)；第 4 步统一资料检索尚未实施。
+2026-11-17 工具整理第 1～4 步已完成，当前共 18 个工具。qq_reply 已并入 qq_send，qq_memo 和 qq_meme 由 qq_search、qq_sources 替代。工具按聊天、开关和运行条件提供并在执行时复查；普通图片收藏和商城登记分开。参考资料默认未选入，按聊天隔离并支持明确授权的公共范围，角色图鉴不再整份进入新 system。见[工具整理](tool-cleanup-plan.md)与[资料使用和迁移](knowledge.md)。
 
 ### 没有新消息也可能运行的功能
 
@@ -258,6 +258,8 @@
 群词候选扫描的实际规则：从机器人已发回复中匹配“什么意思”“没懂”等固定字样，取此前最近一条群友消息，去掉 @ 后至少 4 个字符便把整句话写为候选。不做语义判断、不提取具体词义，反问及多人交错发言都可能误命中或错配。扫描本身不调用模型；不能将它描述为已理解或学会词义。当前生产入口写统一记忆候选，旧源码中写 `群词典.md` 的注释不代表当前路径。
 
 ### 资料入口与共享文件
+
+2026-11-17：本节的待实现方案已在工具整理第四步落地，当前行为见[参考资料](knowledge.md)。下文保留调研与决策过程，不作为旧接口仍启用的说明。
 
 当前没有通用资料检索实现。`qq_memo` 提供 `list/read/append/write`，是可选共享文件工具，不会建立检索索引；`qq_meme` 只查询特定表结构的现成 SQLite 文件；角色资料当前仍整份进入 system。不能把这些现状称为已落地的 RAG。
 

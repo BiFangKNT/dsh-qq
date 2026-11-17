@@ -63,6 +63,7 @@
   },
   "dependencies": {
     "@huggingface/tokenizers": "0.2.0",
+    "@lezer/markdown": "^1.8.1",
     "image-size": "^2.0.4",
     "ws": "^8.18.0",
     "zod": "^4.6.6"

@@ -15,15 +15,15 @@ import { join } from 'node:path'
 import { pickFace, keepFace, facesCount, faceSendState, markFaceSent, listFaces } from './faces.js'
 import { homeDirOf } from './settings.js'
 import { checkOutboundText, SensitiveContentError } from './audit.js'
-import { lookupMeme } from './meme.js'
 import { downloadImage } from './inbound.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerExtraTools } from './tools-extra.js'
 import { registerMemoryTool } from './memory-tools.js'
 import { registerMessageTool } from './message-tools.js'
-import { registerSharedFiles } from './shared-files.js'
+import { createKnowledge } from './knowledge.js'
+import { registerKnowledgeTools } from './knowledge-tools.js'
 import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
-import { createToolPolicy, memeDbPath } from './tool-policy.js'
+import { createToolPolicy } from './tool-policy.js'
 
 const POKE_DESC =
   '戳一戳当前对话里的对方（私聊戳好友，群聊戳那位发言的人）。用来提醒对方注意、' +
@@ -80,13 +80,14 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home, notifyBlocked, synthesize, platform }) {
+export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home, knowledge, notifyBlocked, synthesize, platform }) {
   const registry = ctx.get?.('tools')
   if (!registry?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
     return
   }
-  const policy = createToolPolicy({ config, manager, logger, platform })
+  knowledge ??= createKnowledge({ home: home ?? homeDirOf(ctx, logger), logger })
+  const policy = createToolPolicy({ config, manager, knowledge, platform })
   const registered = []
   const tools = { register: definition => {
     const dispose = policy.register(registry, definition)
@@ -131,59 +132,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     throw new SensitiveContentError(verdict.rule)
   }
 
-  const sharedFilesEnabled = registerSharedFiles(tools, { config, manager, logger, needRecord })
-
-  tools.register({
-    name: 'qq_meme',
-    description:
-      '查询用户配置的本地梗词库，查找词义、用法和出处；具体收录内容与数量取决于所配置的数据库。' +
-      '需要配置 memeDb 或环境变量 DSH_QQ_MEME_DB 指向兼容的 SQLite 词库，未配置或文件不可用时无法查询。' +
-      '查不到不代表这个词没有含义；不编造出处，当前聊天已确认的自定义词义用 qq_memory 管理。',
-    parameters: {
-      type: 'object',
-      properties: {
-        word: { type: 'string', description: '那个词本身（不用带标点；叠词像「杂鱼杂鱼」会自动折叠）' },
-        full: { type: 'boolean', description: '要完整原文传 true；默认截断到 600 字，平常不用' },
-      },
-      required: ['word'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          found: { type: 'boolean' },
-          title: { type: 'string' },
-          text: { type: 'string' },
-          message: { type: 'string' },
-        },
-        required: ['found'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [
-        { type: 'text', text: value.found ? value.text : value.message || '（词库里没有这个词）' },
-      ],
-    },
-    async execute(args) {
-      try {
-        const word = String(args?.word ?? '').trim()
-        const r = await lookupMeme(word, { dbPath: memeDbPath(config), full: Boolean(args?.full) })
-        if (!r.found) {
-          return {
-            found: false,
-            title: '',
-            text: '',
-            message:
-              `所配置的词库未找到「${word}」。未命中不代表这个词没有含义；缺少依据时说明不确定，不编造出处。`,
-          }
-        }
-        return { found: true, title: r.title, text: r.text, message: '' }
-      } catch (err) {
-        logger.warn?.(`qq_meme 查询失败: ${err?.message ?? err}`)
-        return { found: false, title: '', text: '', message: `查不了：${err?.message ?? err}` }
-      }
-    },
-  })
+  registerKnowledgeTools(tools, { knowledge, config, manager, needRecord })
 
   tools.register({
     name: 'qq_poke',
@@ -915,7 +864,4 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
   logger.info?.(
     `QQ 工具已注册（按当前聊天、开关和运行条件提供）：${registered.join(' / ')}（表情包收藏 ${facesCount(config)} 个）`,
   )
-  logger.info?.(sharedFilesEnabled
-    ? 'qq_memo 已启用：获准聊天可读，仅授权账号私聊可写'
-    : 'qq_memo 未启用：未配置共享文件目录')
 }

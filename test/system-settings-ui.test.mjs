@@ -29,7 +29,8 @@ async function panel({ beforeSave, saveResult = {} } = {}) {
     const body = options?.body ? JSON.parse(options.body) : null
     calls.push({ url, body })
     let result = status
-    if (url.endsWith('/prompt-sync')) result = { ok: true }
+    if (url.endsWith('/sources')) result = { sources: [], legacy: {} }
+    else if (url.endsWith('/prompt-sync')) result = { ok: true }
     else if (url.endsWith('/settings')) {
       if (body?.patch) {
         await beforeSave?.(body.patch)
@@ -54,17 +55,22 @@ async function panel({ beforeSave, saveResult = {} } = {}) {
 }
 const button = (tree, text) => tree.find(element => element.type === 'button' && element.children.includes(text))
 
-test('共享文件目录可从设置页配置，并说明权限与重启', async () => {
+test('资料入口明确选择来源和访问聊天，不再提供旧共享文件路径设置', async () => {
   const h = await panel(), tree = h.render()
-  const label = tree.find(element => element.children.includes('共享文件目录'))
-  assert.ok(label)
-  const input = tree.slice(tree.indexOf(label)).find(element => element.type === 'input')
-  input.props.onChange({ target: { value: 'D:/shared-files' } })
-  input.props.onBlur({ target: { value: 'D:/shared-files' } })
+  assert.ok(tree.some(element => element.children.includes('参考资料')))
+  assert.ok(!tree.some(element => element.children.includes('共享文件目录')))
+  const set = (key, value) => h.render().find(element => element.props.id === 'qq-source-' + key).props.onChange({ target: { value } })
+  set('selfId', '90001')
+  set('targets', 'group:70001')
+  set('path', 'D:/references/manual.md')
+  button(h.render(), '添加资料来源').props.onClick()
   await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(h.calls.find(call => call.body?.patch).body.patch, { memoryRoot: 'D:/shared-files' })
-  assert.match(JSON.stringify(tree), /只有授权账号私聊可写/)
-  assert.match(JSON.stringify(tree), /修改后重启宿主/)
+  const call = h.calls.find(call => call.url.endsWith('/sources'))
+  assert.equal(call.body.source.path, 'D:/references/manual.md')
+  assert.deepEqual(call.body.source.chat, { scope: 'group', peerId: '70001' })
+  assert.equal(call.body.source.scope, 'chat')
+  assert.match(JSON.stringify(tree), /不自动共享/)
+  assert.match(JSON.stringify(tree), /不扫描整个工作目录/)
 })
 
 test('一次保存同时提示重连、重启与新会话，随机分条间隔可保存', async () => {

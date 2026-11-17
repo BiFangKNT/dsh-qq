@@ -21,6 +21,40 @@ async function setup(t, options) {
 }
 async function idle(env) { for (const agent of env.host.agents.values()) await agent.whenIdle() }
 
+test('资料设置API与实际mock模型工具调用共用来源，更新文件后返回新内容', async t => {
+  const env = await setup(t)
+  const file = join(env.root, 'reference.md')
+  await writeFile(file, '# 泡泡机\n泡泡机是一种虚构仪器。')
+  const api = (path, body) => fetch(`${env.url}/api/dsh-qq/${path}`, body ? { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : undefined).then(response => response.json())
+  assert.equal((await api('sources')).sources.length, 0)
+  await api('sources', { action: 'save', source: { selfId: '10001', scope: 'chat', chat: { scope: 'private', peerId: '11001' },
+    kind: 'file', path: file, label: '仪器参考' } })
+  // 沿用模拟器的真实入站→工具执行→续调→出站路径，工具选择不改 system。
+  const before = sent(env).length
+  env.emitMessage({ text: '查泡泡机', steps: [{ type: 'tool', name: 'qq_search', args: { query: '泡泡机' } },
+    { type: 'text', text: '查询结果已读取' }] })
+  await waitFor(() => sent(env).length > before)
+  await idle(env)
+  const agent = [...env.host.agents.values()][0]
+  assert.match(agent.results[0].result.text, /虚构仪器/)
+  const system = agent.requests[0].system
+  const hit = JSON.parse(agent.results[0].result.text).results[0]
+  env.emitMessage({ text: '读完整原文', steps: [{ type: 'tool', name: 'qq_search', args: {
+    action: 'read', sourceId: hit.sourceId, documentId: hit.documentId, version: hit.version,
+  } }, { type: 'text', text: '完整原文已读取' }] })
+  await waitFor(() => sent(env).length > before + 1)
+  await idle(env)
+  assert.equal(JSON.parse(agent.results.at(-1).result.text).text, await readFile(file, 'utf8'))
+  await writeFile(file, '# 泡泡机\n泡泡机的新版说明。')
+  env.emitMessage({ text: '再查泡泡机', steps: [{ type: 'tool', name: 'qq_search', args: { query: '泡泡机' } },
+    { type: 'text', text: '已查看新版' }] })
+  await waitFor(() => sent(env).length > before + 2)
+  await idle(env)
+  assert.match(agent.results.at(-1).result.text, /新版说明/)
+  assert.equal(agent.requests.at(-1).system, system)
+})
+
 test('设置预览加载正式组件和本地 React，浏览器连接限制在当前模拟器', async t => {
   const env = await setup(t)
   const response = await fetch(`${env.url}/settings`)

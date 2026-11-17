@@ -74,7 +74,7 @@ export const ConfigSchema = Schema.object({
   memoryRoot: Schema.string()
     .default('')
     .description(
-      '共享文件目录；留空禁用 qq_memo。获准聊天可读，仅授权账号私聊可写，只支持 md/txt。与按聊天隔离的统一记忆分开；修改后重启宿主。',
+      '已停用，仅保留旧目录路径供迁移参考。请在设置页的参考资料中明确选择来源和访问聊天；不会自动索引或删除旧文件。',
     ),
   persona: Schema.string()
     .default('')
@@ -108,9 +108,9 @@ export const ConfigSchema = Schema.object({
     .default('')
     .description('群聊 system 的补充提示词，按会话的 system 同步规则生效'),
   aiGirls: Schema.boolean()
-    .default(true)
+    .default(false)
     .description(
-      '把「AI 娘图鉴」夹进提示词：群友说到 DeepSeek 娘、龙娘、通义娘这些同人角色时认得出来，不会当成真人或瞎猜。大约多几百字，嫌占地方可以关掉',
+      '已停用，不再加入新生成的 system。需要角色资料时在参考资料中选择可选角色包，并指定可访问的聊天。旧会话按原 system 同步规则更新。',
     ),
   quoteReply: Schema.boolean()
     .default(true)
@@ -234,8 +234,7 @@ export const ConfigSchema = Schema.object({
   memeDb: Schema.string()
     .default('')
     .description(
-      '查梗用的词库（cnmeme.wiki 的 sqlite 快照）放在哪；留空则读环境变量 DSH_QQ_MEME_DB。' +
-        '未配置或文件不存在时不向模型提供 qq_meme；统一资料导入尚未实现',
+      '已停用，仅供迁移参考。既有兼容词库可在参考资料中显式选择旧词库导入，并指定范围；新资料使用 md/txt 文件或目录，无需自行制作数据库。',
     ),
 
   // ── 语音转文字（离线 vosk） ──

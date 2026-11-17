@@ -14,6 +14,7 @@ import { SILENT_HINT } from '../src/prompts.js'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { createContextBudget } from '../src/context-budget.js'
 import { createMessageStore } from '../src/message-store.js'
+import { createKnowledge } from '../src/knowledge.js'
 
 const require = createRequire(import.meta.resolve('@deepseek-ai/dsh-agent-loop'))
 const load = name => import(pathToFileURL(require.resolve(name)).href)
@@ -335,13 +336,29 @@ test('真实 rc.2 工具选择：QQ 分组、关闭后的旧调用和普通 Agen
   const record = { selfId: '10001', scope: 'private', peerId: '11001', agent }
   const calls = []
   const manager = { selfId: '10001', find: id => id === agent.session.id ? record : null }
-  registerTools(h.ctx, { config: h.config, manager, home: tmpdir(), platform: 'linux',
+  const home = await mkdtemp(join(tmpdir(), 'qq-host-tools-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const knowledge = createKnowledge({ home })
+  registerTools(h.ctx, { config: h.config, manager, home, knowledge, platform: 'linux',
     client: { async call(...args) { calls.push(args); return {} } }, logger: { info() {}, warn() {} } })
   await h.send(agent)
   const names = () => (h.requests.at(-1).tools ?? []).map(tool => tool.name)
   assert.ok(names().includes('qq_face'))
   assert.ok(names().includes('qq_send'))
   assert.ok(names().includes('qq_keep_face'))
+  assert.ok(names().includes('qq_sources'))
+  assert.ok(!names().includes('qq_search'))
+  const systemBefore = h.requests.at(-1).messages.filter(message => message.role === 'system')
+  const source = await knowledge.save({ selfId: '10001', scope: 'chat', chat: record, kind: 'pack', pack: 'ai-girls' })
+  await h.send(agent)
+  assert.ok(names().includes('qq_search'))
+  assert.deepEqual(h.requests.at(-1).messages.filter(message => message.role === 'system'), systemBefore)
+  const searchSelection = await h.ctx.tools.resolve({ agent, modelSelection: agent.model.current(), signal: new AbortController().signal })
+  const search = searchSelection.view(agent).get('qq_search')
+  assert.match((await search.execute({ query: '龙娘' }, { agent })).text, /GPT 娘/)
+  knowledge.remove(source.id, '10001')
+  await assert.rejects(search.execute({ query: '龙娘' }, { agent }), /不可用/)
+  searchSelection.dispose()
   for (const name of ['qq_reply', 'qq_meme', 'qq_memo', 'qq_send_voice', 'qq_qzone_send']) assert.ok(!names().includes(name), name)
   const selection = await h.ctx.tools.resolve({ agent, modelSelection: agent.model.current(), signal: new AbortController().signal })
   const stale = selection.view(agent).get('qq_face')
@@ -390,4 +407,40 @@ test('真实 rc.2 工具续调重新选择工具，但不改写已锁定的 syst
   assert.ok(!h.requests[1].tools.some(tool => tool.name === 'qq_face'))
   const systems = request => request.messages.filter(message => message.role === 'system')
   assert.deepEqual(systems(h.requests[0]), systems(h.requests[1]))
+})
+
+test('真实 rc.2 资料工具调用：搜索后可读取原文，结果进入工具续调而非system', async t => {
+  const h = await harness(t, { respond: (_options, requests) => {
+    if (requests.length > 2) return textResponse('ok')
+    let args = { query: '龙娘' }
+    if (requests.length === 2) {
+      const message = requests.at(-1).messages.filter(message => message.role === 'tool').at(-1)
+      const hit = JSON.parse(message.content.map(block => block.text || '').join('')).results[0]
+      args = { action: 'read', sourceId: hit.sourceId, documentId: hit.documentId, version: hit.version }
+    }
+    return toolResponse.map(frame => {
+      if (frame.type === 'tool-call-delta') return { ...frame, id: llm.ToolCallId(`search-${requests.length}`), name: 'qq_search', argumentsDelta: JSON.stringify(args) }
+      if (frame.type === 'block-end') return { ...frame, block: { ...frame.block, id: llm.ToolCallId(`search-${requests.length}`), name: 'qq_search', arguments: JSON.stringify(args) } }
+      return frame
+    })
+  } })
+  const home = await mkdtemp(join(tmpdir(), 'qq-host-search-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const knowledge = createKnowledge({ home })
+  Object.assign(h.config, { replyToPrivate: true, privateMode: 'open' })
+  const { agent } = await h.attach()
+  const record = { selfId: '10001', scope: 'private', peerId: '11001' }
+  await knowledge.save({ selfId: '10001', scope: 'chat', chat: record, kind: 'pack', pack: 'ai-girls' })
+  registerTools(h.ctx, { config: h.config, manager: { selfId: '10001', find: id => id === agent.session.id ? record : null },
+    knowledge, home, logger: { info() {}, warn() {} }, client: {} })
+  await h.send(agent)
+  assert.deepEqual(h.errors, [])
+  assert.equal(h.requests.length, 3)
+  assert.match(JSON.stringify(h.requests[1].messages.filter(message => message.role === 'tool')), /GPT 娘/)
+  const readMessage = h.requests[2].messages.filter(message => message.role === 'tool').at(-1)
+  const read = JSON.parse(readMessage.content.map(block => block.text || '').join(''))
+  assert.match(read.text, /genderswapai.com/)
+  assert.equal(read.partial, false)
+  assert.equal(read.nextOffset, null)
+  assert.doesNotMatch(JSON.stringify(h.requests[0].messages.filter(message => message.role === 'system')), /GPT 娘/)
 })

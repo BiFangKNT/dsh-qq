@@ -18,6 +18,8 @@ node test/mock-napcat.mjs --port 3001 --token my-token-2026
 
 当前事项自动维护、统一记忆与旧数据迁移见[记忆整理方案](memory-design.md)；官方循环接入方式和验证范围见[末尾状态区](host-transient-context.md)。情绪计算仍按[开发安排](emotion-system-development.md)推进。
 
+模型工具的说明、返回、错误与续读约定见[工具设计规范](tool-design.md)；现有工具和整理决定见[QQ 工具整理计划](tool-cleanup-plan.md)，参考资料工具的具体行为见[参考资料](knowledge.md)。
+
 ## 目录
 
 ```

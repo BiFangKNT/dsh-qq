@@ -1,9 +1,6 @@
 /**
- * AI 娘图鉴：各家 AI 模型的拟人化同人形象。
- *
- * 为什么要有这个：群里聊到「大肥鱼」「龙娘」「通义娘」的时候，
- * 鲸鲸经常当成真人或者瞎猜——这些是画师画的同人角色，不是官方形象，
- * 也不是群友。给它一张认人的表，比每次重新猜准得多。
+ * 可选角色资料包：各家 AI 模型的拟人同人形象，非真人或官方形象。
+ * 仅由管理员选入指定范围后供资料检索，不再组装到 system。
  *
  * 数据来源：genderswapai.com 的角色档案（2026-10-25 抓取）。
  * 主要形象创作者 ZipZipPipe；DeepSeek 娘原角色为上善无形，CC BY-NC-SA 4.0。
@@ -130,66 +127,3 @@ export const GIJINKA = [
     traits: ['黑粉配色', '手持天平', '嘴部荆棘'],
   },
 ]
-
-/**
- * 认人时的检索词：完整叫法 + 每个别称。
- *
- * 故意**不**把「DeepSeek」「GPT」这种 AI 本名当检索词 ——
- * 群里说「GPT 便宜」是在聊模型，不是在说娘化角色，认成娘就乱套了。
- * 要命中就带「娘」或者用别称（大肥鱼、龙娘、通义娘）。
- */
-export function lookupKeys(g) {
-  const keys = new Set()
-  for (const raw of [g.name, ...(g.aliases ?? [])]) {
-    const s = String(raw ?? '').trim().toLowerCase()
-    if (!s) continue
-    keys.add(s)
-    keys.add(s.replace(/\s+/g, ''))
-  }
-  return [...keys]
-}
-
-/**
- * 从一段话里认出提到了哪些 AI 娘。
- *
- * @param {string} text
- * @returns {Gijinka[]}
- */
-export function matchGijinka(text) {
-  const s = String(text ?? '').toLowerCase().replace(/\s+/g, '')
-  if (!s) return []
-  const hit = []
-  for (const g of GIJINKA) {
-    const keys = lookupKeys(g).map((k) => k.replace(/\s+/g, ''))
-    if (keys.some((k) => k.length >= 2 && s.includes(k))) hit.push(g)
-  }
-  return hit
-}
-
-/** 一位角色压成一行：名字＝别称｜特征 */
-export function gijinkaLine(g) {
-  const alias = (g.aliases ?? []).filter(Boolean).join('、')
-  const head = alias ? `${g.name}＝${alias}` : g.name
-  const traits = (g.traits ?? []).filter(Boolean).join('·')
-  const note = g.note ? `（${g.note}）` : ''
-  return `- ${head}｜${traits}${note}`
-}
-
-/**
- * 生成注入提示词的那段图鉴。
- *
- * 只给「认得出来」需要的信息：谁是谁、长什么样、别乱认。
- * 不给作者、链接、协议 —— 那些聊天时用不上，白占上下文。
- *
- * @param {{ only?: Gijinka[] }} [opts] only = 只渲染这几位（群里只提到一两位时省字数）
- */
-export function renderGijinka(opts = {}) {
-  const list = Array.isArray(opts.only) && opts.only.length > 0 ? opts.only : GIJINKA
-  if (list.length === 0) return ''
-  const lines = [
-    '【AI 娘图鉴】群友说的「X 娘」是画师画的各家 AI 拟人同人形象，不是真人，也不是官方拟人：',
-    ...list.map(gijinkaLine),
-    '以上是角色参考资料，不决定你的人设。图片无法确认时说明不确定，不凭别名猜测画面。',
-  ]
-  return lines.join('\n')
-}

@@ -24,6 +24,7 @@ import { checkOutboundText, sensitiveContentNotice } from './audit.js'
 import { splitText, sleep } from './shared/chunk.js'
 import { cleanOutboundText } from './shared/outbound-text.js'
 import { registerTools } from './tools.js'
+import { createKnowledge } from './knowledge.js'
 import { parseMessageId } from './tool-send.js'
 import { ApprovalChannel } from './approval.js'
 import { QuestionChannel } from './questions.js'
@@ -218,6 +219,7 @@ export function apply(ctx, config) {
   const savedOverrides = migrateIdentityOverrides(ctx, config, loadOverrides(ctx, ctx?.logger ?? console))
   const appliedOverrides = applyOverrides(config, savedOverrides)
   const logger = makeLogger(ctx, config)
+  const knowledge = createKnowledge({ home: homeDirOf(ctx, logger), logger })
   if (appliedOverrides.length > 0) logger.info(`已应用设置页覆盖: ${appliedOverrides.join(', ')}`)
 
   // 第一次启动就落一份骨架 settings.json（设置页没上场时，用户手里唯一的入口）
@@ -236,7 +238,7 @@ export function apply(ctx, config) {
   const clientRef = { current: null }
   const runtime = {}
   const compatibility = createHostCompatibility({ config, home: homeDirOf(ctx, logger), logger,
-    start: () => Object.assign(runtime, startRuntime({ ctx, config, logger, agents, clientRef })) })
+    start: () => Object.assign(runtime, startRuntime({ ctx, config, logger, agents, clientRef, knowledge })) })
   ctx.on('dispose', () => compatibility.stop())
   watchSettingsFile(ctx, config, overridesRef, personaRef, logger, clientRef, () => {
     compatibility.sync()
@@ -256,7 +258,7 @@ export function apply(ctx, config) {
     // 测试桩 / 极简宿主可能没有 ctx.inject，这时候跳过就好，别让整个插件崩
     if (typeof ctx.inject !== 'function') return
     ctx.inject(['webServer'], (sub) =>
-      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, compatibility, getRuntime: () => runtime, ...extra }),
+      installSettingsApi({ ctx, webServer: sub.webServer, config, logger, compatibility, knowledge, getRuntime: () => runtime, ...extra }),
     )
   }
 
@@ -274,7 +276,7 @@ export function apply(ctx, config) {
   if (compatibility.status().pending) logger.warn('DSH 核心包版本未经验证，QQ 暂未启用。请在 QQ 设置中确认风险，或配置 acceptedDshVersions 后启用。')
 }
 
-function startRuntime({ ctx, config, logger, agents, clientRef }) {
+function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
   if (!agents) {
     throw new Error('宿主没有 agents 服务，dsh-qq 不启动')
   }
@@ -594,7 +596,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   bedtime.start()
 
   try {
-    registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home: homeDirOf(ctx, logger),
+    registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, knowledge, home: homeDirOf(ctx, logger),
       notifyBlocked: record => send(record, sensitiveContentNotice, { sensitiveNotice: true }) })
   } catch (err) {
     logger.warn('QQ 互动工具注册失败（聊天本身不受影响）:', err?.message ?? err)

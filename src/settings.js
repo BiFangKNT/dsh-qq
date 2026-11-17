@@ -24,6 +24,7 @@ import { createServer } from 'node:http'
 import { isDeepStrictEqual } from 'node:util'
 import { migrateGroupSettings, retiredGroupSettings } from './group-trigger.js'
 import { migrateOwnerLabel } from './identity.js'
+import { createKnowledge } from './knowledge.js'
 
 /**
  * 设置页本地服务端口。
@@ -336,7 +337,7 @@ export function applyOverrides(config, overrides, logger) {
   return applied
 }
 
-const restartKeys = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'imageCacheDir', 'memoryRoot']
+const restartKeys = ['localApiPort', 'reconnectMs', 'selfId', 'workspaceRoot', 'isolateByPeer', 'imageCacheDir']
 export function settingsEffects(changed) {
   return {
     reconnect: changed.filter(key => ['wsUrl', 'accessToken'].includes(key)),
@@ -424,8 +425,9 @@ export function settingsInfo(ctx, logger) {
  * @param {object} opts.overridesRef `{ current: {} }`，设置页存下来的覆盖
  * @returns {boolean} 是否挂上
  */
-export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef, promptSync, compatibility, getRuntime }) {
+export function installSettingsApi({ ctx, webServer: injectedWebServer, config, logger, client, manager, personaRef, overridesRef, promptSync, compatibility, knowledge, getRuntime }) {
   captureBaseConfig(config)
+  knowledge ??= createKnowledge({ home: homeDirOf(ctx, logger), logger })
   // 自证：这次到底有没有把路由挂上（排查「设置页 404」时不用靠猜）
   const noteApiState = (ok, detail) => {
     try {
@@ -502,6 +504,20 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
     if (req.method === 'GET' && path === '/api/dsh-qq/status') {
       return sendJson(res, 200, statusOf())
+    }
+
+    if (path === '/api/dsh-qq/sources') {
+      try {
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req)
+          if (body.action === 'save') await knowledge.save(body.source)
+          else if (body.action === 'remove') knowledge.remove(body.id, body.selfId)
+          else throw new Error('未知资料管理操作')
+        } else if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: '不支持此操作' })
+        return sendJson(res, 200, { ok: true, sources: knowledge.list(), legacy: {
+          memoryRoot: config.memoryRoot || '', memeDb: config.memeDb || process.env.DSH_QQ_MEME_DB || '', aiGirls: config.aiGirls === true,
+        } })
+      } catch (error) { return sendJson(res, 400, { ok: false, error: error.message }) }
     }
 
     if (req.method === 'POST' && path === '/api/dsh-qq/compatibility') {

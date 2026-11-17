@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import fs, { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerTools } from '../src/tools.js'
@@ -240,7 +240,7 @@ test('核实引用期间撤销授权，不能继续跨聊天发送', async t => 
 test('分组默认值、平台和资料路径同时用于提供条件与执行检查', async t => {
   const h = fixture(t, { extra: { voiceEnabled: false } })
   for (const name of ['qq_face', 'qq_poke', 'qq_react', 'qq_like', 'qq_faces', 'qq_mface', 'qq_keep_face', 'qq_send']) assert.equal(h.visible(name), true, name)
-  for (const name of ['qq_send_voice', 'qq_qzone_send', 'qq_meme']) assert.equal(h.visible(name), false, name)
+  for (const name of ['qq_send_voice', 'qq_qzone_send', 'qq_search']) assert.equal(h.visible(name), false, name)
   h.config.voiceEnabled = true
   assert.equal(h.visible('qq_send_voice'), true)
   const other = fixture(t, { platform: 'linux' })
@@ -258,46 +258,10 @@ test('分组默认值、平台和资料路径同时用于提供条件与执行�
   }
   assert.equal(h.visible('qq_keep_face'), true)
   assert.equal(h.visible('qq_send'), true)
-  const db = join(h.config.cwd, 'word.sqlite')
-  h.config.memeDb = db
-  assert.equal(h.visible('qq_meme'), false)
-  writeFileSync(db, '')
-  assert.equal(h.visible('qq_meme'), true)
-  rmSync(db)
-  assert.equal(h.visible('qq_meme'), false)
-  await assert.rejects(h.tools.get('qq_meme').execute({ word: '测试' }, exec), /不可用/)
+  assert.equal(h.tools.has('qq_meme'), false)
+  assert.equal(h.tools.has('qq_memo'), false)
   assert.ok([...h.tools.keys()].every(name => !h.visible(name, { agent: { session: { id: 'ordinary' } } })))
   assert.equal(h.calls.length, 0)
-})
-
-test('词库访问错误只停用查梗工具，重复错误不刷日志，恢复后重新提供', async t => {
-  const h = fixture(t)
-  const db = join(h.config.cwd, 'word.sqlite')
-  writeFileSync(db, '')
-  h.config.memeDb = db
-  const originalStat = fs.statSync
-  let failure
-  t.mock.method(fs, 'statSync', (path, ...args) => {
-    if (path === db && failure) throw failure
-    return originalStat(path, ...args)
-  })
-  assert.equal(h.visible('qq_meme'), true)
-  for (const code of ['EACCES', 'EPERM', 'EIO']) {
-    failure = Object.assign(new Error(`模拟词库访问失败 ${code}`), { code })
-    const warningCount = h.warnings.length
-    // 宿主每步会遍历所有 when；不能因可选词库中断整个选择过程。
-    for (const name of h.tools.keys()) h.visible(name)
-    assert.equal(h.visible('qq_meme'), false)
-    await assert.rejects(h.tools.get('qq_meme').execute({ word: '测试' }, exec), /不可用/)
-    assert.equal(h.warnings.length, warningCount + 1)
-    assert.match(h.warnings.at(-1), new RegExp(code))
-    assert.equal((await h.send('qq_send')).ok, true)
-  }
-  failure = undefined
-  assert.equal(h.visible('qq_meme'), true)
-  failure = Object.assign(new Error('模拟词库访问失败 EACCES'), { code: 'EACCES' })
-  assert.equal(h.visible('qq_meme'), false)
-  assert.equal(h.warnings.length, 4, '恢复后再次故障应重新记录')
 })
 
 test('空规则允许明确收藏，阻止自动收藏；关闭表情使用不阻止商城登记或普通收藏', async t => {
@@ -346,9 +310,8 @@ test('空间发布排队期间关闭开关，不发布也不预留次数', async
   assert.equal(existsSync(join(h.config.cwd, 'qzone-state.json')), false)
 })
 
-test('工具说明如实描述词库来源和语音平台限制，不声称内置固定数量的梗', t => {
+test('工具说明区分资料检索与记忆，并明确语音平台限制', t => {
   const h = fixture(t)
-  assert.match(h.tools.get('qq_meme').description, /未配置|无法查询/)
-  assert.doesNotMatch(h.tools.get('qq_meme').description, /6668|毫秒级|先接梗、别科普/)
+  assert.match(h.tools.get('qq_search').description, /来源|记忆/)
   assert.match(h.tools.get('qq_send_voice').description, /仅 Windows|其他平台/)
 })
