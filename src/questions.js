@@ -9,6 +9,8 @@
  * 不接住它，工具会直接报 NO_PROVIDER 或者干等到超时。
  */
 
+import { canAccessChat } from './access.js'
+
 const ANSWER_TIMEOUT_MS = 5 * 60 * 1000
 
 /** 「1」/「1,3」/「1 2」这种纯数字回复 */
@@ -34,6 +36,7 @@ function parseAnswer(text, options) {
 
 export class QuestionChannel {
   #pending = new Map() // sessionId -> { question, options, resolve, timer, signal, onAbort }
+  #requests = new Map()
 
   constructor({ manager, config, logger, send }) {
     this.manager = manager
@@ -67,9 +70,12 @@ export class QuestionChannel {
   }
 
   /** 入站消息先过这里：如果它是在回答一个待答问题，就吃掉它。 */
-  tryResolve(record, text) {
+  tryResolve(record, text, respondent) {
     const entry = this.#pending.get(record.sessionId)
     if (!entry) return false
+    if (!respondent || !canAccessChat(this.config, record) || respondent.scope !== entry.scope ||
+      String(respondent.selfId) !== entry.selfId || String(respondent.peerId) !== entry.peerId ||
+      String(respondent.senderId) !== entry.senderId || entry.scope === 'group' && respondent.atMe !== true) return false
     const answer = String(text ?? '').trim()
     if (!answer) return false
 
@@ -81,12 +87,14 @@ export class QuestionChannel {
 
   /** 会话被回收 / 插件卸载时，别让 Promise 吊死。 */
   cancelPending(sessionId) {
+    const request = this.#requests.get(sessionId)
+    if (request) request.cancelled = true
     if (!this.#pending.has(sessionId)) return
     this.#settle(sessionId, null)
   }
 
   cancelAll() {
-    for (const sessionId of [...this.#pending.keys()]) this.#settle(sessionId, null)
+    for (const sessionId of [...this.#requests.keys()]) this.cancelPending(sessionId)
   }
 
   #settle(sessionId, answer) {
@@ -109,15 +117,26 @@ export class QuestionChannel {
 
   async #ask(record, req) {
     const questions = Array.isArray(req?.questions) ? req.questions : []
+    const senderId = String(record.scope === 'private' ? record.peerId : record.lastSenderId ?? '')
+    if (!senderId || !canAccessChat(this.config, record) || this.#requests.has(record.sessionId)) {
+      return { answers: questions.map(question => ({ id: question.id, selected: [] })) }
+    }
+    const sessionId = record.sessionId, request = { cancelled: false }
+    this.#requests.set(sessionId, request)
     const answers = []
-    for (const question of questions) {
-      answers.push(await this.#askOne(record, question, req?.signal))
+    try {
+      for (const question of questions) {
+        answers.push(request.cancelled || record.sessionId !== sessionId || !canAccessChat(this.config, record)
+          ? { id: question.id, selected: [] } : await this.#askOne(record, question, req?.signal, senderId))
+      }
+    } finally {
+      if (this.#requests.get(sessionId) === request) this.#requests.delete(sessionId)
     }
     return { answers }
   }
 
-  async #askOne(record, question, signal) {
-    if (signal?.aborted) return { id: question.id, selected: [] }
+  async #askOne(record, question, signal, senderId) {
+    if (signal?.aborted || this.#pending.has(record.sessionId)) return { id: question.id, selected: [] }
 
     const options = Array.isArray(question.options) ? question.options : []
     const lines = []
@@ -135,16 +154,12 @@ export class QuestionChannel {
       lines.push('')
       lines.push('直接回我一句话就好。')
     }
+    if (record.scope === 'group') lines.push(`仅本轮发言人（${senderId}）可回答，请先 @ 机器人。`)
 
-    try {
-      await this.send(record, lines.join('\n'))
-    } catch (err) {
-      this.logger.error?.(`[dsh-qq] 提问发送失败: ${err?.message ?? err}`)
-      return { id: question.id, selected: [] }
-    }
-
-    return new Promise((resolve) => {
-      const entry = { question, options, resolve, timer: null, signal, onAbort: null }
+    let entry
+    const pending = new Promise((resolve) => {
+      entry = { question, options, resolve, timer: null, signal, onAbort: null, senderId,
+        scope: record.scope, peerId: String(record.peerId), selfId: String(record.selfId) }
       entry.timer = setTimeout(() => {
         this.logger.warn?.(`[dsh-qq] 提问超时 ${record.label}，按跳过处理`)
         this.#settle(record.sessionId, null)
@@ -161,7 +176,17 @@ export class QuestionChannel {
       }
 
       this.#pending.set(record.sessionId, entry)
+      if (signal?.aborted) this.#settle(record.sessionId, null)
       this.logger.info?.(`[dsh-qq] 问题已发到 QQ，等待回复 ${record.label}`)
     })
+    if (this.#pending.get(record.sessionId) !== entry) return pending
+    void (async () => {
+      try { await this.send(record, lines.join('\n')) }
+      catch (err) {
+        this.logger.error?.(`[dsh-qq] 提问发送失败: ${err?.message ?? err}`)
+        if (this.#pending.get(record.sessionId) === entry) this.#settle(record.sessionId, null)
+      }
+    })()
+    return pending
   }
 }

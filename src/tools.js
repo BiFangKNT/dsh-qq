@@ -24,6 +24,7 @@ import { registerMessageTool } from './message-tools.js'
 import { createKnowledge } from './knowledge.js'
 import { registerKnowledgeTools } from './knowledge-tools.js'
 import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
+import { readChatMessage } from './message-access.js'
 import { createToolPolicy } from './tool-policy.js'
 import { parseCQString } from './onebot/segment.js'
 import { callToolAction, sendToolMessage, EXTERNAL_ACTION_RULE, fitToolText, jsonSize, TOOL_RESULT_LIMIT } from './tool-result.js'
@@ -34,11 +35,13 @@ const POKE_DESC =
 
 const REACT_DESC =
   '给当前对话里最新的一条消息贴上表情回应（QQ 的「表情表态」）。' +
+  '消息必须可确认属于当前聊天；不能操作其他聊天的消息。' +
   '表情 id 用 QQ 表情的数字编号，比如 1 是微笑、4 是得意、14 是白眼、178 是捂脸、' +
   '212 是裂开、264 是流泪。想表达态度又不想刷屏时用它。'
 
 const IMAGES_DESC =
   '把某条 QQ 消息里的图片重新取回来看（按消息 id）。' +
+  '仅限可确认属于当前聊天的消息，无法确认归属时失败。' +
   '消息正文里只会出现一个 `[图片]` 占位——那一刻没被叫醒、或者当时没顾上看，' +
   '事后用这个工具还能把那张图捞回来。' +
   '聊天流水里每行末尾有 `#msg=123456`，那就是这条消息的 id；不填 id 就是最近收到的这一条。' +
@@ -205,6 +208,8 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (messageId === null) {
         throw new Error('qq_react: 找不到可表态的消息')
       }
+      await readChatMessage({ client, manager, config, record, messageId, logger })
+      policy.assertAvailable('qq_react', record)
       await callToolAction(client, 'set_msg_emoji_like', {
         message_id: messageId,
         emoji_id: String(args.emoji_id),
@@ -255,10 +260,10 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('图片位置无效')
       let data
       try {
-        data = await client.call('get_msg', { message_id: messageId })
+        data = await readChatMessage({ client, manager, config, record, messageId, logger })
       } catch (err) {
         logger.warn?.(`qq_images 取消息失败: ${err?.message ?? err}`)
-        throw new Error('取消息失败')
+        throw new Error(`取消息失败：${err?.message ?? err}`, { cause: err })
       }
 
       const message = data?.message ?? data?.data?.message
@@ -287,6 +292,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       await mkdir(cacheDir, { recursive: true }).catch(() => {})
       const maxMB = Number(config?.imageMaxMB) || 8
       const downloaded = await Promise.all(urls.slice(offset, offset + 4).map(u => downloadImage(u, cacheDir, maxMB)))
+      policy.assertAvailable('qq_images', record)
       const paths = downloaded.filter(Boolean)
       if (!paths.length) throw new Error('图片下载失败：链接可能已过期')
       const failed = downloaded.flatMap((value, index) => value ? [] : [offset + index])
@@ -466,6 +472,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (messageId === null) {
         throw new Error('qq_recall: 找不到要撤回的消息')
       }
+      await readChatMessage({ client, manager, config, record, messageId, own: true, logger })
       await callToolAction(client, 'delete_msg', { message_id: messageId }, logger)
       return { ok: true, messageId }
     },
@@ -513,13 +520,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (!text) throw new Error('qq_send: text 不能为空')
       await assertOutboundText(text, record, 'qq_send')
       if (quoted !== null && !manager.messageStore?.hasMessage(destination, quoted)) {
-        const message = await client.call('get_msg', { message_id: quoted })
-        const groupId = message?.group_id
-        const sameChat = destination.scope === 'group'
-          ? String(groupId ?? '') === destination.peerId
-          : groupId == null && message?.message_type === 'private' &&
-            String(message.sender?.user_id ?? message.user_id) === destination.peerId
-        if (!sameChat) throw new Error('引用消息不属于目标聊天，或协议端未提供可确认的聊天归属')
+        await readChatMessage({ client, manager, config, record: destination, messageId: quoted, logger })
       }
       assertSendAccess(manager, config, record, destination)
       const action = destination.scope === 'group' ? 'send_group_msg' : 'send_private_msg'

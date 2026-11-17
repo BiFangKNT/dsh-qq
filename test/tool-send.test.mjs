@@ -27,7 +27,9 @@ function fixture(t, { scope = 'private', extra = {}, platform = 'win32' } = {}) 
     client: { async call(action, params) {
       calls.push({ action, params })
       await h.beforeReply?.()
-      if (action === 'get_msg') return h.quoted ?? {}
+      if (action === 'get_msg') return h.quoted ?? { message_id: params.message_id, message_type: source.scope,
+        ...(source.scope === 'group' ? { group_id: Number(source.peerId) } : { target_id: Number(source.peerId) }),
+        sender: { user_id: Number(source.selfId) } }
       if (h.response instanceof Error) throw h.response
       return h.response
     } },
@@ -91,6 +93,7 @@ for (const name of ['qq_send', 'qq_send_voice']) {
         assert.equal(h.group.lastSentMessageId, id)
         assert.equal(h.memories.at(-1)[0], h.group)
         assert.equal(h.memories.at(-1)[2], id)
+        h.quoted = { group_id: 70001, sender: { user_id: 90001 }, message_id: id }
         const recalled = await h.tools.get('qq_recall').execute({}, { agent: { session: { id: 'group' } } })
         assert.equal(recalled.ok, true)
         assert.deepEqual(h.calls.at(-1), { action: 'delete_msg', params: { message_id: id } })
@@ -326,7 +329,7 @@ for (const name of ['qq_send', 'qq_send_voice', 'qq_send_image', 'qq_face', 'qq_
       h.response = Object.assign(new Error('private diagnosis'), delivery ? { onebotDelivery: delivery } : {})
       await assert.rejects(h.tools.get(name).execute(args, exec), expected)
     }
-    assert.equal(h.calls.length, 3)
+    assert.equal(h.calls.filter(call => call.action !== 'get_msg').length, 3)
     assert.equal(h.notes.length, 0)
     assert.equal(h.source.lastSentMessageId, 11)
   })
@@ -392,7 +395,7 @@ test('空收藏是正常查询，收藏失败走失败通道，取图空结果�
   assert.equal((await h.tools.get('qq_faces').execute({}, exec)).ok, true)
   await assert.rejects(h.tools.get('qq_keep_face').execute({ path: join(h.config.cwd, 'missing.png'), mode: 'requested' }, exec), /不存在/)
   h.source.lastMessageId = 7
-  h.quoted = { message: [] }
+  h.quoted = { message_type: 'private', sender: { user_id: 10001 }, message: [] }
   const empty = await h.tools.get('qq_images').execute({}, exec)
   assert.equal(empty.ok, true)
   assert.deepEqual(empty.paths, [])
@@ -403,10 +406,42 @@ test('空收藏是正常查询，收藏失败走失败通道，取图空结果�
 test('历史取图不把无效回执当空消息，有符号ID可取图和表态', async t => {
   const h = fixture(t)
   for (const message_id of [-71, 0]) {
-    h.quoted = {}
+    h.quoted = { message_type: 'private', sender: { user_id: 10001 } }
     await assert.rejects(h.tools.get('qq_images').execute({ message_id }, exec), /缺少正文/)
-    h.quoted = { message: '' }
+    h.quoted = { message_type: 'private', sender: { user_id: 10001 }, message: '' }
     assert.equal((await h.tools.get('qq_images').execute({ message_id }, exec)).ok, true)
     assert.equal((await h.tools.get('qq_react').execute({ message_id, emoji_id: '1' }, exec)).messageId, message_id)
   }
+})
+
+for (const [name, args] of [['qq_images', { message_id: 71 }], ['qq_react', { message_id: 71, emoji_id: '1' }], ['qq_recall', { message_id: 71 }]]) {
+  test(`${name} 拒绝跨聊天、无法确认归属、矛盾回执和异步查询期间撤权`, async t => {
+    for (const scope of ['private', 'group']) {
+      const h = fixture(t, { scope })
+      const wrong = scope === 'group' ? { group_id: 70002 } : { message_type: 'private', sender: { user_id: 11009 } }
+      for (const reply of [{}, wrong, { message_id: 72, group_id: 10001 }]) {
+        h.quoted = { ...reply, message: [] }
+        await assert.rejects(h.tools.get(name).execute(args, exec), /归属|不属于|回执无效/)
+        assert.ok(h.calls.every(call => call.action === 'get_msg'), '校验失败不表态、撤回或下载图片')
+      }
+      h.manager.messageStore = { hasMessage: () => true }
+      h.quoted = { ...wrong, message: [] }
+      await assert.rejects(h.tools.get(name).execute(args, exec), /不属于/)
+      h.quoted = { message_type: scope, ...(scope === 'group' ? { group_id: 10001 } : {}),
+        sender: { user_id: 10001 }, message: [] }
+      h.beforeReply = () => { h.config[scope === 'group' ? 'groupMode' : 'privateMode'] = 'disabled' }
+      await assert.rejects(h.tools.get(name).execute(args, exec), /未获准/)
+      assert.ok(h.calls.every(call => call.action === 'get_msg'))
+    }
+  })
+}
+
+test('撤回必须有机器人发送身份，本地归属记录不能替别人撤回；私聊已确认发送可凭记录定位', async t => {
+  const h = fixture(t)
+  h.manager.messageStore = { hasMessage: (_record, id) => id === 71 }
+  h.quoted = { message_type: 'private', sender: { user_id: 10001 } }
+  await assert.rejects(h.tools.get('qq_recall').execute({ message_id: 71 }, exec), /机器人自己/)
+  h.quoted = { message_type: 'private', sender: { user_id: 90001 } }
+  assert.equal((await h.tools.get('qq_recall').execute({ message_id: 71 }, exec)).ok, true)
+  await assert.rejects(h.tools.get('qq_recall').execute({ message_id: 72 }, exec), /无法确认/)
 })

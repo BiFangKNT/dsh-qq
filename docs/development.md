@@ -57,10 +57,10 @@ test/                  e2e 与 mock
 
 | 路 | 说明 |
 | --- | --- |
-| ① 宿主路由 `/api/dsh-qq` | `ctx.inject(['webServer'], …)` 运行时注入；拿到就挂 |
-| ② 本地服务 `127.0.0.1:<localApiPort>` | 默认端口 `34569`；设为 `0` 可关闭。多实例用不同端口，设置页顶部可指定目标端口 |
+| ① 宿主路由 `/api/dsh-qq` | `ctx.inject(['webServer'], …)` 运行时注入；按官方 `getOrigin()` 检查目标与同源请求，写操作只收 JSON |
+| ② 本地服务 `127.0.0.1:<localApiPort>` | 默认端口 `34569`；设为 `0` 可关闭。每个 API 请求使用独立管理密钥，浏览器来源须明确获准；页面手动选择目标端口和密钥 |
 
-本地服务只监听回环地址，CORS 放开是为了让 DSH 页面能跨端口读。`headless` 宿主（`--profile qqbot`）没有网页服务，所以它不会起 ②，也不影响 QQ。
+独立服务只允许自身来源、当前宿主来源及 `localApiOrigins` 中的精确来源，不使用通配 CORS。管理密钥保存在插件家目录的 `settings-key`，首次生成后保留；设置响应不回传 NapCat token。连接与密钥操作见[配置说明](configuration.md#连接)。当前入口通过运行时注入的 `webServer` 挂载；没有该服务的 headless 进程不会执行这段挂载，QQ 本身不受影响。独立服务不等于凭空给 headless 增加了网页入口。
 
 **踩过的坑**：`ctx.effect` 必须挂在长命的父 ctx 上。挂到注入回调的子 ctx 上，回调一结束就被收走——现象是 `api-state.txt` 写着 `ok=true`，前端却一直 404。
 

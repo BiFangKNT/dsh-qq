@@ -36,7 +36,9 @@ async function panel({ beforeSave, saveResult = {} } = {}) {
         await beforeSave?.(body.patch)
         Object.assign(values, body.patch)
       }
-      result = { values: structuredClone(values), promptSync: status.promptSync, systemChanged: false, ...saveResult }
+      result = { values: structuredClone(Object.fromEntries(Object.entries(values).filter(([key]) => key !== 'accessToken'))),
+        accessTokenSet: Boolean(values.accessToken), meta: { accessTokenSet: Boolean(values.accessToken) },
+        promptSync: status.promptSync, systemChanged: false, ...saveResult }
     }
     return { ok: true, json: async () => result }
   }
@@ -54,6 +56,23 @@ async function panel({ beforeSave, saveResult = {} } = {}) {
   return { render, calls, state, status }
 }
 const button = (tree, text) => tree.find(element => element.type === 'button' && element.children.includes(text))
+
+test('NapCat token 只在明确设置或清空时保存，响应不含原值也能显示配置状态', async () => {
+  const h = await panel()
+  const input = () => h.render().find(element => element.type === 'input' && element.props.autoComplete === 'new-password')
+  assert.equal(input().props.type, 'password')
+  input().props.onChange({ target: { value: 'fictional-secret' } })
+  assert.equal(h.calls.length, 0)
+  await button(h.render(), '设置 token').props.onClick()
+  assert.deepEqual(h.calls.find(call => call.body?.patch).body.patch, { accessToken: 'fictional-secret' })
+  assert.equal(input().props.value, '')
+  assert.equal(input().props.placeholder, '已配置（不显示）')
+  assert.ok(button(h.render(), '替换 token'))
+  await button(h.render(), '清空 token').props.onClick()
+  assert.deepEqual(h.calls.filter(call => call.body?.patch).at(-1).body.patch, { accessToken: '' })
+  assert.equal(input().props.placeholder, '输入 token')
+  assert.equal(button(h.render(), '清空 token').props.disabled, true)
+})
 
 test('资料入口明确选择来源和访问聊天，不再提供旧共享文件路径设置', async () => {
   const h = await panel(), tree = h.render()

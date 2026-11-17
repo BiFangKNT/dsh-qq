@@ -26,6 +26,7 @@
         accessToken: ''
         selfId: ''
         reconnectMs: 5000
+        localApiOrigins: []
         acceptedDshVersions: {}
 
         # ── Agent ──

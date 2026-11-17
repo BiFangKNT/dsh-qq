@@ -93,6 +93,8 @@ dsh plugin --profile desktop why dsh-qq-onebot
 
 设置页与 `settings.json` 管理的是同一份用户覆盖配置，显式设置的键会覆盖 profile 配置。删除覆盖键后使用 profile 或默认值；设置页不会改写 profile 的 `cordis.patch.yml`。
 
+默认连接宿主同源接口；手动连接独立设置端口时，需填写该实例的管理密钥，并允许设置页面的来源。NapCat token 只可设置、替换或清空，不回显现有值，详见[连接与设置访问](docs/configuration.md#连接)。
+
 大部分配置支持热更新；连接参数可通过「重连」应用。`localApiPort`、`reconnectMs`、`selfId`、`workspaceRoot`、`isolateByPeer`、`asrPython` 的变更需要重启宿主。
 
 以下默认行为需要在接入前确认：

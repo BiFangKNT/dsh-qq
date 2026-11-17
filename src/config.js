@@ -47,6 +47,8 @@ export const ConfigSchema = Schema.object({
   localApiPort: Schema.number().min(0).max(65535).step(1)
     .default(34569)
     .description('独立设置服务的回环端口；0 = 关闭独立服务，仍可使用宿主设置路由。多实例请用不同端口，修改后重启宿主'),
+  localApiOrigins: Schema.array(Schema.string()).default([])
+    .description('额外允许访问独立设置服务的页面来源，须含协议和端口，不含路径；宿主当前来源自动允许。仍须输入 settings-key 管理密钥'),
   acceptedDshVersions: Schema.dict(Schema.string()).default({})
     .description('明确接受风险的 DSH 核心包版本。通常由确认弹窗填写；版本变化后重新确认。无界面部署可复制运行端 host-compatibility.json 的 versions 对象'),
 

@@ -133,10 +133,10 @@ test('真实插件可用：默认回复、预设工具、消息去重和宿主�
   const settings = await response.json()
   assert.ok(settings.meta.overridable.includes('groupImageBlock'))
   for (const groupTriggerWords of ['小助手', [1]]) {
-    const invalid = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', body: JSON.stringify({ patch: { groupTriggerWords } }) })
+    const invalid = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ patch: { groupTriggerWords } }) })
     assert.equal(invalid.status, 400)
   }
-  const save = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', body: JSON.stringify({ patch: { groupMentionOverrides: { '88888': false }, groupMessageIntervalMs: 30000, groupTriggerWords: ['小助手'] } }) })
+  const save = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ patch: { groupMentionOverrides: { '88888': false }, groupMessageIntervalMs: 30000, groupTriggerWords: ['小助手'] } }) })
   assert.equal(save.status, 200)
   assert.deepEqual((await save.json()).values.groupTriggerWords, ['小助手'])
   env.emitMessage({ scope: 'group', peerId: 88888, text: '小助手，免 @立即处理' })
@@ -193,6 +193,88 @@ test('问答和审批走真实插件通道，可从模拟 QQ 回复', async t =>
   await waitFor(() => agent.results.length === 2)
   assert.equal(agent.results[1].result, 'allowed-once')
 })
+
+test('群审批仅授权账号协议@后可确认，群问答只接受原发言人协议@后的答案', async t => {
+  const env = await setup(t, { autoReply: false })
+  env.emitMessage({ scope: 'group', userId: 11002, atSelf: true, text: '请求审批', steps: [{ type: 'approval', command: 'mock-only-operation' }] })
+  await waitFor(() => sent(env).length === 1)
+  const agent = [...env.host.agents.values()][0]
+  assert.match(JSON.stringify(sent(env)[0]), /仅授权账号/)
+  for (const message of [
+    { userId: 11002, atSelf: true, text: '通过' },
+    { userId: 11001, atSelf: false, text: '通过' },
+    { userId: 11001, atSelf: true, text: '好' },
+    { userId: 11001, atSelf: false, text: '@模拟机器人 通过' },
+  ]) env.emitMessage({ scope: 'group', ...message })
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(agent.results.length, 0)
+  env.emitMessage({ scope: 'group', userId: 11001, atSelf: true, text: '通过' })
+  await waitFor(() => agent.results.length === 1)
+  assert.equal(agent.results[0].result, 'allowed-once')
+  await idle(env)
+  env.emitMessage({ scope: 'group', userId: 11002, atSelf: true, text: '提个问题', steps: [{ type: 'question',
+    questions: [{ id: 'group-question', question: '选哪个？', options: [{ label: '甲' }, { label: '乙' }] }] }] })
+  await waitFor(() => sent(env).length === 2)
+  env.emitMessage({ scope: 'group', userId: 11001, atSelf: true, text: '1' })
+  env.emitMessage({ scope: 'group', userId: 11002, text: '1' })
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(agent.results.length, 1)
+  env.emitMessage({ scope: 'group', userId: 11002, atSelf: true, text: '2' })
+  await waitFor(() => agent.results.length === 2)
+  assert.deepEqual(agent.results[1].result, { answers: [{ id: 'group-question', selected: ['乙'] }] })
+})
+
+for (const scope of ['group', 'private']) {
+  test(`${scope} 数字选项不受机器人 @ 位置影响，自由回答中的提及保留`, async t => {
+    const env = await setup(t, { autoReply: false })
+    const options = [{ label: '甲' }, { label: '乙' }]
+    const messages = [
+      '[CQ:at,qq=10001]2',
+      '2[CQ:at,qq=10001]',
+      '1[CQ:at,qq=10001]2',
+      '1,[CQ:at,qq=10001]2',
+      '通知 [CQ:at,qq=11003]，完成后 [CQ:at,qq=10001] 确认',
+    ]
+    env.emitMessage({ scope, userId: 11002, atSelf: scope === 'group', text: '请提问', steps: [{ type: 'question',
+      questions: messages.map((_, index) => ({ id: `q${index}`, question: '选哪个？', options, multiSelect: true })) }] })
+    await waitFor(() => sent(env).length === 1)
+    const agent = [...env.host.agents.values()][0]
+    for (const [index, message] of messages.entries()) {
+      env.emitMessage({ scope, userId: 11002, message })
+      if (index < messages.length - 1) await waitFor(() => sent(env).length === index + 2)
+    }
+    await waitFor(() => agent.results.length === 1)
+    assert.deepEqual(agent.results[0].result, { answers: [
+      { id: 'q0', selected: ['乙'] }, { id: 'q1', selected: ['乙'] },
+      { id: 'q2', selected: ['甲', '乙'] }, { id: 'q3', selected: ['甲', '乙'] },
+      { id: 'q4', selected: [], custom: '通知 @11003，完成后 @机器人 确认' },
+    ] })
+    await idle(env)
+    assert.equal(agent.received.length, 1)
+  })
+
+  test(`${scope} 工具问答接收带成员提及的自由回答，不把答案交给主模型`, async t => {
+    const env = await setup(t, { autoReply: false })
+    env.emitMessage({ scope, userId: 11002, atSelf: scope === 'group', text: '请提问', steps: [{ type: 'question',
+      questions: [{ id: 'member', question: '通知谁？' }, { id: 'followup', question: '然后呢？' }] }] })
+    await waitFor(() => sent(env).length === 1)
+    const agent = [...env.host.agents.values()][0]
+    env.emitMessage({ scope, userId: 11002, message: [
+      { type: 'at', data: { qq: '10001' } }, { type: 'text', data: { text: '通知 ' } },
+      { type: 'at', data: { qq: '11003' } },
+    ] })
+    await waitFor(() => sent(env).length === 2)
+    env.emitMessage({ scope, userId: 11002,
+      message: '[CQ:at,qq=10001] 完成后 [CQ:at,qq=10001] 确认' })
+    await waitFor(() => agent.results.length === 1)
+    assert.deepEqual(agent.results[0].result, { answers: [
+      { id: 'member', selected: [], custom: '通知 @11003' },
+      { id: 'followup', selected: [], custom: '完成后 @机器人 确认' },
+    ] })
+    await idle(env)
+    assert.equal(agent.received.length, 1)
+  })
+}
 
 test('工具开关通过设置保存，既有会话下次请求刷新且 system 保持锁定，重载后保留', async t => {
   const env = await setup(t, { autoReply: false })
@@ -391,7 +473,7 @@ test('重载恢复会话和预设，后续一条消息只处理一次；上下�
 test('断线重连与 API 失败可控，模拟地址不能通过设置改成真实地址', async t => {
   const env = await setup(t)
   const url = env.config.wsUrl
-  const response = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', body: JSON.stringify({ patch: { wsUrl: 'ws://127.0.0.1:1' } }) })
+  const response = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ patch: { wsUrl: 'ws://127.0.0.1:1' } }) })
   assert.equal(response.status, 200)
   assert.equal(env.config.wsUrl, url)
   // 清除持久化的无效覆盖，重载时同样不会应用到只读连接字段。

@@ -61,7 +61,7 @@ test('HTTP 图片同样在保存前过滤，整人屏蔽完全不发起下载', 
 
 test('历史取图有意不受成员全图或分辨率屏蔽限制', async t => {
   const home = await temporary(t)
-  const record = { scope: 'group', peerId: '42', dir: home }
+  const record = { selfId: '90001', scope: 'group', peerId: '42', dir: home }
   let userId = 7
   let wrapped = false
   const tools = new Map()
@@ -70,7 +70,7 @@ test('历史取图有意不受成员全图或分辨率屏蔽限制', async t => 
       const message = { group_id: 42, sender: { user_id: userId }, message: [{ type: 'image', data: { url } }] }
       return wrapped ? { data: message } : message
     } },
-    manager: { find: () => record }, config, logger, home,
+    manager: { selfId: '90001', find: () => record }, config, logger, home,
   })
   const execute = () => tools.get('qq_images').execute({ message_id: 123 }, { agent: { session: { id: 's' } } })
   for (const sender of [7, 8, 9]) {
@@ -89,10 +89,10 @@ test('历史取图有意不受成员全图或分辨率屏蔽限制', async t => 
 test('历史取图明确局部下载失败，超过四张可续取，全失败走失败通道', async t => {
   const dir = await temporary(t), tools = new Map()
   let urls = [url, 'invalid://image', url, url, url]
-  const record = { scope: 'group', peerId: '42', dir, label: '测试群' }
+  const record = { selfId: '90001', scope: 'group', peerId: '42', dir, label: '测试群' }
   registerTools({ get: () => ({ register: tool => tools.set(tool.name, tool) }) }, {
-    client: { call: async () => ({ message: urls.map(url => ({ type: 'image', data: { url } })) }) },
-    manager: { find: () => record }, config, logger, home: dir,
+    client: { call: async () => ({ group_id: 42, message: urls.map(url => ({ type: 'image', data: { url } })) }) },
+    manager: { selfId: '90001', find: () => record }, config, logger, home: dir,
   })
   const query = args => tools.get('qq_images').execute({ message_id: 123, ...args }, { agent: { session: { id: 's' } } })
   const first = await query({})

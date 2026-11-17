@@ -68,10 +68,10 @@ test('页面 null 清除与文件空覆盖一致；同时返回重连、重启�
     backlogSummaryEnabled: false, backlogSummaryTimeoutMs: 60000 }
   const overridesRef = { current: {} }
   installSettingsApi({ ctx, config, overridesRef, logger: {},
-    webServer: { register: route => { handler = route.handler; return () => {} } } })
+    webServer: { getOrigin: () => 'http://127.0.0.1:3080', register: route => { handler = route.handler; return () => {} } } })
   async function post(patch) {
     const req = Readable.from([Buffer.from(JSON.stringify({ patch }))])
-    Object.assign(req, { method: 'POST', url: '/api/dsh-qq/settings' })
+    Object.assign(req, { method: 'POST', url: '/api/dsh-qq/settings', headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' } })
     let status, body
     await handler(req, { writeHead: value => { status = value }, end: value => { body = JSON.parse(value) } })
     return { status, ...body }
@@ -84,7 +84,9 @@ test('页面 null 清除与文件空覆盖一致；同时返回重连、重启�
   result = await post({ debug: null, accessToken: null, workspaceRoot: null, preset: null, asrPython: null })
   assert.equal(result.status, 200)
   assert.equal(result.values.debug, false)
-  assert.equal(result.values.accessToken, 'initial')
+  assert.equal(result.values.accessToken, undefined)
+  assert.equal(result.accessTokenSet, true)
+  assert.equal(config.accessToken, 'initial')
   assert.deepEqual(overridesRef.current, {})
   assert.deepEqual(loadOverrides(ctx, {}, { strict: true }), {})
   assert.equal(result.needReconnect, true)

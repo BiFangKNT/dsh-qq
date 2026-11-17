@@ -572,10 +572,10 @@ test('设置API导入、修改范围和移除，与QQ查询使用同一来源，
   const h = await fixture(t)
   let handler
   installSettingsApi({ ctx: { get: () => () => h.home, effect: setup => setup() }, config: { ...h.config, localApiPort: 0, memoryRoot: h.home },
-    logger, knowledge: h.knowledge, webServer: { register: route => { handler = route.handler } } })
+    logger, knowledge: h.knowledge, webServer: { getOrigin: () => 'http://127.0.0.1:3080', register: route => { handler = route.handler } } })
   const request = async (body, method = 'POST') => {
     const req = Readable.from(body ? [Buffer.from(JSON.stringify(body))] : [])
-    Object.assign(req, { method, url: '/api/dsh-qq/sources' })
+    Object.assign(req, { method, url: '/api/dsh-qq/sources', headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' } })
     let status, result
     await handler(req, { writeHead: value => { status = value }, end: value => { result = JSON.parse(value) } })
     return { status, ...result }

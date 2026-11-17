@@ -25,11 +25,11 @@ import { isDeepStrictEqual } from 'node:util'
 import { migrateGroupSettings, retiredGroupSettings } from './group-trigger.js'
 import { migrateOwnerLabel } from './identity.js'
 import { createKnowledge } from './knowledge.js'
+import { settingsKey, parseSettingsOrigin, checkSettingsRequest } from './settings-access.js'
 
 /**
  * 设置页本地服务端口。
- * 插件自己拉起的「小工作台」——DSH 的 /api/dsh-qq 路由不通时，前端会自动回退到这里。
- * 只绑 127.0.0.1，外面访问不到。
+ * 独立服务只绑定 127.0.0.1，使用管理密钥；前端手动选择目标端口。
  */
 export const LOCAL_API_PORT = 34569
 
@@ -41,6 +41,7 @@ export const OVERRIDABLE = [
   'selfId',
   'reconnectMs',
   'localApiPort',
+  'localApiOrigins',
   'acceptedDshVersions',
   // Agent 工具预设（现有会话保持原选择，新会话生效）
   'preset',
@@ -289,6 +290,11 @@ function validateOverrides(patch) {
   if (patch.localApiPort != null && (!Number.isInteger(patch.localApiPort) || patch.localApiPort < 0 || patch.localApiPort > 65535)) {
     throw new Error('localApiPort 必须为 0–65535 的整数')
   }
+  if (patch.localApiOrigins != null) {
+    if (!Array.isArray(patch.localApiOrigins) || patch.localApiOrigins.some(origin => typeof origin !== 'string')) throw new Error('localApiOrigins 必须为来源数组')
+    patch.localApiOrigins.forEach(parseSettingsOrigin)
+  }
+  if (patch.accessToken != null && typeof patch.accessToken !== 'string') throw new Error('accessToken 必须为字符串')
   for (const key of ['splitDelayMs', 'splitDelayMeanMs']) {
     if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] < 0)) throw new Error(`${key} 必须为非负数`)
   }
@@ -469,6 +475,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
     }
     return values
   }
+  const withoutSecrets = values => Object.fromEntries(Object.entries(values).filter(([key]) => key !== 'accessToken'))
 
   const statusOf = () => {
     const { client: liveClient = client, manager: liveManager = manager, promptSync: liveSync = promptSync } = getRuntime?.() ?? {}
@@ -551,9 +558,10 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
       const info = settingsInfo(ctx, logger)
       return sendJson(res, 200, {
         ok: true,
-        values: snapshot(),
-        overrides: { ...(overridesRef?.current ?? {}) },
-        meta: { ...info, personaFromFile: Boolean(personaRef?.current?.ok), overridable: OVERRIDABLE },
+        values: withoutSecrets(snapshot()),
+        overrides: withoutSecrets(overridesRef?.current ?? {}),
+        meta: { ...info, personaFromFile: Boolean(personaRef?.current?.ok), overridable: OVERRIDABLE,
+          accessTokenSet: Boolean(config.accessToken) },
       })
     }
 
@@ -599,7 +607,8 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
 
       return sendJson(res, 200, {
         ok: true,
-        values: snapshot(),
+        values: withoutSecrets(snapshot()),
+        accessTokenSet: Boolean(config.accessToken),
         file: saved.file,
         persona: personaNow,
         needReconnect: effects.reconnect.length > 0,
@@ -641,7 +650,7 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
   let mounted = false
 
   // ── 路 1：DSH 自带的 webServer ───────────────────────────────────────────
-  // 能挂就挂（同源、免 CORS，最好用）。挂了但请求 404 也不影响下面那条兜底。
+  // 默认入口，使用宿主实际地址检查请求目标与来源。
   if (injectedWebServer) {
     try {
       ctx.effect(
@@ -649,41 +658,52 @@ export function installSettingsApi({ ctx, webServer: injectedWebServer, config, 
           injectedWebServer.register({
             kind: 'prefix',
             path: '/api/dsh-qq',
-            handler: routeHandler,
+            handler: async (req, res) => {
+              let origin
+              try { origin = injectedWebServer.getOrigin() }
+              catch { return sendJson(res, 503, { ok: false, error: '宿主未提供已绑定的设置入口地址' }) }
+              const denied = checkSettingsRequest(req, { origin })
+              if (denied) return sendJson(res, denied.status, { ok: false, error: denied.error })
+              await routeHandler(req, res)
+            },
           }),
         'dsh-qq: /api/dsh-qq 设置页接口',
       )
       mounted = true
     } catch (err) {
-      logger?.warn?.('DSH 路由没挂上（还有本地服务兜底）:', err?.message ?? err)
+      logger?.warn?.('DSH 设置路由挂载失败，可手动连接独立服务:', err?.message ?? err)
     }
   }
 
-  // ── 路 2：插件自己的本地小服务（2026-10-24 加的兜底）─────────────────────
-  // 为什么要有它：DSH 那边的路由实测会「register 成功、请求却 404」，
-  // 调了两轮都没绕过去。插件自己监听 127.0.0.1 就完全不依赖宿主内部机制，
-  // 这也是官方教程里说的插件形态（「插件在本地拉起一个 web 工作台」）。
-  // 只绑 127.0.0.1，外面访问不到；CORS 放开是给 DSH 页面里的 client 用。
+  // ── 路 2：独立本地服务 ────────────────────────────────────────────────
+  // 独立服务使用管理密钥和明确的页面来源，不以回环绑定代替认证。
   const localPort = Number(config.localApiPort ?? LOCAL_API_PORT)
   if (!Number.isInteger(localPort) || localPort < 0 || localPort > 65535) throw new Error('localApiPort 必须为 0–65535 的整数')
   if (localPort !== 0) {
     try {
+      const key = settingsKey(homeDirOf(ctx, logger))
       const local = createServer(async (req, res) => {
-        res.setHeader('access-control-allow-origin', '*')
-        res.setHeader('access-control-allow-headers', 'content-type')
-        res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
-        if (req.method === 'OPTIONS') {
-          res.writeHead(204)
-          res.end()
-          return
+        const origin = `http://127.0.0.1:${localPort}`
+        const allowedOrigins = [...(config.localApiOrigins ?? [])]
+        if (injectedWebServer) {
+          try { allowedOrigins.push(injectedWebServer.getOrigin()) } catch { /* 尚未绑定 */ }
         }
+        const denied = checkSettingsRequest(req, { origin, allowedOrigins, token: key.token })
+        if (req.headers.origin && [origin, ...allowedOrigins].includes(req.headers.origin)) {
+          res.setHeader('access-control-allow-origin', req.headers.origin)
+          res.setHeader('vary', 'Origin')
+          res.setHeader('access-control-allow-headers', 'authorization, content-type')
+          res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS')
+        }
+        if (denied?.status === 204) { res.writeHead(204); res.end(); return }
+        if (denied) return sendJson(res, denied.status, { ok: false, error: denied.error })
         await routeHandler(req, res)
       })
       local.on('error', (err) => {
         logger?.warn?.(`本地设置服务起不来（端口 ${localPort}）: ${err?.message ?? err}`)
       })
       local.listen(localPort, '127.0.0.1', () => {
-        logger?.info?.(`设置页本地服务: http://127.0.0.1:${localPort}/api/dsh-qq`)
+        logger?.info?.(`设置页本地服务: http://127.0.0.1:${localPort}/api/dsh-qq；管理密钥文件：${key.file}`)
       })
       ctx.effect(
         () => () => {

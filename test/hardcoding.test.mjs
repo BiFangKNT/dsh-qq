@@ -65,7 +65,7 @@ async function unusedPort() {
 
 test('两个独立设置服务可用不同端口，客户端手动选择后读取对应实例', async t => {
   const root = await temporary(t)
-  const ports = [], cleanups = []
+  const ports = [], keys = [], cleanups = []
   t.after(() => { for (const cleanup of cleanups) cleanup() })
   for (const name of ['first', 'second']) {
     const port = await unusedPort()
@@ -75,16 +75,19 @@ test('两个独立设置服务可用不同端口，客户端手动选择后读�
         effect: setup => { const cleanup = setup(); if (cleanup) cleanups.push(cleanup) } },
       config: { localApiPort: port, wsUrl: name }, logger: {},
     })
+    const key = (await readFile(join(root, name, 'settings-key'), 'utf8')).trim()
+    keys.push(key)
     await waitFor(async () => {
-      try { return (await fetch(`http://127.0.0.1:${port}/api/dsh-qq/status`)).ok } catch { return false }
+      try { return (await fetch(`http://127.0.0.1:${port}/api/dsh-qq/status`, { headers: { authorization: `Bearer ${key}` } })).ok } catch { return false }
     })
   }
   assert.notEqual(ports[0], ports[1])
   for (let i = 0; i < ports.length; i++) {
-    const status = await (await fetch(`http://127.0.0.1:${ports[i]}/api/dsh-qq/status`)).json()
+    const headers = { authorization: `Bearer ${keys[i]}`, 'content-type': 'application/json' }
+    const status = await (await fetch(`http://127.0.0.1:${ports[i]}/api/dsh-qq/status`, { headers })).json()
     assert.equal(status.wsUrl, i === 0 ? 'first' : 'second')
     const invalid = await fetch(`http://127.0.0.1:${ports[i]}/api/dsh-qq/settings`, {
-      method: 'POST', body: JSON.stringify({ patch: { localApiPort: -1 } }),
+      method: 'POST', headers, body: JSON.stringify({ patch: { localApiPort: -1 } }),
     })
     assert.equal(invalid.status, 400)
   }
@@ -106,6 +109,7 @@ test('两个独立设置服务可用不同端口，客户端手动选择后读�
   for (let i = 0; i < ports.length; i++) {
     let tree = flatten(render())
     tree.find(el => el.props.id === 'qq-local-api-port').props.onChange({ target: { value: String(ports[i]) } })
+    tree.find(el => el.props.id === 'qq-local-api-key').props.onChange({ target: { value: keys[i] } })
     tree = flatten(render())
     tree.find(el => el.type === 'button' && el.children.includes('连接此端口')).props.onClick()
     await waitFor(() => state[0]?.wsUrl === (i === 0 ? 'first' : 'second'))

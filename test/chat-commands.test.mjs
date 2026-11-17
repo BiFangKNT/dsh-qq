@@ -8,7 +8,7 @@ import { createInbound } from '../src/inbound.js'
 import { SessionManager } from '../src/session.js'
 import { createAddressClassifier } from '../src/address-classifier.js'
 import { createMockDsh } from './mock-dsh.mjs'
-import { readCommandText, readMessage } from '../src/onebot/segment.js'
+import { readCommandText, readMessage, readAnswerText } from '../src/onebot/segment.js'
 
 const logger = { info() {}, warn() {}, debug() {} }
 async function harness(t, classified) {
@@ -126,4 +126,34 @@ test('命令提取兼容引用与前置空白，不把媒体或缺失身份的 @
   assert.equal(readCommandText('[CQ:reply,id=123][CQ:at,qq=10001] /status', options), '/status')
   assert.equal(readCommandText([...mention(' /new'), { type: 'image', data: {} }], options), '')
   assert.equal(readCommandText([{ type: 'at', data: {} }, { type: 'text', data: { text: '/new' } }], { requireMention: true }), '')
+})
+
+test('问答读取只移除前置自身 @，保留正文中的其他成员和自身提及', () => {
+  const options = { selfId: '10001' }
+  assert.equal(readAnswerText(mention(' 2 '), options), '2')
+  assert.equal(readAnswerText('[CQ:reply,id=123] \n[CQ:at,qq=10001] 1,2 ', options), '1,2')
+  for (const message of [
+    [...mention(' 通知 '), { type: 'at', data: { qq: '11003' } },
+      { type: 'text', data: { text: '，完成后 ' } }, { type: 'at', data: { qq: '10001' } }],
+    '[CQ:at,qq=10001] 通知 [CQ:at,qq=11003]，完成后 [CQ:at,qq=10001]',
+  ]) {
+    assert.equal(readAnswerText(message, options), '通知 @11003，完成后 @机器人')
+    assert.equal(readCommandText(message, { ...options, requireMention: true }), '')
+  }
+  assert.equal(readAnswerText('通知 @11003', options), '通知 @11003')
+  assert.equal(readAnswerText(mention(''), options), '')
+})
+
+test('数字回答的自身 @ 可在任意位置，其他成员、普通文本和媒体不冒充选项', () => {
+  const options = { selfId: '10001' }
+  for (const message of [
+    '[CQ:at,qq=10001] 2', '2 [CQ:at,qq=10001]', '[CQ:at,qq=10001]2[CQ:at,qq=10001]',
+    [{ type: 'text', data: { text: '2 ' } }, { type: 'at', data: { qq: '10001' } }],
+  ]) assert.equal(readAnswerText(message, options), '2')
+  assert.equal(readAnswerText('1[CQ:at,qq=10001]2', options), '1 2')
+  assert.equal(readAnswerText('1,[CQ:at,qq=10001]2', options), '1, 2')
+  assert.equal(readAnswerText('通知 [CQ:at,qq=11003] [CQ:at,qq=10001]', options), '通知 @11003 @机器人')
+  assert.equal(readAnswerText('2 [CQ:at,qq=11003][CQ:at,qq=10001]', options), '2 @11003@机器人')
+  assert.equal(readAnswerText('2 @机器人', options), '2 @机器人')
+  assert.equal(readAnswerText('2[CQ:image,file=test.png][CQ:at,qq=10001]', options), '2[图片]@机器人')
 })

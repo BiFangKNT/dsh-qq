@@ -500,9 +500,10 @@ test('审批回答不等待分类，关闭后遵守当前触发，未授权与�
   } } })
   const pending = h.inbound(h.event(1))
   await waitFor(() => typeof unblock === 'function')
-  await h.inbound(h.event(2, '批准'))
+  const approval = [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '批准' } }]
+  await h.inbound(h.event(2, approval))
   assert.equal(approved, 1)
-  await h.inbound(h.event(2, '批准'))
+  await h.inbound(h.event(2, approval))
   assert.equal(approved, 1)
   assert.equal(llm.calls, 1)
   unblock()
@@ -520,6 +521,30 @@ test('审批回答不等待分类，关闭后遵守当前触发，未授权与�
   await h.inbound(h.event(6))
   assert.equal(llm.calls, 1)
 })
+
+for (const fast of [false, true]) {
+  test(`问答保留正文成员提及，审批仍严格解析（快速入口=${fast}）`, async t => {
+    const home = await directory(t), llm = model('no'), answers = [], approvals = []
+    const gate = createAddressClassifier({ home, config: configOf(), llm, logger })
+    const h = inboundHarness(t, gate, {
+      approval: { tryResolve: (_record, text) => { approvals.push(text); return false } },
+      questions: { tryResolve: (_record, text, respondent) => {
+        answers.push({ text, respondent }); return true
+      } },
+    })
+    await h.manager.obtain(meta)
+    if (!fast) h.manager.findByPeer = () => null
+    const message = [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text: '通知 ' } },
+      { type: 'at', data: { qq: '11003' } }]
+    await h.inbound(h.event(990, message))
+    assert.deepEqual(approvals, [])
+    assert.deepEqual(answers, [{ text: '通知 @11003', respondent: {
+      selfId: '9', scope: 'group', peerId: '70001', senderId: '10001', atMe: true,
+    } }])
+    assert.equal(llm.calls.length, 0)
+    assert.equal(h.delivered.length, 0)
+  })
+}
 
 test('主模型繁忙不阻塞逐消息分类，空闲后按顺序补齐', async t => {
   const home = await directory(t), llm = model('yes', 'no', 'yes')
@@ -777,7 +802,8 @@ test('审批和问答快速通道保留同类机器人开关，群聊与私聊�
       })
       const peerId = scope === 'group' ? '70091' : '10001'
       await h.manager.obtain({ ...meta, scope, peerId })
-      const event = (id, text) => ({ ...h.event(id, text), message_type: scope, group_id: peerId,
+      const event = (id, text) => ({ ...h.event(id, scope === 'group'
+        ? [{ type: 'at', data: { qq: '9' } }, { type: 'text', data: { text } }] : text), message_type: scope, group_id: peerId,
         sender: { nickname: '其他机器人', user_id: 10001, ...(detection === 'metadata' ? { is_robot: true } : {}) } })
       await h.inbound(event(1, '批准'))
       await h.inbound(event(2, '回答'))

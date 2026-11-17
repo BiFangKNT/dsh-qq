@@ -13,7 +13,7 @@ export async function createMockEnvironment({ port = 0, root, config: overrides 
   root ??= await mkdtemp(join(tmpdir(), 'dsh-qq-sim-'))
   await mkdir(root, { recursive: true })
   const routes = new Set()
-  const webServer = { register(route) { routes.add(route); return () => routes.delete(route) } }
+  const webServer = { getOrigin: () => origin, register(route) { routes.add(route); return () => routes.delete(route) } }
   const token = randomUUID()
   const peer = startMockNapcat({ port: 0, token, quiet: true })
   const require = createRequire(import.meta.url)

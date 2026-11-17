@@ -92,6 +92,24 @@ export function readCommandText(message, { selfId, requireMention = false } = {}
   return requireMention && !atMe ? '' : text.trim()
 }
 
+/** 数字回答忽略任意位置的自身 @；自由文本只去掉前置呼叫，保留正文提及。 */
+export function readAnswerText(message, { selfId } = {}) {
+  const segments = toSegments(message), self = String(selfId ?? '')
+  const isSelfMention = seg => seg?.type === 'at' && self && String(seg.data?.qq ?? '') === self
+  if (segments.every(seg => seg?.type === 'text' || seg?.type === 'reply' || isSelfMention(seg))) {
+    // @ 作为分隔，避免把两侧的数字拼成一个选项编号；具体选项仍由问答通道校验。
+    const numeric = segments.map(seg => seg?.type === 'text' ? String(seg.data?.text ?? '') : ' ').join('').trim()
+    if (/\d/.test(numeric) && /^[\d\s,，、]+$/.test(numeric)) return numeric
+  }
+  let start = 0
+  for (const seg of segments) {
+    if (seg?.type === 'reply' || seg?.type === 'text' && !String(seg.data?.text ?? '').trim() ||
+      isSelfMention(seg)) start++
+    else break
+  }
+  return readMessage(segments.slice(start), { selfId }).text
+}
+
 /**
  * 合并转发的 id 是从桥接那头传回来的，不能当可信输入直接塞进 RPC。
  *

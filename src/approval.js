@@ -8,12 +8,16 @@
  * 注意：审批请求本身不带命令原文，要去会话事件里按 callId 反查。
  */
 
+import { listOf } from './config.js'
+import { canAccessChat } from './access.js'
+
 const COMMAND_CLIP = 500
 const ANSWER_TIMEOUT_MS = 5 * 60 * 1000
 
 const ALLOW_RE = /^(通过|允许|同意|可以|行|好|确认|对|是|yes|y|ok|allow)$/i
 const REJECT_RE = /^(拒绝|不行|不要|否|不准|别|no|n|reject|deny)$/i
 const CANCEL_RE = /^(取消|cancel|算了)$/i
+const GROUP_DECISIONS = new Map([['通过', 'allowed-once'], ['拒绝', 'rejected'], ['取消', 'cancelled']])
 
 /**
  * 从会话事件流里按 callId 找回被 gate 的那次调用。
@@ -98,6 +102,9 @@ export class ApprovalChannel {
         const sessionId = req?.agent?.session?.header?.id ?? req?.agent?.id
         const record = sessionId === undefined ? null : this.manager.find(String(sessionId))
         if (!record) return next()
+        if (!canAccessChat(this.config, record) ||
+          record.scope === 'private' && !listOf(this.config.ownerIds).includes(String(record.peerId)) ||
+          record.scope === 'group' && !listOf(this.config.ownerIds).length) return next()
         return this.#park(record, req)
       },
       { prepend: true },
@@ -109,12 +116,18 @@ export class ApprovalChannel {
    * 入站消息先过这里：如果它是在回答一个待审批的请求，就吃掉它。
    * @returns {boolean} true 表示已消化，不要再投给 Agent
    */
-  tryResolve(record, text) {
+  tryResolve(record, text, respondent) {
     const entry = this.#pending.get(record.sessionId)
     if (!entry) return false
+    if (!respondent || respondent.scope !== entry.scope || String(respondent.peerId) !== entry.peerId ||
+      String(respondent.selfId) !== entry.selfId || !canAccessChat(this.config, record) ||
+      !listOf(this.config.ownerIds).includes(String(respondent.senderId)) ||
+      entry.scope === 'group' && respondent.atMe !== true ||
+      entry.scope === 'private' && String(respondent.senderId) !== entry.peerId) return false
     const answer = String(text ?? '').trim()
     let decision = null
-    if (ALLOW_RE.test(answer)) decision = 'allowed-once'
+    if (entry.scope === 'group') decision = GROUP_DECISIONS.get(answer) ?? null
+    else if (ALLOW_RE.test(answer)) decision = 'allowed-once'
     else if (REJECT_RE.test(answer)) decision = 'rejected'
     else if (CANCEL_RE.test(answer)) decision = 'cancelled'
     if (!decision) return false
@@ -151,22 +164,20 @@ export class ApprovalChannel {
 
   async #park(record, req) {
     if (req?.signal?.aborted) return 'cancelled'
+    if (this.#pending.has(record.sessionId)) return 'unavailable'
 
     const description = describeOf(req)
     const lines = ['🔐 有个操作需要你点头：']
     if (description) lines.push(`工具：${description.tool}`, description.detail || '（没有参数详情）')
     else lines.push('（这条请求没带操作详情）')
-    lines.push('', '回「通过」放行这一回，回「拒绝」挡掉，回「取消」作废。')
+    lines.push('', record.scope === 'group'
+      ? '仅授权账号可审批：请先 @ 机器人，再回复「通过」「拒绝」或「取消」。其他内容不算审批。'
+      : '授权账号回「通过」放行这一回，回「拒绝」挡掉，回「取消」作废。')
 
-    try {
-      await this.send(record, lines.join('\n'))
-    } catch (err) {
-      this.logger.error?.(`[dsh-qq] 审批消息发送失败: ${err?.message ?? err}`)
-      return 'unavailable' // 发不出去就别放行，fail-closed
-    }
-
-    return new Promise((resolve) => {
-      const entry = { resolve, timer: null, signal: req.signal, onAbort: null }
+    let entry
+    const pending = new Promise((resolve) => {
+      entry = { resolve, timer: null, signal: req.signal, onAbort: null,
+        scope: record.scope, peerId: String(record.peerId), selfId: String(record.selfId) }
       entry.timer = setTimeout(() => {
         this.logger.warn?.(`[dsh-qq] 审批超时 ${record.label}，按取消处理`)
         this.#settle(record.sessionId, 'cancelled')
@@ -183,7 +194,17 @@ export class ApprovalChannel {
       }
 
       this.#pending.set(record.sessionId, entry)
+      if (req.signal?.aborted) this.#settle(record.sessionId, 'cancelled')
       this.logger.info?.(`[dsh-qq] 审批已发到 QQ，等待回复 ${record.label}`)
     })
+    if (this.#pending.get(record.sessionId) !== entry) return pending
+    void (async () => {
+      try { await this.send(record, lines.join('\n')) }
+      catch (err) {
+        this.logger.error?.(`[dsh-qq] 审批消息发送失败: ${err?.message ?? err}`)
+        if (this.#pending.get(record.sessionId) === entry) this.#settle(record.sessionId, 'unavailable')
+      }
+    })()
+    return pending
   }
 }

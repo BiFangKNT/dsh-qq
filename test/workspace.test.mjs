@@ -150,3 +150,26 @@ test('SessionManager 在挂载前迁移；迁移冲突不回退宿主目录', as
     else assert.equal((await readdir(join(home, 'workspace-migrations'))).length, 1)
   }
 })
+
+test('独立目录初始化失败时停止挂载，修复后可重试；只有显式关闭隔离才沿用宿主 cwd', async t => {
+  const h = await fixture(t)
+  const blocked = join(h.root, 'blocked-root')
+  await writeFile(blocked, '保留的普通文件')
+  const host = createMockDsh({ home: h.root })
+  const config = { ...h.config, workspaceRoot: blocked }
+  const manager = new SessionManager({ ctx: host.ctx, agents: host.ctx.agents, selfId: '10001',
+    config, home: join(h.root, 'plugin-home'), logger: h.options.logger })
+  t.after(async () => { manager.stop(); await host.dispose() })
+  await assert.rejects(manager.obtain(info), /无法初始化独立会话目录/)
+  assert.equal(host.agents.size, 0)
+  assert.equal(manager.findByPeer(info.scope, info.peerId), null)
+  assert.equal(await readFile(blocked, 'utf8'), '保留的普通文件')
+  await rm(blocked)
+  const record = await manager.obtain(info)
+  assert.equal(record.dir, resolvePeerWorkspace(config, info.scope, info.peerId))
+  assert.equal(record.agent.ctx.cwd, record.dir)
+  config.isolateByPeer = false
+  const shared = await manager.obtain({ scope: 'private', peerId: '11009', label: '显式共享' })
+  assert.equal(shared.dir, config.cwd)
+  assert.equal(shared.agent.ctx.cwd, config.cwd)
+})

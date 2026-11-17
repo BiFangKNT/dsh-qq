@@ -259,9 +259,8 @@ export class SessionManager {
       })
       this.#ready.set(dir, true)
     } catch (err) {
-      // 铺不出来就不要把会话钉死在半成品目录上，退回宿主 cwd
       this.logger.warn?.(`[dsh-qq] 初始化会话目录失败 ${dir}:`, err)
-      return null
+      throw new Error(`无法初始化独立会话目录 ${dir}：${err.message}`, { cause: err })
     }
     return dir
   }

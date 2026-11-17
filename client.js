@@ -27,14 +27,11 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useState, useEffect, useCallback, useRef } = React
 
-    // 数据来源两条路（自动选第一个通的）：
-    //   1) DSH 自己的 /api/dsh-qq —— 宿主 webServer 愿意把路由挂出来时用这条
-    //   2) 插件自己在 127.0.0.1:34569 起的小服务 —— 2026-10-24 加的兜底：
-    //      DSH 那边的路由表会「注册成功但请求 404」，实测绕不过去，
-    //      所以插件自己做一块本地工作台（这也是官方教程里说的插件形态）。
+    // 默认访问宿主同源接口；独立服务由用户明确选择并提供管理密钥。
     const API = '/api/dsh-qq'
     let localPort = 34569
     let localSelected = false
+    let localKey = ''
     const localApi = () => 'http://127.0.0.1:' + localPort + '/api/dsh-qq'
     let apiBase = null
 
@@ -42,13 +39,16 @@ window.__ModuleLoader__.load({
       if (apiBase) return apiBase
       const probe = async (base) => {
         try {
-          const r = await fetch(base + '/status', { credentials: 'same-origin' })
+          const r = await fetch(base + '/status', { credentials: 'same-origin', headers: base === API ? {} : { authorization: 'Bearer ' + localKey } })
           return r.ok ? base : null
         } catch {
           return null // 网络错 / 跨域 / 没起来，都算这条不通
         }
       }
-      apiBase = localSelected ? await probe(localApi()) : (await probe(API)) || (await probe(localApi()))
+      if (localSelected) {
+        await asJson(await fetch(localApi() + '/status', { credentials: 'omit', headers: requestHeaders(localApi()) }))
+        apiBase = localApi()
+      } else apiBase = await probe(API)
       if (!apiBase) throw new Error('设置接口不可达；请确认宿主路由或本地设置端口')
       return apiBase
     }
@@ -64,13 +64,20 @@ window.__ModuleLoader__.load({
       } catch { /* 读不出来就算了 */ }
       throw new Error('HTTP ' + res.status + why + extra)
     }
-    const jget = async (p) => asJson(await fetch((await resolveBase()) + p, { credentials: 'same-origin' }))
-    const jpost = async (p, body) => asJson(await fetch((await resolveBase()) + p, {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body || {}),
-    }))
+    const requestHeaders = base => base === API ? {} : { authorization: 'Bearer ' + localKey }
+    const jget = async (p) => {
+      const base = await resolveBase()
+      return asJson(await fetch(base + p, { credentials: 'same-origin', headers: requestHeaders(base) }))
+    }
+    const jpost = async (p, body) => {
+      const base = await resolveBase()
+      return asJson(await fetch(base + p, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { ...requestHeaders(base), 'content-type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      }))
+    }
 
     const CSS = `
 [data-qq-page]{display:flex;flex-direction:column;gap:18px;padding:2px 2px 8px;max-width:680px;}
@@ -213,6 +220,8 @@ window.__ModuleLoader__.load({
       const savedValues = useRef(val)
       const [sources, setSources] = useState(null)
       const [sourceDraft, setSourceDraft] = useState({ scope: 'chat', kind: 'file', label: '', path: '', targets: '', selfId: '' })
+      const [keyDraft, setKeyDraft] = useState('')
+      const [tokenSet, setTokenSet] = useState(false)
       savedValues.current = val
       const syncPending = st?.promptSync?.pending ?? []
       const syncOperations = st?.promptSync?.operations ?? []
@@ -223,6 +232,7 @@ window.__ModuleLoader__.load({
           const [s, cfg] = await Promise.all([jget('/status'), jget('/settings')])
           setSt(s)
           setVal(cfg.values)
+          setTokenSet(cfg.meta?.accessTokenSet === true)
           setDraft({})
           setPersona(cfg.persona ?? null)
           try { setSources(await jget('/sources')) }
@@ -250,6 +260,7 @@ window.__ModuleLoader__.load({
           const r = await jpost('/settings', { patch: update })
           savedValues.current = r.values
           setVal(r.values)
+          setTokenSet(r.accessTokenSet === true)
           if (update.memberLabels) {
             // 慢请求返回时，只清掉已保存的称呼草稿，保留正在输入的其他修改。
             setDraft(current => ({ ...current, memberLabels: Object.fromEntries(
@@ -359,15 +370,19 @@ window.__ModuleLoader__.load({
         h('label', { htmlFor: 'qq-local-api-port' }, '连接本地设置端口'),
         h('input', { id: 'qq-local-api-port', 'data-qq-input': '', type: 'number', min: 1, max: 65535,
           value: portDraft, onChange: e => setPortDraft(e.target.value) }),
+        h('label', { htmlFor: 'qq-local-api-key' }, '本地管理密钥'),
+        h('input', { id: 'qq-local-api-key', 'data-qq-input': '', type: 'password', autoComplete: 'off',
+          value: keyDraft, onChange: e => setKeyDraft(e.target.value) }),
         h('button', { 'data-qq-btn': '', type: 'button', onClick: () => {
           const port = Number(portDraft)
           if (!Number.isInteger(port) || port < 1 || port > 65535) {
             setMsg({ text: '端口必须是 1–65535 的整数', tone: 'warn' }); return
           }
-          localPort = port; localSelected = true; apiBase = null
+          if (!keyDraft.trim()) { setMsg({ text: '请输入目标实例 settings-key 文件中的管理密钥', tone: 'warn' }); return }
+          localPort = port; localKey = keyDraft.trim(); localSelected = true; apiBase = null
           setSt(null); setVal(null); setDraft({}); load()
         } }, '连接此端口'),
-        h('div', { 'data-qq-note': '' }, '用于宿主路由不可用或多实例时选择目标服务；须与该实例 localApiPort 一致。'))
+        h('div', { 'data-qq-note': '' }, '宿主路由不可用或多实例时使用。密钥位于目标实例 dsh-qq/settings-key；页面来源须在其 localApiOrigins 中获准。密钥仅保存在本页内存。'))
 
       if (!val) {
         return h('div', { 'data-qq-page': '' },
@@ -499,10 +514,13 @@ window.__ModuleLoader__.load({
             hint: 'OneBot 11 正向 WebSocket。NapCat 里开的「正向 WS」默认是 ws://127.0.0.1:3001。改完点上面的「重连」。',
             mono: true,
           }),
-          textField('accessToken', 'access token', {
-            hint: '跟 NapCat 配置里那一串要一致。只在本机回环可以留空。',
-            mono: true,
-          }),
+          Row({ label: 'NapCat access token', hint: tokenSet ? '已配置，现有值不回显。输入后点击替换；清空需单独点击按钮。' : '未配置。输入与 NapCat 一致的 token 后点击设置。',
+            children: h('div', { 'data-qq-col': '' },
+              h('input', { 'data-qq-input': '', type: 'password', autoComplete: 'new-password', value: draft.accessToken ?? '',
+                placeholder: tokenSet ? '已配置（不显示）' : '输入 token', onChange: e => setV('accessToken', e.target.value) }),
+              h('div', { 'data-qq-row': '' },
+                h('button', { 'data-qq-btn': '', disabled: busy || !draft.accessToken, onClick: () => patch({ accessToken: draft.accessToken }, 'NapCat token') }, tokenSet ? '替换 token' : '设置 token'),
+                h('button', { 'data-qq-btn': '', disabled: busy || !tokenSet, onClick: () => patch({ accessToken: '' }, '清空 NapCat token') }, '清空 token'))) }),
           textField('selfId', '机器人自己的 QQ 号', {
             hint: '留空就启动时自动问 NapCat 要（一般不用填）。',
           })),
@@ -715,6 +733,7 @@ window.__ModuleLoader__.load({
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '发送与诊断'),
           textField('localApiPort', '独立设置服务端口', { type: 'number', hint: '默认 34569；0 关闭。多实例使用不同端口，修改后重启宿主；连接时在页面顶部选择对应端口。' }),
+          listField('localApiOrigins', '允许的设置页面来源', { hint: '用逗号分隔完整来源，例如 http://127.0.0.1:3080，不含路径；宿主当前来源自动允许。仅影响独立服务，仍需管理密钥。' }),
           boolField('debug', '输出调试日志', '保存后生效。日志按天写入 <workspaceRoot>/logs/dsh-qq-YYYY-MM-DD.log；未设置 workspaceRoot 时使用进程工作目录。'),
           textField('textChunkLimit', '单条消息最大字数', { hint: '超出按段落/句号切成多条发。', type: 'number' }),
           textField('splitDelayMeanMs', '分条随机间隔均值（毫秒）', { type: 'number', hint: '默认 500。大于 0 时使用随机间隔；设为 0 才使用下方固定间隔。' }),

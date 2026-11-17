@@ -1,5 +1,5 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { readPlainText, readMessage, readCommandText } from './onebot/segment.js'
+import { readPlainText, readMessage, readCommandText, readAnswerText } from './onebot/segment.js'
 import { rememberFaces } from './faces.js'
 import { createAddressClassifier } from './address-classifier.js'
 import { migrateGroupSettings, requiresGroupMention, groupMessageInterval } from './group-trigger.js'
@@ -488,14 +488,16 @@ export function createInbound({ config, manager, logger, client, send, approval,
     const cacheDir = record.dir ? join(record.dir, '图片缓存') : baseCacheDir
 
     // ── 先看这句是不是在回答一条待审批的请求；是的话就吃掉，不投给 Agent ──
-    const rawText = (info.text || '').trim()
-    if (rawText && approval?.tryResolve?.(record, rawText)) {
+    const rawText = readCommandText(event.message, { selfId, requireMention: isGroup })
+    const respondent = { selfId, scope, peerId, senderId, atMe: info.atMe }
+    if (rawText && approval?.tryResolve?.(record, rawText, respondent)) {
       logger.info?.(`[dsh-qq] 已消化审批回复 ${label}`)
       return
     }
 
     // ── 再看是不是在回答一条待答的问题 ──
-    if (rawText && questions?.tryResolve?.(record, rawText)) {
+    const answerText = readAnswerText(event.message, { selfId })
+    if (answerText && questions?.tryResolve?.(record, answerText, respondent)) {
       logger.info?.(`[dsh-qq] 已消化问答回复 ${label}`)
       return
     }
@@ -931,8 +933,12 @@ export function createInbound({ config, manager, logger, client, send, approval,
       if (!event.__classifierRecovery && eventKey && (seenMessages.get(eventKey) ?? 0) > Date.now()) return
       const botAllowed = !isPeerBot(config, event.user_id, event) || config.botChatEnabled
       const record = allowed && botAllowed && String(event.user_id) !== selfId && manager.findByPeer?.(scope, peerId)
-      const text = record && readMessage(event.message, { selfId }).text?.trim()
-      if (text && (approval?.tryResolve?.(record, text) || questions?.tryResolve?.(record, text))) {
+      const info = record && readMessage(event.message, { selfId })
+      const text = record && readCommandText(event.message, { selfId, requireMention: scope === 'group' })
+      const answerText = record && readAnswerText(event.message, { selfId })
+      const respondent = { selfId, scope, peerId, senderId: String(event.user_id), atMe: info?.atMe === true }
+      if (text && approval?.tryResolve?.(record, text, respondent) ||
+        answerText && questions?.tryResolve?.(record, answerText, respondent)) {
         if (eventKey) seenMessages.set(eventKey, Date.now() + 10 * 60_000)
         return Promise.resolve()
       }

@@ -592,7 +592,7 @@ test('原生rc.2执行器：空收藏和无图片均是成功空结果，动态�
   const { agent } = await h.attach()
   const record = { selfId: '10001', scope: 'private', peerId: '11001', lastMessageId: 7 }
   registerTools(h.ctx, { config: h.config, manager: { selfId: '10001', find: () => record }, home,
-    logger: { info() {}, warn() {} }, client: { call: async () => ({ message: [] }) } })
+    logger: { info() {}, warn() {} }, client: { call: async () => ({ message_type: 'private', sender: { user_id: 11001 }, message: [] }) } })
   await h.send(agent)
   assert.equal(h.requests.length, 3)
   const results = h.requests.at(-1).messages.filter(message => message.role === 'tool')

@@ -83,6 +83,7 @@ test('真实设置 API 拒绝过期确认，保存精确许可并启动；分进
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await host.dispose() })
   const url = `http://127.0.0.1:${server.address().port}/api/dsh-qq`
+  host.ctx.webServer.getOrigin = () => `http://127.0.0.1:${server.address().port}`
   const post = versions => fetch(`${url}/compatibility`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ versions }) })
   assert.equal((await post({ ...unverified, '@deepseek-ai/dsh-session': 'wrong' })).status, 409)
   assert.equal(starts, 0)
