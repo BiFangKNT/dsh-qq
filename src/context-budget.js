@@ -118,7 +118,7 @@ export function createContextBudget({ ctx, config, store, logger, encode = token
   async function envelope(record, manager) {
     const assembly = await record.agent.ctx.get('systemPrompt').assemble(assembleContextFor(record.agent))
     const selection = conversationConfig(record)
-    const state = manager.runtimeContext?.(record) ?? ''
+    const state = await manager.runtimeContext?.(record) ?? ''
     const sections = renderContextSections(assembly).filter(section => section.name !== runtimeContextName)
     const tail = [...sections.map(section => section.text), state].filter(Boolean).join('\n\n')
     const history = record.agent.session.deriveMessages().filter(message => message.content?.length &&
@@ -131,7 +131,7 @@ export function createContextBudget({ ctx, config, store, logger, encode = token
       ...(tail ? { tail: { role: 'user', content: [{ type: 'text', text: tail }] } } : {}) }
   }
   const api = {
-    textCount, measure, route, inputBudget,
+    textCount, measure, route, inputBudget, conversationConfig,
     fingerprint(record) { return JSON.stringify([conversationConfig(record), ctx.get('compaction')?.config]) },
     async select(record, manager, messageStore, end, render, { validate = () => {} } = {}) {
       const fingerprint = api.fingerprint(record)

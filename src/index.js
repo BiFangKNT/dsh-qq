@@ -326,7 +326,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef, knowledge }) {
     }
   }
   manager.memory = createMemory({ home: homeDirOf(ctx, logger), config, getLlm: () => ctx.get('llm'), logger, capacity: manager.capacity, messageStore })
-  manager.runtimeContext = record => buildRuntimeContext({ memory: manager.memory, config, record })
+  manager.runtimeContext = record => buildRuntimeContext({ memory: manager.memory, config, record, capacity: manager.capacity })
   manager.start()
   const promptSync = createPromptSync({ ctx, home: homeDirOf(ctx, logger), config, manager, logger })
   promptSync.start()

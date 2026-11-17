@@ -9,11 +9,12 @@ import { allowPrivate, allowGroup } from './access.js'
 import { memberLabel } from './identity.js'
 import { imagePolicy, blocksImage } from './image-filter.js'
 import { appendChatLog, CHATLOG_DIR, UNAUTHORIZED_LOG_DIR } from './chatlog.js'
-import { mkdir, writeFile, readdir, unlink } from 'node:fs/promises'
+import { mkdir, readdir, unlink, stat } from 'node:fs/promises'
 import { join, extname, dirname } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { decodeBase64, readDownload, writeDownload } from './shared/download.js'
 
 /** 插件自带的 ASR 脚本；配置里没写 asrScript 时用它。 */
 const DEFAULT_ASR_SCRIPT = fileURLToPath(new URL('../tools/asr.py', import.meta.url))
@@ -262,14 +263,13 @@ export async function expandForwards(client, forwards, { logger } = {}) {
 async function loadImage(url, maxMB) {
   let data, ext
   if (url?.startsWith('base64://')) {
-    data = Buffer.from(url.slice('base64://'.length), 'base64')
+    data = decodeBase64(url.slice('base64://'.length), Math.floor(maxMB * 1024 * 1024))
     ext = '.png'
   } else {
     if (!/^https?:\/\//i.test(url ?? '')) throw new Error('图片来源必须为 HTTP(S) 或 base64')
-    const res = await fetch(url, { signal: AbortSignal.timeout(20000) })
-    if (!res.ok) throw new Error(`图片下载失败：HTTP ${res.status}`)
-    data = Buffer.from(await res.arrayBuffer())
-    ext = guessExt(url, res.headers.get('content-type') ?? '')
+    const result = await readDownload(url, Math.floor(maxMB * 1024 * 1024))
+    data = result.data
+    ext = guessExt(url, result.type)
   }
   if (data.length > maxMB * 1024 * 1024) throw new Error('图片超过大小限制')
   return { data, ext }
@@ -277,8 +277,7 @@ async function loadImage(url, maxMB) {
 
 async function cacheImage(image, cacheDir) {
   const path = join(cacheDir, `qq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${image.ext}`)
-  await writeFile(path, image.data)
-  return path
+  return writeDownload(path, image.data)
 }
 
 export async function downloadImage(url, cacheDir, maxMB, policy) {
@@ -611,7 +610,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
             } else if (res?.base64) {
               await mkdir(cacheDir, { recursive: true }).catch(() => {})
               wavPath = join(cacheDir, `voice-${Date.now()}.wav`)
-              await writeFile(wavPath, Buffer.from(String(res.base64), 'base64'))
+              await writeDownload(wavPath, decodeBase64(res.base64, 32 * 1024 * 1024))
             } else if (res?.url) {
               wavPath = (await downloadImage(String(res.url), cacheDir, 32)) || ''
             }
@@ -619,6 +618,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
               voiceTexts.push('[语音，转码失败]')
               continue
             }
+            if ((await stat(wavPath)).size > 32 * 1024 * 1024) throw new Error('语音超过大小限制')
             const text = await runAsr(config, wavPath)
             voiceTexts.push(text ? `[语音转文字] ${text}` : '[语音，没听清]')
           } catch (err) {
@@ -698,7 +698,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
         images: classifierImages, imageError: classifierImageError,
         robotName: manager.selfName || event.self_name || '机器人',
         mainContext: classified ? { header: systemSnapshot ? { ...header, system: systemSnapshot.text } : header,
-          messages: session.deriveMessages(), runtimeContext: manager.runtimeContext?.(record) ?? '' } : undefined,
+          messages: session.deriveMessages(), runtimeContext: await manager.runtimeContext?.(record) ?? '' } : undefined,
         background: [],
         message: { senderId, senderName, triggerText: readPlainText(event.message), text: info.text || '[非文字消息]',
           atMe: info.atMe, atOthers: info.atNames, quote: quoteInfo, time: event.time,

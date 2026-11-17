@@ -129,6 +129,41 @@ async function harness(t, { root, respond, compact = false, budget = false, mode
     get renderCount() { return renderCount }, set state(value) { state = value } }
 }
 
+test('限量状态区进入原生实际请求末尾，工具续调刷新，compact 无状态或遗漏资料', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'qq-native-state-budget-'))
+  const memory = createMemory({ home, config: {} })
+  t.after(async () => { memory.stop(); await rm(home, { recursive: true, force: true }) })
+  let record, h
+  h = await harness(t, { budget: true, compact: true,
+    modelInfo: { context: { contextWindow: 24000 }, defaultMaxTokens: 512 },
+    respond: (_options, requests) => requests.length === 1 ? toolResponse : textResponse('ok'),
+    runtimeContext: config => buildRuntimeContext({ memory, config, record, capacity: h.capacity }),
+  })
+  const { agent } = await h.attach()
+  record = { selfId: '10001', scope: 'private', peerId: '11001', agent }
+  const data = memory.store.migrate(record)
+  for (let i = 0; i < 40; i++) memory.store.change(data, { kind: 'fact', text: `资料${i}：` + '长资料😀'.repeat(100) })
+  memory.store.write(record, data, data.revision)
+  h.ctx.tools.register(defineContentToolFixture({ name: 'change_state', description: '更新状态', parameters: {}, async execute() {
+    await memory.update(record, { id: data.entries[0].id, version: 1, status: 'removed' })
+    return [{ type: 'text', text: '实际工具结果' }]
+  } }))
+  await h.send(agent, '查询当前资料及之前的聊天背景。'.repeat(100), { kind: 'user', qqMaySilent: true })
+  assert.equal(h.requests.length, 2)
+  for (const request of h.requests) {
+    const tail = request.messages.at(-1)
+    assert.ok(hasState(tail))
+    assert.ok(await h.capacity.textCount(tail.content[0].text) <= Math.floor((24000 - 512) / 8))
+    assert.match(text(tail), /未提供 \d+ 条，可用 qq_memory 查询/)
+  }
+  assert.match(text(h.requests[0].messages.at(-1)), /资料0：/)
+  assert.doesNotMatch(text(h.requests[1].messages.at(-1)), /资料0：/)
+  assert.equal(h.requests[1].messages.at(-2).role, 'tool')
+  assert.doesNotMatch(text(agent.session.deriveMessages()), /长资料|未提供 \d+ 条，可用 qq_memory/)
+  await h.ctx.compaction.compactNow(agent, new AbortController().signal)
+  assert.doesNotMatch(text(h.requests.at(-1)), /长资料|未提供 \d+ 条，可用 qq_memory/)
+})
+
 test('实际请求中固定说明仅在 system，当前值在末尾；分类背景不重复 system 或改变主会话', async t => {
   const home = await mkdtemp(join(tmpdir(), 'qq-native-composition-'))
   t.after(() => rm(home, { recursive: true, force: true }))

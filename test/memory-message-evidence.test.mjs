@@ -14,7 +14,8 @@ for (const toolName of ['qq_history', 'qq_messages', 'qq_group_history', 'qq_pri
     const messages = createMessageStore(), inputs = []
     let checks = 0
     const memory = createMemory({ home, config: { provider: 'test', model: 'test' }, messageStore: messages,
-      capacity: { check: async () => { checks++ } }, getLlm: () => ({ async *stream(options) {
+      capacity: { route: async () => ({ hard: 32768, output: 4096 }), measure: async () => 0,
+        check: async () => { checks++ } }, getLlm: () => ({ async *stream(options) {
         inputs.push(JSON.parse(options.messages[0].content[0].text))
         yield { type: 'text-delta', index: 0, text: '{"changes":[]}' }
         yield { type: 'finish', reason: { kind: 'stop' } }
