@@ -177,9 +177,10 @@ QQ 消息会触发宿主 Agent；允许访问的用户可能间接使用其文�
 | [配置参考](docs/configuration.md) | 配置项、默认值和行为说明 |
 | [角色与会话](docs/persona.md) | 提示词、身份标记、引用和上下文管理 |
 | [部署文档](docs/deployment.md) | 长期运行、多进程与启动管理 |
-| [开发文档](docs/development.md) | 代码结构和开发入口 |
+| [开发文档](docs/development.md) | 开发环境、代码结构和开发约定 |
+| [开发进度与计划](docs/progress.md) | 已完成工作、当前待办和执行顺序 |
 | [本地模拟环境](docs/mock-environment.md) | 网页模拟器、编排和故障注入 |
-| [情绪系统开发进度](docs/emotion-system-development.md) | 已实现的可选消息判断、后续情绪与关系开发安排 |
+| [情绪系统设计](docs/emotion-system-development.md) | 情绪与关系的功能安排、消息分类和接入约束 |
 | [测试清单](TESTING.md) | 自动化覆盖与真实环境验证 |
 | [工具说明](tools/README.md) | 辅助脚本及使用条件 |
 | [变更记录](CHANGELOG.md) | 版本变更 |
