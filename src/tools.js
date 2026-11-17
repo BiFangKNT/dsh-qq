@@ -23,6 +23,7 @@ import { registerMemoryTool } from './memory-tools.js'
 import { registerMessageTool } from './message-tools.js'
 import { registerSharedFiles } from './shared-files.js'
 import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
+import { createToolPolicy, memeDbPath } from './tool-policy.js'
 
 const POKE_DESC =
   '戳一戳当前对话里的对方（私聊戳好友，群聊戳那位发言的人）。用来提醒对方注意、' +
@@ -79,17 +80,24 @@ function peerOf(record) {
     : { user_id: Number(record.peerId) }
 }
 
-export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home, notifyBlocked, synthesize }) {
-  const tools = ctx.get?.('tools')
-  if (!tools?.register) {
+export function registerTools(ctx, { client, manager, config, logger, wake, noteSelfSaid, home, notifyBlocked, synthesize, platform }) {
+  const registry = ctx.get?.('tools')
+  if (!registry?.register) {
     logger.info?.('tools 服务不可用，QQ 互动工具未注册（聊天本身不受影响）')
     return
   }
+  const policy = createToolPolicy({ config, manager, logger, platform })
+  const registered = []
+  const tools = { register: definition => {
+    const dispose = policy.register(registry, definition)
+    registered.push(definition.name)
+    return dispose
+  } }
 
   /**
    * 工具发出去的东西也要记账（2026-10-27 姐姐让修的）。
    *
-   * 以前只有正文走 send() 才写流水、进 history，用 qq_send / qq_reply 说的话等于「发出去就没了」：
+   * 以前只有正文走 send() 才写流水、进 history，用 qq_send 说的话等于「发出去就没了」：
    * 翻聊天记录缺一句，下一轮她自己也不知道自己说过。这里补上，顺带兑现主动开口的额度。
    */
   function noteToolSent(record, text, target = record, messageId = null) {
@@ -115,7 +123,10 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
 
   async function assertOutboundText(text, record, source) {
     const verdict = checkOutboundText(text, { config, logger, record, source, knownSecrets: [client.token] })
-    if (verdict.ok) return
+    if (verdict.ok) {
+      policy.assertAvailable(source, record)
+      return
+    }
     await notifyBlocked?.(record)
     throw new SensitiveContentError(verdict.rule)
   }
@@ -156,7 +167,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     async execute(args) {
       try {
         const word = String(args?.word ?? '').trim()
-        const r = await lookupMeme(word, { dbPath: config.memeDb || undefined, full: Boolean(args?.full) })
+        const r = await lookupMeme(word, { dbPath: memeDbPath(config), full: Boolean(args?.full) })
         if (!r.found) {
           return {
             found: false,
@@ -565,76 +576,18 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
   })
 
   tools.register({
-    name: 'qq_reply',
-    description:
-      '引用某条消息再发一句话（QQ 的「回复」，气泡上会带一条原文引用）。' +
-      '群聊里同时有好几个人说话、或者要接很久以前的那句话时用它，比直接说话清楚得多。' +
-      'message_id 填对方那条消息的 id（入站消息里看到的「引用 xxx」里的 id，或你自己拿到的消息 id）。' +
-      '不填 message_id 就退化成普通发送。',
-    parameters: {
-      type: 'object',
-      properties: {
-        text: { type: 'string', description: '要发的正文' },
-        message_id: { type: 'integer', description: '可选：要引用的那条消息 id' },
-      },
-      required: ['text'],
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          messageId: { type: 'integer' },
-          quoted: { type: 'integer' },
-        },
-        required: ['ok'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [
-        { type: 'text', text: value.ok ? `已发出（引用 ${value.quoted ?? '无'}）` : '发送失败' },
-      ],
-    },
-    async execute(args, exec) {
-      const record = needRecord(manager, exec)
-      const text = cleanOutboundText(args?.text)
-      if (!text) throw new Error('qq_reply: text 不能为空')
-      await assertOutboundText(text, record, 'qq_reply')
-      const quoted = Number(args?.message_id ?? record.lastMessageId ?? 0) || 0
-      const segments = []
-      if (quoted > 0) segments.push({ type: 'reply', data: { id: String(quoted) } })
-      segments.push({ type: 'text', data: { text } })
-
-      const isGroup = record.scope === 'group'
-      const action = isGroup ? 'send_group_msg' : 'send_private_msg'
-      const target = isGroup
-        ? { group_id: Number(record.peerId) }
-        : { user_id: Number(record.peerId) }
-      try {
-        const result = await client.call(action, { ...target, message: segments })
-        const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
-        if (sentId > 0) record.lastSentMessageId = sentId
-        noteToolSent(record, text)
-        return { ok: true, messageId: sentId, quoted }
-      } catch (err) {
-        logger.warn?.(`qq_reply 失败: ${err?.message ?? err}`)
-        return { ok: false, messageId: 0, quoted }
-      }
-    },
-  })
-
-  tools.register({
     name: 'qq_send',
     description:
-      '发一条普通消息（不带引用）。' +
+      '发送文字；可用 message_id 引用目标聊天中的消息。普通回复直接输出正文即可。' +
       '不填 to 就发给「当前正在跟你说话的人/群」；' +
       'to 可指定 `user:<QQ号>` 或 `group:<群号>`；跨聊天发送仅授权账号私聊可用，当前聊天和目标均须获准。' +
-      '想接某句话用 qq_reply，只想说点什么用这个。发送结果不确定时先检查目标聊天，不自动重发。',
+      '引用消息须经聊天记录或协议端确认属于目标聊天；无法确认时不发送。发送结果不确定时先检查目标聊天，不自动重发。',
     parameters: {
       type: 'object',
       properties: {
         text: { type: 'string', description: '要发的正文' },
         to: { type: 'string', description: '可选：`user:<QQ号>` 或 `group:<群号>`；不填=当前会话' },
+        message_id: { type: 'integer', description: '可选：目标聊天内要引用的消息 ID；省略则普通发送' },
       },
       required: ['text'],
       additionalProperties: false,
@@ -659,9 +612,20 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const record = needRecord(manager, exec)
       const destination = resolveSendTarget(record, args?.to)
       assertSendAccess(manager, config, record, destination)
+      const quoted = args?.message_id === undefined ? null : parseMessageId(args.message_id)
+      if (args?.message_id !== undefined && quoted === null) throw new Error('message_id 必须为有效整数')
       const text = cleanOutboundText(args?.text)
       if (!text) throw new Error('qq_send: text 不能为空')
       await assertOutboundText(text, record, 'qq_send')
+      if (quoted !== null && !manager.messageStore?.hasMessage(destination, quoted)) {
+        const message = await client.call('get_msg', { message_id: quoted })
+        const groupId = message?.group_id
+        const sameChat = destination.scope === 'group'
+          ? String(groupId ?? '') === destination.peerId
+          : groupId == null && message?.message_type === 'private' &&
+            String(message.sender?.user_id ?? message.user_id) === destination.peerId
+        if (!sameChat) throw new Error('引用消息不属于目标聊天，或协议端未提供可确认的聊天归属')
+      }
       assertSendAccess(manager, config, record, destination)
       const action = destination.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
       const target = peerOf(destination)
@@ -670,7 +634,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       try {
         const result = await client.call(action, {
           ...target,
-          message: [{ type: 'text', data: { text } }],
+          message: [...(quoted === null ? [] : [{ type: 'reply', data: { id: String(quoted) } }]), { type: 'text', data: { text } }],
         })
         const sentId = parseMessageId(result?.message_id ?? result?.data?.message_id)
         if (sentId !== null) noteToolSent(record, text, destination, sentId)
@@ -688,14 +652,13 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
   tools.register({
     name: 'qq_keep_face',
     description:
-      '把一张本地图片收进「表情包收藏」，以后就能用 qq_mface 随机发出来。' +
-      '⚠️ 有门槛：只有跟配置里 faceCollectHint 描述的那类图（没配就是一类都不收）才值得收。' +
-      '普通照片、聊天截图、风景图、别人随手发的图 —— 一律不收。群里什么图都存会变成垃圾场。' +
-      '收之前先 read_image 看一眼，确认是这类表情再收。',
+      '把本地普通图片复制到表情收藏并登记名称。mode=requested 仅用于用户明确要求收藏；mode=automatic 须符合末尾状态区的自动收藏规则。' +
+      '规则留空时禁止自动收藏，但允许用户明确要求的收藏。先查看图片，按实际内容命名。商城表情由程序自动登记，不用本工具。',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string', description: '本地图片的绝对路径' },
+        mode: { type: 'string', enum: ['requested', 'automatic'], description: 'requested：用户明确要求；automatic：按已配置规则自动收藏' },
         summary: {
           type: 'string',
           description:
@@ -703,7 +666,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
             '没字就一句话说清画面和情绪（「抱着白饭碗干饭」「抱着小人偶一脸问号」）。',
         },
       },
-      required: ['path'],
+      required: ['path', 'mode'],
       additionalProperties: false,
     },
     output: {
@@ -730,6 +693,8 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       ],
     },
     async execute(args) {
+      if (!['requested', 'automatic'].includes(args?.mode)) throw new Error('请说明收藏来源：requested（用户明确要求）或 automatic（按自动收藏规则）')
+      if (args.mode === 'automatic' && !String(config.faceCollectHint ?? '').trim()) throw new Error('未设置普通图片自动收藏规则，只能按用户明确要求收藏')
       const result = keepFace(config, { path: args?.path, summary: args?.summary })
       return result
     },
@@ -914,6 +879,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
 
       // ② 兜底：官方 CDN 的 raw300.gif
       if (packageId) {
+        policy.assertAvailable('qq_mface', record)
         try {
           const url = `https://gxh.vip.qq.com/club/item/parcel/item/${packageId}/${emojiId}/raw300.gif`
           const result = await client.call(action, {
@@ -943,11 +909,11 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
 
   registerExtraTools(tools, {
     client, manager, config, home: home ?? homeDirOf(ctx, logger),
-    needRecord, assertText: assertOutboundText, noteToolSent, synthesize,
+    needRecord, assertText: assertOutboundText, noteToolSent, synthesize, assertAvailable: policy.assertAvailable,
   })
 
   logger.info?.(
-    `QQ 互动工具已注册：qq_memory / qq_history / qq_poke / qq_react / qq_like / qq_send_image / qq_send_file / qq_face / qq_mface / qq_faces / qq_reply / qq_send / qq_recall / qq_send_voice / qq_qzone_send（表情包收藏 ${facesCount(config)} 个）`,
+    `QQ 工具已注册（按当前聊天、开关和运行条件提供）：${registered.join(' / ')}（表情包收藏 ${facesCount(config)} 个）`,
   )
   logger.info?.(sharedFilesEnabled
     ? 'qq_memo 已启用：获准聊天可读，仅授权账号私聊可写'

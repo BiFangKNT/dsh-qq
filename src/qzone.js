@@ -8,8 +8,9 @@ const PRIVACY = { public: 1, friends: 4, private: 64 }
 export function createQzonePublisher({ client, home }) {
   const file = join(home, 'qzone-state.json')
   let queue = Promise.resolve()
-  return function publish({ text, images = [], privacy = 'public' }) {
+  return function publish({ text, images = [], privacy = 'public', check = () => {} }) {
     const task = queue.then(async () => {
+      check()
       if (!text && !images.length) throw new Error('文字和图片至少提供一项')
       if (images.length > 9) throw new Error('空间说说最多 9 张图片')
       if (!Object.hasOwn(PRIVACY, privacy)) throw new Error('无效的空间可见范围')
@@ -25,10 +26,12 @@ export function createQzonePublisher({ client, home }) {
         if (err.code !== 'ENOENT') throw err
       }
       if (state.count >= 2) throw new Error('今天的空间发布额度已用完（每天最多两次尝试）')
+      check()
       await mkdir(home, { recursive: true })
       const next = `${file}.tmp`
       await writeFile(next, JSON.stringify({ day: today, count: state.count + 1 }) + '\n', 'utf8')
       await rename(next, file)
+      check()
       try {
         const result = await client.call('send_qzone_msg', {
           content: text, images, ugc_right: PRIVACY[privacy],

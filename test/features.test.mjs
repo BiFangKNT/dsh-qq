@@ -201,7 +201,7 @@ test('空间发布工具仅允许授权账号私聊调用', async t => {
   const record = { scope: 'group', peerId: '10001' }
   registerTools({ get: name => name === 'tools' ? { register: tool => tools.set(tool.name, tool) } : null }, {
     client: { call: () => assert.fail('不得调用网络') }, manager: { find: () => record },
-    config: { ownerIds: ['10001'] }, logger, home,
+    config: { ownerIds: ['10001'], qzoneEnabled: true, replyToPrivate: true }, logger, home,
   })
   const exec = { agent: { session: { id: 's' } } }
   await assert.rejects(tools.get('qq_qzone_send').execute({ text: '正文' }, exec), /授权账号私聊/)

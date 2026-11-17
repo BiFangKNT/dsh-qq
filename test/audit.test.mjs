@@ -41,7 +41,7 @@ test('正文和工具检查配置一致；日志只有定位信息和规则，�
   const logs = [], record = { scope: 'private', peerId: '11001', sessionId: 'test-session', lastMessageId: 42 }
   const config = { accessToken: 'configured-token' }
   const logger = { warn: (...args) => logs.push(args) }
-  for (const source of ['reply', 'qq_send', 'qq_reply', 'qq_send_voice', 'qq_qzone_send']) {
+  for (const source of ['reply', 'qq_send', 'qq_send_voice', 'qq_qzone_send']) {
     assert.equal(checkOutboundText('机密原文 configured-token', { config, logger, record, source }).ok, false)
     assert.equal(checkOutboundText('连接仍用 old-token', { config, logger, record, source, knownSecrets: ['old-token'] }).ok, false)
   }

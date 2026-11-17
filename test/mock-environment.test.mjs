@@ -118,8 +118,61 @@ test('问答和审批走真实插件通道，可从模拟 QQ 回复', async t =>
   assert.equal(agent.results[1].result, 'allowed-once')
 })
 
+test('工具开关通过设置保存，既有会话下次请求刷新且 system 保持锁定，重载后保留', async t => {
+  const env = await setup(t, { autoReply: false })
+  const sendTurn = async text => {
+    const before = [...env.host.agents.values()].reduce((sum, agent) => sum + agent.requests.length, 0)
+    env.emitMessage({ text, steps: [] })
+    await waitFor(() => [...env.host.agents.values()].reduce((sum, agent) => sum + agent.requests.length, 0) > before)
+    await idle(env)
+    return [...env.host.agents.values()][0]
+  }
+  const initial = await sendTurn('第一轮')
+  const system = initial.requests.at(-1).system
+  assert.ok(initial.requests.at(-1).tools.some(tool => tool.name === 'qq_face'))
+  assert.ok(!initial.requests.at(-1).tools.some(tool => ['qq_reply', 'qq_qzone_send', 'qq_meme'].includes(tool.name)))
+  const response = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ patch: { qqInteractionEnabled: false, stickerEnabled: false, qzoneEnabled: true, faceCollectHint: '猫猫梗图' } }) })
+  assert.equal(response.status, 200)
+  const settings = await response.json()
+  assert.equal(settings.systemChanged, false)
+  const updated = await sendTurn('第二轮')
+  assert.equal(updated.id, initial.id)
+  const names = updated.requests.at(-1).tools.map(tool => tool.name)
+  for (const name of ['qq_face', 'qq_poke', 'qq_react', 'qq_like', 'qq_faces', 'qq_mface']) assert.ok(!names.includes(name))
+  assert.ok(names.includes('qq_qzone_send'))
+  assert.ok(names.includes('qq_keep_face'))
+  assert.equal(updated.requests.at(-1).system, system)
+  assert.match(updated.requests.at(-1).context, /猫猫梗图/)
+  assert.doesNotMatch(JSON.stringify(updated.received), /猫猫梗图/)
+  await env.reload()
+  const restored = await sendTurn('重载后')
+  assert.equal(restored.id, initial.id)
+  assert.equal(restored.requests.at(-1).tools.some(tool => tool.name === 'qq_face'), false)
+  assert.equal(restored.requests.at(-1).tools.some(tool => tool.name === 'qq_qzone_send'), true)
+})
+
+test('qq_send 引用当前已存消息，不混入其他群的引用，工具正文不重复发送', async t => {
+  const env = await setup(t, { autoReply: false })
+  env.emitMessage({ scope: 'group', peerId: 70001, atSelf: true, messageId: -17, text: '请引用这条消息', steps: [
+    { type: 'tool', name: 'qq_send', args: { text: '引用回复', message_id: -17 } },
+    { type: 'text', text: '引用回复' },
+  ] })
+  await waitFor(() => [...env.host.agents.values()][0]?.results.length === 1); await idle(env)
+  const agent = [...env.host.agents.values()][0]
+  assert.equal(agent.results[0].result.ok, true)
+  assert.equal(sent(env).length, 1)
+  assert.deepEqual(sent(env)[0].params.message[0], { type: 'reply', data: { id: '-17' } })
+  env.emitMessage({ scope: 'group', peerId: 70001, atSelf: true, text: '不能引用另一群的消息', steps: [
+    { type: 'tool', name: 'qq_send', args: { text: '不应发出', to: 'group:70002', message_id: -17 } },
+  ] })
+  await waitFor(() => agent.received.length === 2); await idle(env)
+  assert.ok(sent(env).every(call => call.params.group_id === 70001))
+  assert.ok(!sent(env).some(call => call.params.message.some(segment => segment.data.text === '不应发出')))
+})
+
 test('空间发布和私聊历史工具走真实实现，NapCat 记录可见范围与日限', async t => {
-  const env = await setup(t)
+  const env = await setup(t, { config: { qzoneEnabled: true } })
   const post = { type: 'tool', name: 'qq_qzone_send', args: { text: '模拟空间说说', images: [`${env.napcat.mediaUrl}/fixture.png`], privacy: 'private' } }
   env.host.queueTurn([post, { type: 'tool', name: 'qq_history', args: {} }])
   env.emitMessage({ text: '测试发布和流水' })

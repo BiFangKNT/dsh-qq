@@ -638,11 +638,21 @@ window.__ModuleLoader__.load({
           textField('privateSleepFrom', '私聊休息开始', { hint: 'HH:MM，留空沿用默认。', mono: true }),
           textField('privateSleepTo', '私聊休息结束', { hint: 'HH:MM，留空沿用默认。', mono: true })),
 
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, 'QQ 工具'),
+          h('div', { 'data-qq-note': '' }, '保存后在下一次主模型请求或工具续调生效，不需要新建会话。工具列表变化可能影响提示缓存；固定 system 仍按原同步规则处理。'),
+          boolField('qqInteractionEnabled', 'QQ 互动', '默认开启：戳一戳、消息表态、名片点赞和 QQ 内置表情。'),
+          boolField('stickerEnabled', '表情包使用', '默认开启：查找、发送已有收藏。关闭不删除收藏，也不影响商城表情自动登记或普通图片收藏。'),
+          textField('faceCollectHint', '普通图片自动收藏规则', { hint: '例如“只收藏猫猫梗图”。留空不自动收藏，但用户明确要求时仍可收藏。商城表情由程序自动登记，无需填写规则。' }),
+          boolField('voiceEnabled', '合成语音', '默认关闭；当前只支持 Windows SAPI。与收到语音后的转文字无关。'),
+          textField('voiceName', '语音声音名称', { hint: 'Windows SAPI 声音名称；留空使用系统默认声音。' }),
+          boolField('qzoneEnabled', '发布空间', '默认关闭；仅授权账号私聊可用。须先确认文案、图片和可见范围，每天最多两次尝试，结果不明时不自动重发。'),
+          textField('memeDb', '旧梗词库路径', { hint: '兼容已有 SQLite 词库；留空读取 DSH_QQ_MEME_DB，文件存在时才提供查询工具。普通文件、目录和资料包的统一导入另行实现。', mono: true })),
+
         /* ── 其它 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '发送与诊断'),
           textField('localApiPort', '独立设置服务端口', { type: 'number', hint: '默认 34569；0 关闭。多实例使用不同端口，修改后重启宿主；连接时在页面顶部选择对应端口。' }),
-          textField('voiceName', '语音声音名称', { hint: 'Windows SAPI 声音名称；留空使用系统默认声音。' }),
           boolField('debug', '输出调试日志', '保存后生效。日志按天写入 <workspaceRoot>/logs/dsh-qq-YYYY-MM-DD.log；未设置 workspaceRoot 时使用进程工作目录。'),
           textField('textChunkLimit', '单条消息最大字数', { hint: '超出按段落/句号切成多条发。', type: 'number' }),
           textField('splitDelayMeanMs', '分条随机间隔均值（毫秒）', { type: 'number', hint: '默认 500。大于 0 时使用随机间隔；设为 0 才使用下方固定间隔。' }),

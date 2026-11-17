@@ -84,7 +84,7 @@ test('本人可查当前聊天；仅授权账号私聊能跨聊天，目标权�
   h.config.ownerIds = ['70001']
   await assert.rejects(h.query({ chat: 'user:10002' }), /授权账号私聊/)
   h.config.groupMode = 'disabled'
-  await assert.rejects(h.query(), /当前获准/)
+  await assert.rejects(h.query(), /当前.*未获准/)
 })
 
 test('命令和未准备消息仍可读原文，不下载媒体或推进准备状态', async t => {

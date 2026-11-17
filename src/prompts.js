@@ -97,8 +97,9 @@ export function buildChatPrompt(config, { isGroup }) {
 }
 
 export function faceStrategyRule(config, faces) {
+  if (config.stickerEnabled === false) return '[表情包使用已关闭；不调用 qq_faces 或 qq_mface。已有收藏保留，普通图片收藏与商城表情登记不受影响。]'
   const total = Number(faces?.total ?? 0)
-  if (!(total > 0)) return '[表情包：收藏为空，不调用 qq_mface；QQ 内置表情可用 qq_face。]'
+  if (!(total > 0)) return '[表情包：收藏为空，不调用 qq_mface。]'
   const names = (Array.isArray(faces?.names) ? faces.names : []).filter(Boolean)
   const gapSec = Math.round(Math.max(0, Number(config?.faceSendGapMs ?? 0)) / 1000)
   const perHour = Math.max(0, Number(config?.faceSendMaxPerHour ?? 0))
@@ -115,8 +116,8 @@ export function faceStrategyRule(config, faces) {
 
 export function faceCollectRule(config) {
   const hint = String(config?.faceCollectHint ?? '').trim()
-  if (!hint) return '[图片收藏：不主动收藏普通图片；qq_keep_face 仍可用于已收到的商城表情。]'
-  return `[图片收藏：仅对符合以下配置的图片使用 qq_keep_face：${JSON.stringify(hint)}。先查看图片，按实际画面或文字命名。不必每次汇报收藏决定。]`
+  if (!hint) return '[普通图片收藏：未设置自动收藏规则，不自动收藏。仅用户明确要求时调用 qq_keep_face，mode=requested。商城表情由程序自动登记，不调用收藏工具。]'
+  return `[普通图片收藏：用户明确要求时用 qq_keep_face（mode=requested）；自动收藏用 mode=automatic，须符合规则：${JSON.stringify(hint)}。先查看图片，按实际内容命名。商城表情由程序自动登记，不调用收藏工具。]`
 }
 
 export function proactiveRule(config, { label = '', silentMin = 0, isGroup = false, now = new Date() } = {}) {

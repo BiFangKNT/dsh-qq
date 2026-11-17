@@ -9,6 +9,7 @@ import { installChatSystem, createSystemPromptStore } from '../src/system-prompt
 import { clearRuntimeContext } from '../src/runtime-context.js'
 import { runtimeContextName } from '../src/session-view.js'
 import { assertHostAccepted } from '../src/host-compatibility.js'
+import { registerTools } from '../src/tools.js'
 import { SILENT_HINT } from '../src/prompts.js'
 import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { createContextBudget } from '../src/context-budget.js'
@@ -324,4 +325,69 @@ test('请求中断清理；首次接入保留新版 system 消息，强制同步
   agent.cancel({ kind: 'user' })
   await agent.whenIdle()
   assert.doesNotMatch(text(agent.session.deriveMessages()), /STATE-/)
+})
+
+
+test('真实 rc.2 工具选择：QQ 分组、关闭后的旧调用和普通 Agent 隔离', async t => {
+  const h = await harness(t)
+  Object.assign(h.config, { replyToPrivate: true, privateMode: 'open', groupMode: 'open', ownerIds: ['11001'] })
+  const { agent } = await h.attach()
+  const record = { selfId: '10001', scope: 'private', peerId: '11001', agent }
+  const calls = []
+  const manager = { selfId: '10001', find: id => id === agent.session.id ? record : null }
+  registerTools(h.ctx, { config: h.config, manager, home: tmpdir(), platform: 'linux',
+    client: { async call(...args) { calls.push(args); return {} } }, logger: { info() {}, warn() {} } })
+  await h.send(agent)
+  const names = () => (h.requests.at(-1).tools ?? []).map(tool => tool.name)
+  assert.ok(names().includes('qq_face'))
+  assert.ok(names().includes('qq_send'))
+  assert.ok(names().includes('qq_keep_face'))
+  for (const name of ['qq_reply', 'qq_meme', 'qq_memo', 'qq_send_voice', 'qq_qzone_send']) assert.ok(!names().includes(name), name)
+  const selection = await h.ctx.tools.resolve({ agent, modelSelection: agent.model.current(), signal: new AbortController().signal })
+  const stale = selection.view(agent).get('qq_face')
+  h.config.qqInteractionEnabled = false
+  h.config.stickerEnabled = false
+  h.config.voiceEnabled = true
+  await assert.rejects(stale.execute({ id: 1 }, { agent }), /不可用/)
+  assert.equal(calls.length, 0)
+  selection.dispose()
+  await h.send(agent)
+  for (const name of ['qq_face', 'qq_poke', 'qq_react', 'qq_like', 'qq_mface', 'qq_faces', 'qq_send_voice']) assert.ok(!names().includes(name), name)
+  h.config.qqInteractionEnabled = true
+  h.config.qzoneEnabled = true
+  await h.send(agent)
+  assert.ok(names().includes('qq_face'))
+  assert.ok(names().includes('qq_qzone_send'))
+  agent.ctx.get('tools').restrict({ deny: ['qq_face'] })
+  await h.send(agent)
+  assert.ok(!names().includes('qq_face'), '尊重预设已有工具限制')
+  assert.ok(names().includes('qq_poke'))
+  const normal = await h.attach('ordinary-agent', false, false)
+  await h.send(normal.agent)
+  assert.ok(names().every(name => !name.startsWith('qq_')), '普通 Agent 不提供 QQ 工具')
+})
+
+test('真实 rc.2 工具续调重新选择工具，但不改写已锁定的 system', async t => {
+  const h = await harness(t, { respond: (_options, requests) => requests.length === 1
+    ? toolResponse.map(frame => {
+      if (frame.type === 'tool-call-delta') return { ...frame, name: 'qq_face', argumentsDelta: '{"id":1}' }
+      if (frame.type === 'block-end') return { ...frame, block: { ...frame.block, name: 'qq_face', arguments: '{"id":1}' } }
+      return frame
+    }) : textResponse('ok') })
+  Object.assign(h.config, { replyToPrivate: true, privateMode: 'open', ownerIds: [] })
+  const { agent } = await h.attach()
+  const record = { selfId: '10001', scope: 'private', peerId: '11001' }
+  let calls = 0
+  registerTools(h.ctx, { config: h.config, manager: { selfId: '10001', find: id => id === agent.session.id ? record : null },
+    home: tmpdir(), logger: { info() {}, warn() {} }, client: { async call() {
+      calls++; h.config.qqInteractionEnabled = false
+      return { message_id: 71 }
+    } } })
+  await h.send(agent)
+  assert.equal(calls, 1)
+  assert.equal(h.requests.length, 2)
+  assert.ok(h.requests[0].tools.some(tool => tool.name === 'qq_face'))
+  assert.ok(!h.requests[1].tools.some(tool => tool.name === 'qq_face'))
+  const systems = request => request.messages.filter(message => message.role === 'system')
+  assert.deepEqual(systems(h.requests[0]), systems(h.requests[1]))
 })

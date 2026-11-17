@@ -12,6 +12,9 @@ import { createMockAttachments } from './mock-attachments.mjs'
 export function createMockPromptScope(base, cwd, scopedTools = new Map()) {
   const promptCtx = new Context()
   const prompt = new SystemPrompt(promptCtx, {})
+  prompt.tools(({ agent }) => ({ schemas: [...(agent?.activeTools?.values() ?? [])].map(tool => ({
+    name: tool.name, description: tool.description ?? '', parameters: tool.parameters ?? {},
+  })) }))
   const scope = { ...base, cwd,
     get: name => name === 'systemPrompt' ? prompt : name === 'tools'
       ? { register: tool => scopedTools.set(tool.name, tool) } : base.get?.(name),
@@ -34,7 +37,7 @@ export async function waitFor(predicate, { timeout = 5000, what = '条件' } = {
 
 export function createMockDsh({ home, webServer, autoReply = true, verbose = false, llm } = {}) {
   if (!home) throw new Error('mock DSH 必须指定隔离的 home')
-  const listeners = new Map(), tools = new Map(), live = new Map(), plans = [], effects = [], logs = []
+  const listeners = new Map(), tools = new Map(), conditions = new Map(), live = new Map(), plans = [], effects = [], logs = []
   let closed = false, callId = 0
   mkdirSync(join(home, 'sessions'), { recursive: true })
   const sessionFile = id => join(home, 'sessions', `${encodeURIComponent(id)}.json`)
@@ -59,7 +62,10 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
           async dispose() {} }
       },
     },
-    tools: { register(tool) { if (tools.has(tool.name)) throw new Error(`工具重复注册：${tool.name}`); tools.set(tool.name, tool) } },
+    tools: { register(tool, options = {}) {
+      if (tools.has(tool.name)) throw new Error(`工具重复注册：${tool.name}`)
+      tools.set(tool.name, tool); conditions.set(tool.name, options.when)
+    } },
     dshHomePath: name => join(home, name), approval: {}, webServer,
     agentPresets: {
       defaultId: 'mock',
@@ -131,7 +137,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     return raw
   }
   async function invoke(agent, name, args) {
-    const tool = agent.scopedTools.get(name) ?? tools.get(name)
+    const tool = agent.activeTools?.get(name)
     if (!tool) throw new Error(`工具未注册：${name}`)
     const id = `mock-call-${++callId}`
     await event(agent, 'tool/call', { name, callId: id, arguments: JSON.stringify(args) })
@@ -182,6 +188,12 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
     finally { await event(agent, 'turn/end', { reason }); await ctx.emit('agent/status', { agent, status: 'idle' }) }
   }
   async function request(agent, messages = []) {
+    agent.activeTools = new Map()
+    for (const [name, tool] of tools) {
+      const when = conditions.get(name)
+      if (!when || await when({ agent, signal: new AbortController().signal, modelSelection: agent.model.current() })) agent.activeTools.set(name, tool)
+    }
+    for (const [name, tool] of agent.scopedTools) agent.activeTools.set(name, tool)
     const assembly = await agent.ctx.get('systemPrompt').assemble(assembleContextFor(agent))
     await ctx.waterfall('agent/pre-step', { agent, messages }, () => ({ kind: 'enter', messages }))
     const prompt = agent.ctx.get('systemPrompt')
@@ -293,7 +305,7 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
       closed = true
       await ctx.emit('dispose')
       for (const cleanup of effects.reverse()) await cleanup()
-      listeners.clear(); tools.clear(); live.clear()
+      listeners.clear(); tools.clear(); conditions.clear(); live.clear()
     },
   }
 }

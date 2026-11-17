@@ -269,7 +269,7 @@ export function createWake({ config, manager, logger, bridge, staggerMs, automat
         if (st.blocked) continue
         if (st.pending) continue
         if (record.busy > 0) continue
-        // record.lastActive 是队列层的活动时间：工具直接发消息（qq_reply 之类）也走任务，
+        // record.lastActive 是队列层的活动时间：工具直接发消息（如 qq_send）也走任务，
         // 任务结束就会刷新它，所以拿它兜底比只靠 noteOutbound 更准。
         const lastAt = Math.max(st.lastAt, Number(record.lastActive) || 0)
         const idleMs = now.getTime() - lastAt

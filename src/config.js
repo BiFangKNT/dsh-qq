@@ -206,11 +206,16 @@ export const ConfigSchema = Schema.object({
     .default(12 * 3_600_000)
     .description('私聊会话闲置多久回收出内存，单位毫秒，默认 12 小时；群聊仍用 sessionIdleTimeout'),
 
+  // ── QQ 工具 ──
+  qqInteractionEnabled: Schema.boolean().default(true).description('提供戳一戳、消息表态、名片点赞和 QQ 内置表情工具'),
+  stickerEnabled: Schema.boolean().default(true).description('提供查找、发送已有表情收藏的工具；不控制普通图片收藏或商城表情自动登记'),
+  voiceEnabled: Schema.boolean().default(false).description('提供合成语音工具；当前仅 Windows SAPI 可用，不影响收到语音后的转文字'),
+  qzoneEnabled: Schema.boolean().default(false).description('提供发布空间工具；仅授权账号私聊可用，仍须先确认文案、图片和可见范围'),
   // ── 图片 ──
   faceCollectHint: Schema.string()
     .default('')
     .description(
-      '什么样的图值得收进表情包收藏（qq_keep_face），例如「猫猫梗图」。留空表示不收藏任何图片，只让 Agent 看图说话',
+      '普通图片自动收藏规则，例如「猫猫梗图」。留空不自动收藏，用户明确要求仍可收藏；不影响商城表情自动登记',
     ),
   faceSendGapMs: Schema.number()
     .default(90000)
@@ -230,7 +235,7 @@ export const ConfigSchema = Schema.object({
     .default('')
     .description(
       '查梗用的词库（cnmeme.wiki 的 sqlite 快照）放在哪；留空则读环境变量 DSH_QQ_MEME_DB。' +
-        '两个都空时 qq_meme 会说明「没配词库」，不会瞎猜出处',
+        '未配置或文件不存在时不向模型提供 qq_meme；统一资料导入尚未实现',
     ),
 
   // ── 语音转文字（离线 vosk） ──

@@ -52,17 +52,17 @@
 | 入站图片 | 下载到本地，给主模型提供路径，按需调用宿主 `read_image`。成员图片过滤约束主会话；分类器独立接收图片 | 页面有过滤项；依赖网络、附件服务和模型能力；历史图片回取保留现有例外 | [inbound](../src/inbound.js)、[image-filter](../src/image-filter.js) |
 | 图片回取、引用与历史 | `qq_images` 回取图片；支持引用和合并转发展开；群历史工具读取落盘流水 | 工具；工具文本和附件增加后续请求量 | [tools](../src/tools.js)、[segment](../src/onebot/segment.js) |
 | 入站语音识别 | 默认尝试本地 ASR；需要 Python、Vosk 模型等环境，不是在线转写服务 | 无页面入口；部分 ASR 项接受文件覆盖，其他仅 profile | [inbound](../src/inbound.js)、[asr.py](../tools/asr.py) |
-| QQ 互动与发送 | 戳一戳、表态、点赞、图片、内置与商城表情、文件、撤回、引用、跨目标发送 | 注册为模型工具，不是逐项页面开关；需核对具体协议端支持 | [tools](../src/tools.js) |
+| QQ 互动与发送 | 戳一戳、表态、点赞、图片、内置与商城表情、文件、撤回、引用、跨目标发送 | 按聊天及分组开关提供，发送统一为 qq_send；需核对具体协议端支持 | [tools](../src/tools.js) |
 | 表情收藏 | 保存文件副本和收藏清单；按配置限制使用频率 | 部分频率项仅文件覆盖；收藏目录仅 profile | [faces](../src/faces.js) |
-| 语音发送 | Windows SAPI 合成后发送；受操作系统和可用声音限制 | 页面仅配声音名，模型使用 `qq_send_voice` | [voice](../src/voice.js)、[tools-extra](../src/tools-extra.js) |
+| 语音发送 | Windows SAPI 合成后发送；受操作系统和可用声音限制 | 页面提供合成语音开关（默认关闭）和声音名，Windows 才提供 qq_send_voice | [voice](../src/voice.js)、[tools-extra](../src/tools-extra.js) |
 | 聊天记录查询（已统一） | 默认查询当前获准聊天的收发记录；跨聊天仅授权账号私聊可用，目标也须获准；不再读取好感文件授权 | `qq_history`；旧查询工具退出，旧流水一次性导入 SQLite | [message-tools](../src/message-tools.js)、[history-import](../src/history-import.js) |
-| 空间发布 | 仅授权账号私聊；每日最多两次尝试，未知结果不隐式重发。工具说明要求先确认，发布函数没有独立确认票据校验 | `qq_qzone_send`，无单独页面开关 | [tools-extra](../src/tools-extra.js)、[qzone](../src/qzone.js) |
-| 梗查询 | 查询本地梗数据库；未配库时工具仍存在，返回未配置 | `memeDb` 在 profile，或环境变量 `DSH_QQ_MEME_DB` | [meme](../src/meme.js)、[tools](../src/tools.js) |
+| 空间发布 | 仅授权账号私聊；每日最多两次尝试，未知结果不隐式重发。工具说明要求先确认，发布函数没有独立确认票据校验 | qq_qzone_send，页面开关默认关闭 | [tools-extra](../src/tools-extra.js)、[qzone](../src/qzone.js) |
+| 梗查询 | 兼容本地梗数据库；配置路径存在且为普通文件时才提供工具 | memeDb 在设置页和 profile，或环境变量 DSH_QQ_MEME_DB | [meme](../src/meme.js)、[tools](../src/tools.js) |
 | 同人角色资料 | `aiGirls` 默认 true，将特定角色图鉴放入提示词；不是从聊天自动学来的知识 | 只在 profile 配置；增加提示词内容 | [gijinka](../src/gijinka.js)、[prompts](../src/prompts.js) |
 | 聊天流水 | 默认将收发文本按日期落盘；不等于宿主会话历史，也不是统一记忆 | `chatLog` 只在 profile | [chatlog](../src/chatlog.js) |
 | 群词候选扫描 | 启动时及之后每 20 分钟扫描近期群流水，收集机器人表示不理解的内容；当前运行入口写统一记忆候选，本身不调用模型 | 无独立开关或页面；候选不是已确认词义 | `src/learning.js`（已移除，见 Git 历史）、[memory](../src/memory.js) |
 
-2026-11-13 按当前代码复核，工具定义共 19 项，其中 `qq_memo` 只在配置共享目录后注册。不能把“注册了工具”当成“所有部署可用”：预设是否挂载、协议实现、平台和外部文件都影响实际可用性。完整清单、已确认设计及后续顺序见[QQ 工具整理计划](tool-cleanup-plan.md)；2026-11-14 已完成第 1、2 步，删除人设中的工具名检查，修复跨聊天发送权限、目标记账及工具说明；第 3、4 步待实施。
+2026-11-17 工具整理第 1～3 步已完成，当前共 18 个工具，qq_memo 只在配置共享目录后注册。qq_reply 已并入 qq_send；所有 QQ 工具使用宿主每步选择接口，按聊天、开关、平台和资料路径决定是否提供，执行时也复查。普通图片自动收藏规则已补设置入口，留空只禁止自动收藏，商城表情自动登记保持不变。完整清单见[QQ 工具整理计划](tool-cleanup-plan.md)；第 4 步统一资料检索尚未实施。
 
 ### 没有新消息也可能运行的功能
 
@@ -115,7 +115,7 @@
 | --- | --- |
 | 默认开启，却没有 QQ 页面入口 | `aiGirls`、`asrEnabled`、`chatLog`、`auditOutbound` 等；功能性质和依赖各不相同 |
 | 整组能力只能 profile 配 | `reading*`；`doorDir`；`memoryRoot`；模型路由 `provider/model` 等 |
-| 接受文件覆盖，却没有直接页面字段 | `reconnectMs`、`imageCacheDir`、`peerChatMaxTurns`、`showToolResults`、`streamReply`、`streamMaxChunks`、`faceCollectHint`、`faceSendGapMs`、`faceSendMaxPerHour`、`goodnightWords`、`asrEnabled`、`asrPython`、`asrModel` |
+| 接受文件覆盖，却没有直接页面字段 | `reconnectMs`、`imageCacheDir`、`peerChatMaxTurns`、`showToolResults`、`streamReply`、`streamMaxChunks`、`faceSendGapMs`、`faceSendMaxPerHour`、`goodnightWords`、`asrEnabled`、`asrPython`、`asrModel` |
 | 有页面字段，但影响实际行为的相关项不可见 | 页面改 `splitDelayMs`，默认 `splitDelayMeanMs=500` 却优先走随机间隔；页面改这个固定间隔通常没有效果 |
 | 源码使用，却没有 schema 定义 | `bridgeReceipt`、`contextMemoryKeep`；不能照正常设置路径发现它们 |
 | 有意只用于迁移 | `ownerLabel`、`groupFree` 等，应与缺失入口分开，不应重新显示成可用开关 |

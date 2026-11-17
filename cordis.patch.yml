@@ -62,6 +62,12 @@
         showToolResults: false
         splitDelayMs: 400
 
+        # ── QQ 工具 ──
+        qqInteractionEnabled: true
+        stickerEnabled: true
+        voiceEnabled: false
+        qzoneEnabled: false
+
         # ── 其他 ──
         proactiveEnabled: false
         sessionIdleTimeout: 1800000

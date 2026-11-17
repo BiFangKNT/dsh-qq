@@ -6,6 +6,19 @@ import { tmpdir } from 'node:os'
 import { Readable } from 'node:stream'
 import { applyOverrides, installSettingsApi, loadOverrides, resolvePersonaFile } from '../src/settings.js'
 
+test('工具分组和资料路径可保存、校验并清除覆盖，不改变原配置默认值', () => {
+  const config = { qqInteractionEnabled: true, stickerEnabled: true, voiceEnabled: false, qzoneEnabled: false, faceCollectHint: '', memeDb: '' }
+  const original = structuredClone(config)
+  applyOverrides(config, { qqInteractionEnabled: false, stickerEnabled: false, voiceEnabled: true, qzoneEnabled: true,
+    faceCollectHint: '猫猫梗图', memeDb: 'fixtures/memes.sqlite' })
+  assert.equal(config.voiceEnabled, true)
+  assert.equal(config.qqInteractionEnabled, false)
+  assert.equal(config.faceCollectHint, '猫猫梗图')
+  assert.equal(config.memeDb, 'fixtures/memes.sqlite')
+  applyOverrides(config, {})
+  assert.deepEqual(config, original)
+})
+
 test('清除覆盖恢复基础值，数组和对象不污染基础快照，原本不存在的项被删除', () => {
   const config = { debug: false, groupAllow: ['11001'], groupMentionOverrides: { '22001': false } }
   const identity = config

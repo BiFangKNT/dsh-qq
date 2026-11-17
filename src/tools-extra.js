@@ -8,7 +8,7 @@ import { createQzonePublisher } from './qzone.js'
 import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
 
 /** 新工具只负责参数与会话适配，读记录、合成和发布各有独立边界。 */
-export function registerExtraTools(tools, { client, manager, config, home, needRecord, assertText, noteToolSent, synthesize = synthesizeVoice }) {
+export function registerExtraTools(tools, { client, manager, config, home, needRecord, assertText, noteToolSent, synthesize = synthesizeVoice, assertAvailable }) {
   const publisher = createQzonePublisher({ client, home })
   tools.register({
     name: 'qq_send_voice',
@@ -29,6 +29,7 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
       await assertText(text, record, 'qq_send_voice')
       assertSendAccess(manager, config, record, target)
       const audio = await synthesize(text, { voiceName: config.voiceName })
+      assertAvailable('qq_send_voice', record)
       assertSendAccess(manager, config, record, target)
       const result = await client.call(target.scope === 'group' ? 'send_group_msg' : 'send_private_msg', {
         ...(target.scope === 'group' ? { group_id: Number(target.peerId) } : { user_id: Number(target.peerId) }),
@@ -76,7 +77,8 @@ export function registerExtraTools(tools, { client, manager, config, home, needR
           images.push(`base64://${(await readFile(path)).toString('base64')}`)
         }
       }
-      return publisher({ text, images, privacy: args.privacy })
+      const check = () => assertAvailable('qq_qzone_send', record)
+      return publisher({ text, images, privacy: args.privacy, check })
     },
   })
 }

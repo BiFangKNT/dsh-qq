@@ -93,6 +93,11 @@ export const OVERRIDABLE = [
   'faceCollectHint',
   'faceSendGapMs',
   'faceSendMaxPerHour',
+  'qqInteractionEnabled',
+  'stickerEnabled',
+  'voiceEnabled',
+  'qzoneEnabled',
+  'memeDb',
   // 主动说话
   'proactiveEnabled',
   'proactiveSilentMs',
@@ -229,6 +234,12 @@ export function sanitizeOverrides(input, logger) {
 }
 
 function validateOverrides(patch) {
+  for (const key of ['qqInteractionEnabled', 'stickerEnabled', 'voiceEnabled', 'qzoneEnabled']) {
+    if (patch[key] != null && typeof patch[key] !== 'boolean') throw new Error(`${key} 必须为布尔值`)
+  }
+  for (const key of ['faceCollectHint', 'memeDb']) {
+    if (patch[key] != null && typeof patch[key] !== 'string') throw new Error(`${key} 必须为字符串`)
+  }
   if (patch.memberLabels != null && (typeof patch.memberLabels !== 'object' || Array.isArray(patch.memberLabels) ||
     Object.entries(patch.memberLabels).some(([id, label]) => !/^\d+$/.test(id) || typeof label !== 'string' || label.length > 80 || /[\r\n]/.test(label)))) {
     throw new Error('成员称呼必须是 QQ 号到单行称呼的对象，称呼最多 80 字；用空对象清空')

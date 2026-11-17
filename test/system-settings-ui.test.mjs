@@ -141,6 +141,26 @@ test('设置页提供 Agent 工具预设，保存 preset 并说明新会话生�
   assert.deepEqual(h.calls.find(call => call.url.endsWith('/settings')).body, { patch: { preset: 'images' } })
 })
 
+test('设置页提供工具分组开关和普通图片收藏规则，保存配置并说明生效时机', async () => {
+  const h = await panel()
+  for (const [label, key] of [['QQ 互动', 'qqInteractionEnabled'], ['表情包使用', 'stickerEnabled'], ['合成语音', 'voiceEnabled'], ['发布空间', 'qzoneEnabled']]) {
+    const tree = h.render()
+    const at = tree.findIndex(element => element.children.includes(label))
+    assert.ok(at >= 0, label)
+    const input = tree.slice(at).find(element => typeof element.props.onToggle === 'function')
+    assert.ok(input, label)
+    await input.props.onToggle(true)
+    assert.deepEqual(h.calls.findLast(call => call.url.endsWith('/settings')).body, { patch: { [key]: true } })
+  }
+  const tree = h.render(), at = tree.findIndex(element => element.children.includes('普通图片自动收藏规则'))
+  const input = tree.slice(at).find(element => element.type === 'input')
+  input.props.onBlur({ target: { value: '猫猫梗图' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls.findLast(call => call.url.endsWith('/settings')).body, { patch: { faceCollectHint: '猫猫梗图' } })
+  assert.match(JSON.stringify(tree), /下一次主模型请求或工具续调生效/)
+  assert.match(JSON.stringify(tree), /不自动收藏，但用户明确要求时仍可收藏/)
+})
+
 test('设置页可保存多个触发词并清空', async () => {
   const h = await panel()
   h.state[2].groupTriggerWords = ['小助手']

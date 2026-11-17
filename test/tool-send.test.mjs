@@ -1,30 +1,33 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import fs, { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registerTools } from '../src/tools.js'
+import { rememberFaces, listFaces } from '../src/faces.js'
+import { faceCollectRule } from '../src/prompts.js'
 
 const exec = { agent: { session: { id: 'main' } } }
-function fixture(t, { scope = 'private', extra = {} } = {}) {
+function fixture(t, { scope = 'private', extra = {}, platform = 'win32' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'qq-tool-send-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   const config = { cwd: root, replyToPrivate: true, privateMode: 'open', groupMode: 'open',
-    ownerIds: ['10001'], ...extra }
+    ownerIds: ['10001'], voiceEnabled: true, ...extra }
   const source = { selfId: '90001', scope, peerId: '10001', sessionId: 'main', lastSentMessageId: 11 }
   const group = { selfId: '90001', scope: 'group', peerId: '70001', sessionId: 'group', lastSentMessageId: 22 }
   const privateChat = { selfId: '90001', scope: 'private', peerId: '10002', sessionId: 'private', lastSentMessageId: 33 }
-  const records = [source, group, privateChat], tools = new Map(), calls = [], notes = [], memories = [], activity = [], proactive = [], synthesis = []
+  const records = [source, group, privateChat], tools = new Map(), conditions = new Map(), calls = [], notes = [], memories = [], activity = [], proactive = [], synthesis = []
   const manager = { selfId: '90001', find: id => records.find(record => record.sessionId === id),
     findByPeer: (kind, peerId) => records.find(record => record.scope === kind && record.peerId === String(peerId)),
     memory: { noteSent: (...args) => memories.push(args) } }
   const h = { config, source, group, privateChat, manager, tools, calls, notes, memories, activity, proactive, synthesis,
-    response: { message_id: 71 }, beforeReply: null, beforeSynthesis: null }
-  registerTools({ get: name => name === 'tools' ? { register: tool => tools.set(tool.name, tool) } : null }, {
-    config, manager, home: root, logger: { info() {}, warn() {}, debug() {} },
+    warnings: [], response: { message_id: 71 }, beforeReply: null, beforeSynthesis: null }
+  registerTools({ get: name => name === 'tools' ? { register: (tool, options) => { tools.set(tool.name, tool); conditions.set(tool.name, options.when) } } : null }, {
+    config, manager, home: root, platform, logger: { info() {}, warn: message => h.warnings.push(message), debug() {} },
     client: { async call(action, params) {
       calls.push({ action, params })
       await h.beforeReply?.()
+      if (action === 'get_msg') return h.quoted ?? {}
       if (h.response instanceof Error) throw h.response
       return h.response
     } },
@@ -34,6 +37,7 @@ function fixture(t, { scope = 'private', extra = {} } = {}) {
     synthesize: async text => { synthesis.push(text); await h.beforeSynthesis?.(); return Buffer.from('mock audio') },
   })
   h.send = (name, to) => tools.get(name).execute({ text: '测试发送内容', ...(to === undefined ? {} : { to }) }, exec)
+  h.visible = (name, context = exec) => conditions.get(name)({ agent: context.agent })
   return h
 }
 
@@ -179,6 +183,167 @@ test('语音合成期间撤销授权或关闭目标，发送前再次检查，�
     assert.equal(h.calls.length, 0)
     assert.equal(h.notes.length, 0)
   }
+})
+
+test('语音合成中关闭功能，发送前拒绝，不记成功', async t => {
+  const h = fixture(t)
+  h.beforeSynthesis = () => { h.config.voiceEnabled = false }
+  await assert.rejects(h.send('qq_send_voice'), /不可用/)
+  assert.equal(h.synthesis.length, 1)
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.notes.length, 0)
+})
+
+test('文字引用已并入 qq_send：按目标核对引用、普通发送不默认引用', async t => {
+  const h = fixture(t)
+  assert.equal(h.tools.has('qq_reply'), false)
+  for (const [to, quoted] of [
+    ['group:70001', { message_id: -19, message_type: 'group', group_id: 70001 }],
+    ['user:10002', { message_id: -19, message_type: 'private', sender: { user_id: 10002 } }],
+  ]) {
+    h.quoted = quoted
+    const result = await h.tools.get('qq_send').execute({ text: '引用回复', to, message_id: -19 }, exec)
+    assert.equal(result.ok, true)
+    assert.deepEqual(h.calls.at(-1).params.message, [
+      { type: 'reply', data: { id: '-19' } }, { type: 'text', data: { text: '引用回复' } },
+    ])
+  }
+  h.source.lastMessageId = 999
+  await h.send('qq_send')
+  assert.equal(h.calls.at(-1).params.message.some(segment => segment.type === 'reply'), false)
+})
+
+test('引用跨聊天消息、缺少归属或无效 ID 时，不发送也不记账', async t => {
+  const h = fixture(t)
+  for (const [to, quoted] of [
+    ['group:70001', { group_id: 70002 }], ['group:70001', {}],
+    ['user:10002', { message_type: 'private', sender: { user_id: 10001 } }],
+    ['user:10002', { message_type: 'group', group_id: 70001, user_id: 10002 }],
+  ]) {
+    h.quoted = quoted
+    await assert.rejects(h.tools.get('qq_send').execute({ text: '不能引用', to, message_id: 7 }, exec), /归属|不属于/)
+  }
+  await assert.rejects(h.tools.get('qq_send').execute({ text: '无效引用', message_id: null }, exec), /有效整数/)
+  assert.ok(h.calls.every(call => call.action === 'get_msg'))
+  assert.equal(h.notes.length, 0)
+})
+
+test('核实引用期间撤销授权，不能继续跨聊天发送', async t => {
+  const h = fixture(t)
+  h.quoted = { group_id: 70001 }
+  h.beforeReply = () => { h.config.ownerIds = [] }
+  await assert.rejects(h.tools.get('qq_send').execute({ text: '不能发送', to: 'group:70001', message_id: 7 }, exec), /授权账号私聊/)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls[0].action, 'get_msg')
+})
+
+test('分组默认值、平台和资料路径同时用于提供条件与执行检查', async t => {
+  const h = fixture(t, { extra: { voiceEnabled: false } })
+  for (const name of ['qq_face', 'qq_poke', 'qq_react', 'qq_like', 'qq_faces', 'qq_mface', 'qq_keep_face', 'qq_send']) assert.equal(h.visible(name), true, name)
+  for (const name of ['qq_send_voice', 'qq_qzone_send', 'qq_meme']) assert.equal(h.visible(name), false, name)
+  h.config.voiceEnabled = true
+  assert.equal(h.visible('qq_send_voice'), true)
+  const other = fixture(t, { platform: 'linux' })
+  assert.equal(other.visible('qq_send_voice'), false)
+  await assert.rejects(other.send('qq_send_voice'), /不可用/)
+  assert.equal(other.synthesis.length, 0)
+  h.config.qzoneEnabled = true
+  assert.equal(h.visible('qq_qzone_send'), true)
+  assert.equal(h.visible('qq_qzone_send', { agent: { session: { id: 'group' } } }), false)
+  h.config.qqInteractionEnabled = false
+  h.config.stickerEnabled = false
+  for (const name of ['qq_face', 'qq_poke', 'qq_react', 'qq_like', 'qq_faces', 'qq_mface']) {
+    assert.equal(h.visible(name), false)
+    await assert.rejects(h.tools.get(name).execute({}, exec), /不可用/)
+  }
+  assert.equal(h.visible('qq_keep_face'), true)
+  assert.equal(h.visible('qq_send'), true)
+  const db = join(h.config.cwd, 'word.sqlite')
+  h.config.memeDb = db
+  assert.equal(h.visible('qq_meme'), false)
+  writeFileSync(db, '')
+  assert.equal(h.visible('qq_meme'), true)
+  rmSync(db)
+  assert.equal(h.visible('qq_meme'), false)
+  await assert.rejects(h.tools.get('qq_meme').execute({ word: '测试' }, exec), /不可用/)
+  assert.ok([...h.tools.keys()].every(name => !h.visible(name, { agent: { session: { id: 'ordinary' } } })))
+  assert.equal(h.calls.length, 0)
+})
+
+test('词库访问错误只停用查梗工具，重复错误不刷日志，恢复后重新提供', async t => {
+  const h = fixture(t)
+  const db = join(h.config.cwd, 'word.sqlite')
+  writeFileSync(db, '')
+  h.config.memeDb = db
+  const originalStat = fs.statSync
+  let failure
+  t.mock.method(fs, 'statSync', (path, ...args) => {
+    if (path === db && failure) throw failure
+    return originalStat(path, ...args)
+  })
+  assert.equal(h.visible('qq_meme'), true)
+  for (const code of ['EACCES', 'EPERM', 'EIO']) {
+    failure = Object.assign(new Error(`模拟词库访问失败 ${code}`), { code })
+    const warningCount = h.warnings.length
+    // 宿主每步会遍历所有 when；不能因可选词库中断整个选择过程。
+    for (const name of h.tools.keys()) h.visible(name)
+    assert.equal(h.visible('qq_meme'), false)
+    await assert.rejects(h.tools.get('qq_meme').execute({ word: '测试' }, exec), /不可用/)
+    assert.equal(h.warnings.length, warningCount + 1)
+    assert.match(h.warnings.at(-1), new RegExp(code))
+    assert.equal((await h.send('qq_send')).ok, true)
+  }
+  failure = undefined
+  assert.equal(h.visible('qq_meme'), true)
+  failure = Object.assign(new Error('模拟词库访问失败 EACCES'), { code: 'EACCES' })
+  assert.equal(h.visible('qq_meme'), false)
+  assert.equal(h.warnings.length, 4, '恢复后再次故障应重新记录')
+})
+
+test('空规则允许明确收藏，阻止自动收藏；关闭表情使用不阻止商城登记或普通收藏', async t => {
+  const h = fixture(t, { extra: { stickerEnabled: false } })
+  const path = join(h.config.cwd, 'source.png')
+  writeFileSync(path, 'mock image')
+  const collect = args => h.tools.get('qq_keep_face').execute({ path, ...args }, exec)
+  await assert.rejects(collect({ mode: 'automatic' }), /未设置/)
+  await assert.rejects(collect({}), /收藏来源/)
+  const result = await collect({ mode: 'requested', summary: '明确收藏' })
+  assert.equal(result.ok, true)
+  const image = listFaces(h.config).find(item => item.kind === 'image')
+  assert.ok(image)
+  rmSync(path)
+  assert.equal(existsSync(image.path), true, '收藏保存独立副本，不依赖缓存原文件')
+  assert.equal(readFileSync(image.path, 'utf8'), 'mock image')
+  const mface = [{ emojiId: '100', packageId: '200', summary: '商城表情' }]
+  assert.equal(rememberFaces(h.config, mface), 1)
+  assert.equal(rememberFaces(h.config, mface), 0)
+  writeFileSync(path, 'another mock image')
+  h.config.faceCollectHint = '猫猫梗图'
+  assert.equal((await collect({ mode: 'automatic', summary: '猫猫' })).ok, true)
+  assert.match(faceCollectRule(h.config), /猫猫梗图/)
+  h.config.faceCollectHint = ''
+  assert.match(faceCollectRule(h.config), /不自动收藏/)
+  await assert.rejects(collect({ mode: 'automatic' }), /未设置/)
+  assert.equal(h.calls.length, 0, '收藏与登记不触发外发')
+})
+
+test('表情直发等待期间关闭使用，不再进入 CDN 发送路径', async t => {
+  const h = fixture(t)
+  h.response = new Error('模拟协议拒绝')
+  h.beforeReply = () => { h.config.stickerEnabled = false }
+  await assert.rejects(h.tools.get('qq_mface').execute({ emoji_id: '100', emoji_package_id: '200' }, exec), /不可用/)
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.calls[0].params.message[0].type, 'mface')
+  assert.equal(h.notes.length, 0)
+})
+
+test('空间发布排队期间关闭开关，不发布也不预留次数', async t => {
+  const h = fixture(t, { extra: { qzoneEnabled: true } })
+  const pending = h.tools.get('qq_qzone_send').execute({ text: '测试文案' }, exec)
+  h.config.qzoneEnabled = false
+  await assert.rejects(pending, /不可用/)
+  assert.equal(h.calls.length, 0)
+  assert.equal(existsSync(join(h.config.cwd, 'qzone-state.json')), false)
 })
 
 test('工具说明如实描述词库来源和语音平台限制，不声称内置固定数量的梗', t => {

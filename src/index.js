@@ -352,7 +352,7 @@ function startRuntime({ ctx, config, logger, agents, clientRef }) {
   const lastSentAt = new Map() // 群聊里上一条发出去的毫秒时间，用来拉开间隔
 
   /**
-   * 自己发出去的话进历史 + 落聊天流水。正文（send）和工具出口（qq_send / qq_reply / 发图…）共用。
+   * 自己发出去的话进历史 + 落聊天流水。正文（send）和工具出口（qq_send / 发图…）共用。
    *
    * 2026-10-27 补：以前只有正文这条记账，工具发出去的话既不进流水、也不进 history，
    * 结果她说过的话在记录里缺一句，下一轮自己也看不见，翻记录还会对不上。

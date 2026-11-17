@@ -11,7 +11,7 @@ import { resolvePeerWorkspace } from '../src/workspace.js'
 const sent = env => env.napcat.calls.filter(call => ['send_private_msg', 'send_group_msg'].includes(call.action))
 const content = call => call.params.message.filter(seg => seg.type === 'text').map(seg => seg.data.text).join('')
 async function setup(t, config = {}) {
-  const env = await createMockEnvironment({ autoReply: false, config })
+  const env = await createMockEnvironment({ autoReply: false, config: { voiceEnabled: true, qzoneEnabled: true, ...config } })
   t.after(async () => {
     await env.close()
     const rel = relative(resolve(tmpdir()), resolve(env.root))
@@ -81,7 +81,7 @@ test('流式回复命中后停止该轮后续文字，下一轮恢复正常', as
   assert.equal(content(sent(env)[1]), '下一轮可以正常聊天。')
 })
 
-for (const name of ['qq_send', 'qq_reply', 'qq_send_voice', 'qq_qzone_send']) {
+for (const name of ['qq_send', 'qq_send_voice', 'qq_qzone_send']) {
   test(`${name} 在实际发送或合成之前阻止凭据，并同时通知 QQ 和工具调用方`, async t => {
     const { env, turn } = await setup(t)
     const secret = env.config.accessToken

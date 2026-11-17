@@ -1,13 +1,13 @@
 import { createDeveloperMessage } from '@deepseek-ai/dsh-llm'
 import { runtimeContextName } from './session-view.js'
 import { facesForPrompt } from './faces.js'
-import { faceStrategyRule, SILENT_HINT } from './prompts.js'
+import { faceStrategyRule, faceCollectRule, SILENT_HINT } from './prompts.js'
 import { loadGroupDigest } from './group-digest.js'
 import { listOf } from './config.js'
 import { identityContext } from './identity.js'
 
 export function buildRuntimeContext({ memory, config, record }) {
-  const parts = [identityContext(config, record), memory.render(record), faceStrategyRule(config, facesForPrompt(config, 12))]
+  const parts = [identityContext(config, record), memory.render(record), faceStrategyRule(config, config.stickerEnabled === false ? null : facesForPrompt(config, 12)), faceCollectRule(config)]
   // 跨聊天资料只向明确配置的 owner 提供，并限制到明确允许的群。
   if (record.scope === 'private' && config.groupMode !== 'disabled' && listOf(config.ownerIds).includes(String(record.peerId)) && listOf(config.groupAllow).length) {
     const now = new Date()

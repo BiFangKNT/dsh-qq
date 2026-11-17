@@ -342,8 +342,8 @@ test('调过 qq_send 之后，正文不再补一遍（21:22 那条的第二半�
   assert.deepEqual(sent, [], '工具已经发过话了，正文不该再发一次')
 })
 
-test('qq_reply / qq_send_image 也算发过话', async () => {
-  for (const name of ['qq_reply', 'qq_send_image']) {
+test('qq_send / qq_send_image 也算发过话', async () => {
+  for (const name of ['qq_send', 'qq_send_image']) {
     const { fire, sent, tool } = makeHarness()
     await tool(name)
     await fire({ content: [{ type: 'text', text: '好呀' }] })

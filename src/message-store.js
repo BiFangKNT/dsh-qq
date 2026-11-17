@@ -205,6 +205,12 @@ export function createMessageStore(home = '', logger) {
     },
     block(meta, signature, reason) { use(db => db.prepare('INSERT OR REPLACE INTO blocked_deliveries VALUES (?,?,?)').run(keyOf(meta), signature, reason)) },
     blocked(meta) { return use(db => db.prepare('SELECT signature,reason FROM blocked_deliveries WHERE chat=?').get(keyOf(meta))) },
+    hasMessage(meta, messageId) {
+      return use(db => !!db.prepare(`SELECT 1 FROM messages WHERE chat=? AND
+        ((id=? AND COALESCE(json_extract(item,'$.direction'),'incoming')='incoming') OR
+        (json_extract(item,'$.messageId')=? AND status IN ('sent','archived'))) LIMIT 1`)
+        .get(keyOf(meta), String(messageId), String(messageId)))
+    },
     query(meta, { before, limit = 20, seq, since = 0 } = {}) {
       return use(db => {
         const key = keyOf(meta), args = [key, since]

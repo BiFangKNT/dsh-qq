@@ -168,12 +168,12 @@ test('共享文件按当前聊天权限访问：群与普通私聊只读，授�
   memo.config.ownerIds = []
   assert.equal((await memo.execute({ action: 'write', path: '公开.md', text: '已撤销' })).ok, false)
   memo.config.privateMode = 'disabled'
-  assert.equal((await memo.execute({ action: 'read', path: '公开.md' })).ok, false)
+  await assert.rejects(memo.execute({ action: 'read', path: '公开.md' }), /未获准/)
   memo.record.scope = 'group'
   memo.config.groupMode = 'allowlist'
   memo.config.groupAllow = ['70001']
-  assert.equal((await memo.execute({ action: 'list' })).ok, false)
-  assert.equal((await memo.execute({ action: 'list' }, {})).ok, false, '普通Agent没有QQ上下文时不可访问')
+  await assert.rejects(memo.execute({ action: 'list' }), /未获准/)
+  await assert.rejects(memo.execute({ action: 'list' }, {}), /未获准/, '普通Agent没有QQ上下文时不可访问')
 })
 
 test('共享目录不存在时授权写入可创建，链接不能指向目录外', async t => {

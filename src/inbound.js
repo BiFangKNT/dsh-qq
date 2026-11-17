@@ -1,7 +1,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readPlainText, readMessage, readCommandText } from './onebot/segment.js'
 import { rememberFaces, facesCount } from './faces.js'
-import { faceCollectRule, IMAGE_RULES, QUOTE_DIRECTION_HINT } from './prompts.js'
+import { IMAGE_RULES, QUOTE_DIRECTION_HINT } from './prompts.js'
 import { createAddressClassifier } from './address-classifier.js'
 import { migrateGroupSettings, requiresGroupMention, groupMessageInterval } from './group-trigger.js'
 import { resolvePeerWorkspace } from './workspace.js'
@@ -664,8 +664,6 @@ export function createInbound({ config, manager, logger, client, send, approval,
         ...imagePaths.map((p) => `  ${p}`),
         IMAGE_RULES,
       )
-      const hint = faceCollectRule(config)
-      if (hint) parts.push(hint)
     } else if (info.images.length > 0 && !policy.sizes.length) {
       parts.push('[用户发了图片，但没能下载下来]')
     }

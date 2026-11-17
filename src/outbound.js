@@ -568,7 +568,6 @@ export function stripClosingTalk(text, config = {}) {
  * 放进来的话，她点个赞就把正经回话拦掉了。
  */
 const SELF_SENDING_TOOLS = new Set([
-  'qq_reply',
   'qq_send',
   'qq_send_voice',
   'qq_send_image',
@@ -674,7 +673,7 @@ export function createOutbound({ manager, config, logger, send, wake, contextGua
     }
 
     if (type === 'assistant/message') {
-      // 本轮已经用 qq_reply 之类的工具把话发过了 → 不再重复转发
+      // 本轮已经用 qq_send 等工具把话发过了，不再重复转发。
       if (selfSent.has(sessionId)) {
         resetStream(sessionId)
         return
