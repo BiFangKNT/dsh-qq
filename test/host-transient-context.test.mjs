@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { installChatSystem, createSystemPromptStore } from '../src/system-prompt.js'
-import { clearRuntimeContext } from '../src/runtime-context.js'
+import { clearRuntimeContext, buildRuntimeContext } from '../src/runtime-context.js'
+import { createAddressClassifier } from '../src/address-classifier.js'
 import { runtimeContextName } from '../src/session-view.js'
 import { assertHostAccepted } from '../src/host-compatibility.js'
 import { registerTools } from '../src/tools.js'
@@ -82,7 +83,7 @@ test('原生宿主独立摘要旧积压，无工具和用户事件；主轮只�
   assert.equal(h.messages.get(record, 'current').status, 'processed')
 })
 
-async function harness(t, { root, respond, compact = false, budget = false, modelInfo = {}, agentOptions = {} } = {}) {
+async function harness(t, { root, respond, compact = false, budget = false, modelInfo = {}, agentOptions = {}, runtimeContext } = {}) {
   const ctx = new Context(), requests = [], errors = [], handles = []
   for (const plugin of [llm.default, sessionApi.default, Projections, SystemPrompt, tools.default, Native, AgentRegistry, TokenMeter]) await ctx.plugin(plugin)
   if (root) await ctx.plugin(Persistence, { root, compression: 'none' })
@@ -109,7 +110,7 @@ async function harness(t, { root, respond, compact = false, budget = false, mode
   const setup = async (agentCtx, agent) => {
     await installChatSystem({ agentCtx, agent, config, store, capacity,
       meta: { selfId: '10001', scope: 'private', peerId: '11001' },
-      runtimeContext: () => { renderCount++; return state } })
+      runtimeContext: () => { renderCount++; return runtimeContext ? runtimeContext(config) : state } })
   }
   async function attach(id = 'qq-native', resume = false, managed = true) {
     const options = { agentOptions: { provider: 'mock', model: 'mock', ...agentOptions }, ...(managed ? { setup } : {}) }
@@ -127,6 +128,67 @@ async function harness(t, { root, respond, compact = false, budget = false, mode
   return { ctx, requests, errors, attach, send, setup, config, store, capacity, messages,
     get renderCount() { return renderCount }, set state(value) { state = value } }
 }
+
+test('实际请求中固定说明仅在 system，当前值在末尾；分类背景不重复 system 或改变主会话', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'qq-native-composition-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const memory = createMemory({ home, config: {} })
+  t.after(() => memory.stop())
+  const record = { selfId: '10001', scope: 'private', peerId: '11001' }
+  const data = memory.store.migrate(record)
+  memory.store.change(data, { kind: 'task', text: '当前事项甲' })
+  memory.store.write(record, data, data.revision)
+  const h = await harness(t, { compact: true,
+    runtimeContext: config => buildRuntimeContext({ memory, config, record }),
+    respond: (_options, requests) => requests.length === 1 ? toolResponse : textResponse('ok'),
+  })
+  Object.assign(h.config, { ownerIds: ['11001'], memberLabels: { '11001': '称呼甲' },
+    faceRoot: home, stickerEnabled: false, faceCollectHint: '' })
+  const { agent } = await h.attach()
+  h.ctx.tools.register(defineContentToolFixture({ name: 'change_state', description: '修改测试状态', parameters: {}, execute() {
+    h.config.memberLabels = { '11001': '称呼乙' }
+    h.config.faceCollectHint = '只收藏虚构的蓝色方块'
+    return [{ type: 'text', text: '工具的实际结果' }]
+  } }))
+  await h.send(agent, '当前消息的已有聊天背景。'.repeat(200), { kind: 'user', qqMaySilent: true })
+  assert.equal(h.requests.length, 2)
+  const [first, continued] = h.requests
+  const system = text(first.messages[0])
+  assert.match(system, /authorized 表示当前授权|当前事项与长期记忆/)
+  assert.doesNotMatch(system, /称呼甲|称呼乙|当前事项甲|只收藏虚构/)
+  assert.equal(text(continued.messages[0]), system)
+  for (const request of h.requests) {
+    const tail = text(request.messages.at(-1))
+    assert.match(tail, /【当前资料】[\s\S]*当前事项甲[\s\S]*【本轮条件】/)
+    assert.ok(tail.includes(SILENT_HINT))
+    assert.doesNotMatch(tail, /跨轮跟进以|authorized 表示|qq_mface|mode=requested/)
+    assert.doesNotMatch(text(request.messages.slice(0, -1)), /当前事项甲|称呼甲|称呼乙|只收藏虚构/)
+  }
+  assert.match(text(first.messages.at(-1)), /称呼甲/)
+  assert.match(text(first.messages.at(-1)), /不自动收藏/)
+  assert.match(text(continued.messages.at(-1)), /称呼乙/)
+  assert.match(text(continued.messages.at(-1)), /只收藏虚构的蓝色方块/)
+  assert.doesNotMatch(text(continued), /称呼甲/)
+  assert.equal(continued.messages.at(-2).role, 'tool')
+  assert.match(text(continued.messages.at(-2)), /工具的实际结果/)
+  const mainContext = { header: { ...agent.session.requestHeader(), system: h.store.get(agent.session.id).text },
+    messages: agent.session.deriveMessages(), runtimeContext: buildRuntimeContext({ memory, config: h.config, record }) }
+  const before = text(mainContext), classified = []
+  const gate = createAddressClassifier({ config: { addressClassifierEnabled: true, provider: 'mock', model: 'mock' },
+    llm: { async *stream(options) { classified.push(options); yield* textResponse('no') } } })
+  t.after(() => gate.stop())
+  await gate.accept({ id: 'classifier-1', meta: record, body: '新消息', message: { text: '新消息' }, mainContext }, async () => false)
+  assert.equal(classified.length, 1)
+  const background = JSON.parse(classified[0].messages[0].content[0].text).mainContext
+  assert.equal(background.header.system, mainContext.header.system)
+  assert.equal(background.messages.filter(message => message.role === 'system').length, 0)
+  assert.ok(background.messages.some(message => message.role === 'tool'))
+  assert.equal(text(mainContext), before)
+  assert.equal(agent.session.deriveMessages().filter(message => message.role === 'system').length, 1)
+  assert.doesNotMatch(text(agent.session.deriveMessages()), /当前事项甲|称呼甲|称呼乙|【本轮条件】/)
+  assert.ok(await h.ctx.compaction.compactNow(agent, new AbortController().signal))
+  assert.doesNotMatch(text(h.requests.at(-1)), /当前事项甲|称呼甲|称呼乙|【本轮条件】/)
+})
 
 test('rc.2 的 128K 模型按显式 8K 输出预选消息，允许默认 64K 输出的压缩请求', async t => {
   const h = await harness(t, { budget: true,

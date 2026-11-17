@@ -18,7 +18,7 @@ function clipLine(s, limit) {
 const CHAT_LINE_RE = /^- (\d{2}:\d{2}:\d{2}) · (.+?)\((\d{3,12})\)[：:]\s*(.*)$/
 
 /** 提取当天最近的群消息与 @ 记录；这里只转述日志，不推断用户意图。 */
-function tailLinesFromChat(text, { gid = '', me = '', tailCount = 2, limit = 240 } = {}) {
+function tailLinesFromChat(text, { gid = '', day = '', me = '', tailCount = 2, limit = 240 } = {}) {
   const recs = []
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     const m = CHAT_LINE_RE.exec(raw.trim())
@@ -35,15 +35,15 @@ function tailLinesFromChat(text, { gid = '', me = '', tailCount = 2, limit = 240
   const out = []
   if (atMe === last) {
     // 最后一条已经包含 @ 信息，不重复添加
-    out.push(`· 群 ${gid}：最后 ${last.at} ${last.who} 点了你名「${clipLine(stripAt(last.said), limit)}」——你没应`)
+    out.push(`· 群 ${gid}（流水摘录 ${day}）：${last.at} ${last.who} 提及机器人「${clipLine(stripAt(last.said), limit)}」`)
     return out
   }
-  out.push(`· 群 ${gid}：最后 ${last.at} ${last.who} 说「${clipLine(last.said, limit)}」`)
+  out.push(`· 群 ${gid}（流水摘录 ${day}）：${last.at} ${last.who} 说「${clipLine(last.said, limit)}」`)
   if (tailCount > 1 && others.length > 1) {
     const prev = others[others.length - 2]
     if (prev !== atMe) out.push(`  ↑前一句 ${prev.at} ${prev.who}：「${clipLine(prev.said, limit)}」`)
   }
-  if (atMe) out.push(`  ⚠ ${atMe.at} ${atMe.who} 点过你名：「${clipLine(stripAt(atMe.said), 120)}」`)
+  if (atMe) out.push(`  提及记录 ${atMe.at} ${atMe.who}：「${clipLine(stripAt(atMe.said), 120)}」`)
   return out
 }
 
@@ -71,7 +71,7 @@ export function loadGroupDigest({ workspaceRoot, today, selfId = '', allowedGrou
     // 先读取当天聊天流水
     try {
       const chat = join(dir, '聊天记录', `${day}.md`)
-      if (existsSync(chat)) lines = tailLinesFromChat(readFileSync(chat, 'utf8'), { gid, me, tailCount, limit })
+      if (existsSync(chat)) lines = tailLinesFromChat(readFileSync(chat, 'utf8'), { gid, day, me, tailCount, limit })
     } catch {
       // 单个群读坏了（编码、锁、半截文件）不该连累别的群
     }
@@ -81,7 +81,7 @@ export function loadGroupDigest({ workspaceRoot, today, selfId = '', allowedGrou
         const file = join(dir, '记忆区', '日记', `${day}.md`)
         if (existsSync(file)) {
           const gist = pickDigestLine(readFileSync(file, 'utf8'), '一句话')
-          if (gist) lines = [`· 群 ${gid}（今天没人说话）：${clipLine(gist, limit)}`]
+          if (gist) lines = [`· 群 ${gid}（日记摘要 ${day}）：${clipLine(gist, limit)}`]
         }
       } catch {
         // 同上，坏一个不连累别的

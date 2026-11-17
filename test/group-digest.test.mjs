@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -11,8 +11,10 @@ import { loadGroupDigest, pickDigestLine } from '../src/group-digest.js'
 const DAY = '2026-10-27'
 const ME = '1737661812'
 
-function mkRoot() {
-  return mkdtempSync(join(tmpdir(), 'dsh-qq-digest-'))
+function mkRoot(t) {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-qq-digest-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  return root
 }
 
 function writeChat(root, gid, body, day = DAY) {
@@ -52,19 +54,19 @@ test('pickDigestLine：抓得到 `> 一句话：`，抓不到就空串', () => {
   assert.equal(pickDigestLine('', '一句话'), '')
 })
 
-test('尾巴：最后谁说了话，加一句前一句', () => {
-  const root = mkRoot()
+test('流水摘录保留来源、日期和最近的成员发言', t => {
+  const root = mkRoot(t)
   writeChat(root, '123456789', REAL_CHAT)
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
   const lines = out.split('\n')
   assert.equal(lines.length, 2, `实际：${out}`)
-  assert.equal(lines[0], '· 群 123456789：最后 00:08:57 某人 说「随便说的一句」')
+  assert.equal(lines[0], `· 群 123456789（流水摘录 ${DAY}）：00:08:57 某人 说「随便说的一句」`)
   assert.ok(lines[1].includes('00:08:46'), '前一句该带上时间')
   assert.ok(!out.includes('本姑娘'), '日记正文一个字都不许带出去')
 })
 
-test('尾巴：有人点了她的名、她没应 —— 单独一行标出来', () => {
-  const root = mkRoot()
+test('提及记录只作为摘录，不催促回复', t => {
+  const root = mkRoot(t)
   writeChat(
     root,
     '987654321',
@@ -75,34 +77,47 @@ test('尾巴：有人点了她的名、她没应 —— 单独一行标出来', 
     ].join('\n'),
   )
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
-  assert.ok(out.includes('最后 10:05:00 甲 说「算了我们自己聊」'), out)
-  assert.ok(out.includes(`⚠ 10:02:00 乙 点过你名：「这个你怎么看」`), out)
+  assert.ok(out.includes('10:05:00 甲 说「算了我们自己聊」'), out)
+  assert.ok(out.includes('提及记录 10:02:00 乙：「这个你怎么看」'), out)
+  assert.doesNotMatch(out, /⚠|你没应|未回复/)
   assert.ok(!out.includes(`@${ME}`), 'QQ 号不该留在纸条里')
 })
 
-test('尾巴：最后一句就是点她名 —— 合成一行，不重复', () => {
-  const root = mkRoot()
+test('成员提及机器人后已有机器人回复，也不推断未回复', t => {
+  const root = mkRoot(t)
+  writeChat(root, '70001', `- 10:00:00 · 甲(10002)：@${ME} 帮忙看看\n- 10:01:00 · 机器人(${ME})：看过了\n`)
+  const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
+  assert.match(out, /10:00:00 甲 提及机器人「帮忙看看」/)
+  assert.doesNotMatch(out, /你没应|未回复|未读|⚠|最后/)
+})
+
+test('最近成员发言包含提及，只摘录一次', t => {
+  const root = mkRoot(t)
   writeChat(root, '123456789', `- 10:10:00 · 丙(333333)：@${ME} 帮忙看看这个\n`)
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
   assert.equal(out.split('\n').length, 1, out)
-  assert.ok(out.includes('丙 点了你名「帮忙看看这个」——你没应'), out)
+  assert.ok(out.includes('丙 提及机器人「帮忙看看这个」'), out)
+  assert.doesNotMatch(out, /你没应|未回复/)
 })
 
-test('尾巴：她自己说的话不算「群里有人说话」', () => {
-  const root = mkRoot()
+test('只有机器人发言时不生成成员发言摘录', t => {
+  const root = mkRoot(t)
   writeChat(root, '123456789', `- 10:00:00 · 鲸鲸(深海鲸鱼娘)(${ME})：我在呢\n`)
   assert.equal(loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME }), '')
 })
 
-test('今天群里没人说话 → 退回日记的「一句话」', () => {
-  const root = mkRoot()
-  writeDiary(root, '999', '> 一句话：今天群里一整天没人开口\n')
+test('缺少或无法解析流水时，明确标记日记来源，不推断没有人说话', t => {
+  const root = mkRoot(t)
+  writeChat(root, '999', '旧格式、不完整或无法解析的消息\n')
+  writeDiary(root, '999', '> 一句话：大家讨论过周末活动\n')
+  writeDiary(root, '998', '> 一句话：活动时间待确认\n')
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })
-  assert.equal(out, '· 群 999（今天没人说话）：今天群里一整天没人开口')
+  assert.equal(out, `· 群 998（日记摘要 ${DAY}）：活动时间待确认\n· 群 999（日记摘要 ${DAY}）：大家讨论过周末活动`)
+  assert.doesNotMatch(out, /没人说话|没有人说话|未读|未回复/)
 })
 
-test('多群按群号排；没记录 / 目录不存在 → 空串', () => {
-  const root = mkRoot()
+test('多群按群号排；没记录 / 目录不存在 → 空串', t => {
+  const root = mkRoot(t)
   writeChat(root, '999', '- 09:00:00 · 甲(111111)：甲说了句\n')
   writeChat(root, '111', '- 09:00:00 · 乙(222222)：乙说了句\n')
   const out = loadGroupDigest({ workspaceRoot: root, today: DAY, selfId: ME })

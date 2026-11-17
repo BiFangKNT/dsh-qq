@@ -618,7 +618,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
 
   tools.register({
     name: 'qq_mface',
-    description: '发送收藏图片或 QQ 商城表情。summary 按 qq_faces 返回的名称选择，留空随机；也可用 emoji_id、emoji_package_id、key 指定商城表情。受图片发送间隔和每小时限额限制；不会自动改用 CDN 重发。' + EXTERNAL_ACTION_RULE,
+    description: '发送收藏图片或 QQ 商城表情。summary 按 qq_faces 返回的名称选择，留空随机；也可用 emoji_id、emoji_package_id、key 指定商城表情。按话题和语气选择，一次一张，不必每条回复配图，不代替必要的文字解释。受图片发送间隔和每小时限额限制，被拒绝后不重复尝试；不会自动改用 CDN 重发。' + EXTERNAL_ACTION_RULE,
     parameters: { type: 'object', properties: {
       emoji_id: { type: 'string' }, emoji_package_id: { type: 'string' }, key: { type: 'string' },
       summary: { type: 'string', description: '收藏名称；省略则随机选择' },

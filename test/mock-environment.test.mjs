@@ -7,6 +7,7 @@ import WebSocket from 'ws'
 import { createMockEnvironment } from './mock-environment.mjs'
 import { startMockNapcat } from './mock-napcat.mjs'
 import { waitFor, textOf } from './mock-dsh.mjs'
+import { listFaces } from '../src/faces.js'
 
 const sent = env => env.napcat.calls.filter(c => c.action === 'send_private_msg' || c.action === 'send_group_msg')
 async function setup(t, options) {
@@ -20,6 +21,46 @@ async function setup(t, options) {
   return env
 }
 async function idle(env) { for (const agent of env.host.agents.values()) await agent.whenIdle() }
+
+test('引用、图片和商城表情转录只留事实，关闭表情发送仍自动登记且不推荐工具', async t => {
+  const env = await setup(t, { autoReply: false, config: { stickerEnabled: false, faceCollectHint: '', quoteReply: true } })
+  env.napcat.setQuoted(11, { userId: 11002, nickname: '乙', text: '约好周六讨论' })
+  const message = [
+    { type: 'reply', data: { id: '11' } },
+    { type: 'text', data: { text: '这是原图和商城表情' } },
+    { type: 'image', data: { url: `${env.napcat.mediaUrl}/fixture.png` } },
+    { type: 'mface', data: { emoji_id: 'fixture-face', emoji_package_id: 'fixture-pack', summary: '测试表情' } },
+  ]
+  const send = async (messageId, segments) => {
+    const count = [...env.host.agents.values()].reduce((sum, agent) => sum + agent.received.length, 0)
+    env.emitMessage({ messageId, message: segments, steps: [] })
+    await waitFor(() => [...env.host.agents.values()].reduce((sum, agent) => sum + agent.received.length, 0) > count)
+    await idle(env)
+    return [...env.host.agents.values()][0]
+  }
+  const agent = await send(100, message)
+  const body = textOf(agent.received[0])
+  assert.match(body, /引用 乙 \(11002\)：约好周六讨论/)
+  assert.match(body, /1 张图片，已存到本机：[\s\S]*\.png/)
+  assert.match(body, /对方发来商城表情/)
+  assert.match(body, /已自动登记 1 个新商城表情/)
+  assert.doesNotMatch(body, /read_image|qq_mface|qq_keep_face|引用别人|顺着这个情绪|不要描述|想发就用/)
+  assert.equal(listFaces(env.config).length, 1)
+  assert.equal(agent.requests[0].tools.some(tool => ['qq_faces', 'qq_mface'].includes(tool.name)), false)
+  assert.match(agent.requests[0].context, /表情包状态】使用已关闭/)
+  assert.match(agent.requests[0].system, /read_image[\s\S]*引用别人也可能是在向你提问/)
+  const system = agent.requests[0].system
+  const response = await fetch(`${env.url}/api/dsh-qq/settings`, { method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ patch: { stickerEnabled: true, faceCollectHint: '虚构的蓝色方块' } }) })
+  assert.equal(response.status, 200)
+  await send(101, message.slice(3))
+  assert.equal(listFaces(env.config).length, 1, '重复商城表情不会重复登记')
+  assert.doesNotMatch(textOf(agent.received[1]), /已自动登记|qq_mface|虚构的蓝色方块/)
+  assert.equal(agent.requests.at(-1).system, system)
+  assert.match(agent.requests.at(-1).context, /使用已开启[\s\S]*测试表情[\s\S]*【本轮条件】[\s\S]*虚构的蓝色方块/)
+  assert.equal(agent.requests.at(-1).tools.some(tool => tool.name === 'qq_mface'), true)
+  assert.doesNotMatch(JSON.stringify(agent.session.deriveMessages()), /【本轮条件】|虚构的蓝色方块|顺着这个情绪|想发就用/)
+})
 
 test('资料设置API与实际mock模型工具调用共用来源，更新文件后返回新内容', async t => {
   const env = await setup(t)

@@ -887,3 +887,51 @@ test('分类只读完整主会话和全部待处理消息，压缩后读取当�
   assert.doesNotMatch(JSON.stringify(other), /完整历史|DSH压缩后的摘要|消息1001/)
   assert.equal(h.delivered.length, 0)
 })
+
+for (const budgeted of [false, true]) {
+  test(`分类背景只去掉相同的纯文本 system，保留历史和图片索引（容量检查${budgeted ? '开启' : '关闭'}）`, async t => {
+    const home = await directory(t), llm = model('no')
+    const system = '当前锁定的主会话规则'
+    const mainContext = {
+      header: { system, tools: [{ name: 'history_tool', description: '只读背景，不可执行' }] },
+      messages: [
+        { role: 'system', content: [{ type: 'text', text: system }] },
+        { role: 'system', content: [{ type: 'text', text: '另一份历史 system，必须保留' }] },
+        { role: 'user', content: [{ type: 'text', text: system }] },
+        { role: 'assistant', content: [{ type: 'tool-call', id: 'call-1', name: 'history_tool', arguments: '{}' }] },
+        { id: 'tool-result', role: 'tool', content: [{ type: 'image', attachment: { attachmentId: 'fixture' } }] },
+        { role: 'system', content: [{ type: 'text', text: system }, { type: 'image', attachment: { attachmentId: 'other' } }] },
+      ],
+      runtimeContext: '当前状态独立提供',
+    }
+    const before = JSON.stringify(mainContext)
+    for (const message of mainContext.messages) Object.freeze(message)
+    Object.freeze(mainContext.messages)
+    const gate = createAddressClassifier({ home, config: configOf(), llm, logger,
+      ...(budgeted ? { capacity: { classifierPending: async () => [], classifierRequest: async options => options } } : {}) })
+    t.after(() => gate.stop())
+    await gate.accept({ ...input(1), mainContext }, async () => false)
+    assert.equal(llm.calls.length, 1)
+    const request = llm.calls[0], body = JSON.parse(textOf(request.messages[0]))
+    assert.deepEqual(body.mainContext.header, mainContext.header)
+    assert.equal(body.mainContext.runtimeContext, mainContext.runtimeContext)
+    assert.deepEqual(body.mainContext.messages, mainContext.messages.slice(1).map((message, index) =>
+      budgeted ? { ...message, qqContextIndex: index } : message))
+    assert.deepEqual(body.imageInputs.map(image => [image.messageId, image.contextIndex, image.imageIndex]), [
+      ['tool-result', 3, 0], [undefined, 4, 1],
+    ])
+    assert.equal(request.messages[0].content.filter(block => block.type === 'image').length, 2)
+    assert.deepEqual(request.tools, [])
+    assert.doesNotMatch(request.system, /当前锁定的主会话规则|另一份历史 system/)
+    assert.equal(JSON.stringify(mainContext), before, '不得改写主会话背景')
+  })
+}
+
+test('没有 header.system 时保留历史 system，不猜测要删除的内容', async t => {
+  const home = await directory(t), llm = model('no')
+  const gate = createAddressClassifier({ home, config: configOf(), llm, logger })
+  t.after(() => gate.stop())
+  const mainContext = { messages: [{ role: 'system', content: [{ type: 'text', text: '仅在历史中的 system' }] }] }
+  await gate.accept({ ...input(1), mainContext }, async () => false)
+  assert.deepEqual(JSON.parse(textOf(llm.calls[0].messages[0])).mainContext, mainContext)
+})

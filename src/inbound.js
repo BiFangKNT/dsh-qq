@@ -1,7 +1,6 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { readPlainText, readMessage, readCommandText } from './onebot/segment.js'
-import { rememberFaces, facesCount } from './faces.js'
-import { IMAGE_RULES, QUOTE_DIRECTION_HINT } from './prompts.js'
+import { rememberFaces } from './faces.js'
 import { createAddressClassifier } from './address-classifier.js'
 import { migrateGroupSettings, requiresGroupMention, groupMessageInterval } from './group-trigger.js'
 import { resolvePeerWorkspace } from './workspace.js'
@@ -645,7 +644,7 @@ export function createInbound({ config, manager, logger, client, send, approval,
     // 当前时间：每条消息都带在最前面，跟着正文走 —— 会话压缩、历史被裁掉，这行也不会丢
     parts.push(`[收到消息的时间：${humanTime(new Date(event.__classifierReceivedAt ?? Date.now()))}]`)
     if (quoteLine) {
-      parts.push(quoteLine, QUOTE_DIRECTION_HINT)
+      parts.push(quoteLine)
     }
     let head = info.text || ''
     if (isGroup || head) head = historyLine(sender, info.text || '[图片]', ownerInfo)
@@ -660,9 +659,8 @@ export function createInbound({ config, manager, logger, client, send, approval,
 
     if (imagePaths.length > 0) {
       parts.push(
-        `[用户发了 ${imagePaths.length} 张图片，已存到本机，可以直接用 read_image 打开：]`,
+        `[用户发了 ${imagePaths.length} 张图片，已存到本机：]`,
         ...imagePaths.map((p) => `  ${p}`),
-        IMAGE_RULES,
       )
     } else if (info.images.length > 0 && !policy.sizes.length) {
       parts.push('[用户发了图片，但没能下载下来]')
@@ -671,13 +669,10 @@ export function createInbound({ config, manager, logger, client, send, approval,
     if (voiceTexts.length > 0) parts.push(...voiceTexts)
 
     if (info.mfaces.length > 0) {
-      // 顺手把表情包的身份证存进收藏夹，以后 qq_mface 就能拿来用
+      // 商城表情自动登记不受发送开关影响；转录只记录处理事实。
       const added = rememberFaces(config, info.mfaces)
-      const total = facesCount(config)
-      parts.push(
-        '[对方发来表情包。表情包是说话的语气，不是让你鉴赏的画面——顺着这个情绪接话就好，不要描述图里画了什么，也不要问"这是谁"。]',
-      )
-      if (added > 0) parts.push(`[已顺手收进表情包收藏，现在一共 ${total} 个；想发就用 qq_mface，不填 id 会从收藏里随机挑一个。]`)
+      parts.push('[对方发来商城表情]')
+      if (added > 0) parts.push(`[已自动登记 ${added} 个新商城表情]`)
     }
 
     if (filePaths.length > 0) {

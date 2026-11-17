@@ -7,7 +7,8 @@ import { listOf } from './config.js'
 import { identityContext } from './identity.js'
 
 export function buildRuntimeContext({ memory, config, record }) {
-  const parts = [identityContext(config, record), memory.render(record), faceStrategyRule(config, config.stickerEnabled === false ? null : facesForPrompt(config, 12)), faceCollectRule(config)]
+  const parts = ['【当前资料】', identityContext(config, record), memory.render(record),
+    faceStrategyRule(config, config.stickerEnabled === false ? null : facesForPrompt(config, 12))]
   // 跨聊天资料只向明确配置的 owner 提供，并限制到明确允许的群。
   if (record.scope === 'private' && config.groupMode !== 'disabled' && listOf(config.ownerIds).includes(String(record.peerId)) && listOf(config.groupAllow).length) {
     const now = new Date()
@@ -16,6 +17,7 @@ export function buildRuntimeContext({ memory, config, record }) {
       allowedGroups: listOf(config.groupAllow) })
     if (digest) parts.push('【授权群近况】', digest)
   }
+  parts.push('【本轮条件】', faceCollectRule(config))
   return parts.filter(Boolean).join('\n\n')
 }
 
