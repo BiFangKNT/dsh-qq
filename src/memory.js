@@ -102,7 +102,7 @@ export function createMemory({ home, config, getLlm = () => undefined, logger, c
       const events = snapshot.filter(e => e.seq > cursor && e.seq <= event.seq && ['user/message', 'assistant/message', 'tool/call', 'tool/result'].includes(e.type))
       const readCalls = new Set(snapshot.filter(e => e.type === 'tool/call' &&
         (['qq_history', 'qq_messages', 'qq_group_history', 'qq_private_history'].includes(e.data.name) ||
-          (e.data.name === 'qq_memory' && /"action"\s*:\s*"(?:list|history)"/.test(e.data.arguments))))
+          (e.data.name === 'qq_memory' && /"action"\s*:\s*"(?:list|history|read)"/.test(e.data.arguments))))
         .map(e => e.data.callId))
       // 摘要、旧快照和主动提示都不是新的用户证据。
       const evidence = events.filter(e => (e.type !== 'user/message' || messageOf(e)?.source?.kind === 'user') &&

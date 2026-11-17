@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createMemory } from '../src/memory.js'
 import { createMessageStore } from '../src/message-store.js'
 
-for (const toolName of ['qq_history', 'qq_messages', 'qq_group_history', 'qq_private_history']) {
+for (const toolName of ['qq_history', 'qq_messages', 'qq_group_history', 'qq_private_history', 'qq_memory']) {
   test(`记忆维护复用容量检查，遗漏说明与 ${toolName} 回查不算新用户依据`, async t => {
     const home = mkdtempSync(join(tmpdir(), 'qq-memory-evidence-'))
     t.after(() => rmSync(home, { recursive: true, force: true }))
@@ -24,7 +24,7 @@ for (const toolName of ['qq_history', 'qq_messages', 'qq_group_history', 'qq_pri
       const events = [
         { seq: 0, type: 'user/message', data: { content: [{ type: 'text', text: '遗漏范围说明，不是用户原话' }],
           source: { kind: 'user', qqMessages: [{ id: 'new-1' }] } } },
-        { seq: 1, type: 'tool/call', data: { name: toolName, callId: 'read-old', arguments: '{}' } },
+        { seq: 1, type: 'tool/call', data: { name: toolName, callId: 'read-old', arguments: toolName === 'qq_memory' ? '{"action":"read","id":"old","version":1}' : '{}' } },
         { seq: 2, type: 'tool/result', data: { message: { toolCallId: 'read-old', content: [{ type: 'text', text: '旧事项早就结束了' }] } } },
         { seq: 3, type: 'turn/end', data: { reason: { kind: 'completed' } } },
       ]

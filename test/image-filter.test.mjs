@@ -85,3 +85,27 @@ test('历史取图有意不受成员全图或分辨率屏蔽限制', async t => 
     }
   }
 })
+
+test('历史取图明确局部下载失败，超过四张可续取，全失败走失败通道', async t => {
+  const dir = await temporary(t), tools = new Map()
+  let urls = [url, 'invalid://image', url, url, url]
+  const record = { scope: 'group', peerId: '42', dir, label: '测试群' }
+  registerTools({ get: () => ({ register: tool => tools.set(tool.name, tool) }) }, {
+    client: { call: async () => ({ message: urls.map(url => ({ type: 'image', data: { url } })) }) },
+    manager: { find: () => record }, config, logger, home: dir,
+  })
+  const query = args => tools.get('qq_images').execute({ message_id: 123, ...args }, { agent: { session: { id: 's' } } })
+  const first = await query({})
+  assert.equal(first.ok, true)
+  assert.equal(first.total, 5)
+  assert.equal(first.partial, true)
+  assert.deepEqual(first.failed, [1])
+  assert.equal(first.paths.length, 3)
+  assert.equal(first.nextOffset, 4)
+  const second = await query({ offset: first.nextOffset })
+  assert.equal(second.partial, false)
+  assert.equal(second.paths.length, 1)
+  assert.equal(second.nextOffset, null)
+  urls = ['invalid://image']
+  await assert.rejects(query({}), /下载失败/)
+})

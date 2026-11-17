@@ -175,3 +175,76 @@ test('旧发送记录幂等迁入查询，分段发送进度变化更新同一�
   await assert.rejects(h.query({ seq: 1, before: 2 }), /参数无效/)
   await assert.rejects(h.query({ chat: '../10002' }), /chat 必须/)
 })
+
+test('完整JSON预算包含转义、状态和元数据，长正文连续续读无损且不漏较早记录', async t => {
+  const h = fixture(t)
+  incoming(h.store, meta, 'old', '较早消息', 1)
+  const body = '"\\\n😀'.repeat(9000)
+  incoming(h.store, meta, 'long', body, 2)
+  const first = await h.query({ include_status: true })
+  assert.ok(JSON.stringify(first).length <= 12000)
+  assert.equal(first.partial, true)
+  assert.equal(first.messages.length, 1)
+  const collected = new Map(first.messages.map(row => [row.id, row.text]))
+  let args = first.next
+  while (args) {
+    const result = await h.query({ ...args, include_status: true })
+    assert.ok(JSON.stringify(result).length <= 12000)
+    for (const row of result.messages) collected.set(row.id, (collected.get(row.id) ?? '') + row.text)
+    args = result.next
+  }
+  assert.deepEqual([...collected], [['long', body], ['old', '较早消息']])
+  await assert.rejects(h.query({ seq: first.messages[0].seq, offset: body.length + 1 }), /续读位置/)
+})
+
+test('多页聊天记录无重复遗漏，每页完整JSON不超过预算，空结果不是失败', async t => {
+  const h = fixture(t)
+  for (let n = 0; n < 45; n++) incoming(h.store, meta, String(n), '"\\\n'.repeat(300), n + 1)
+  const seen = []
+  let args = {}
+  do {
+    const result = await h.query(args)
+    assert.ok(JSON.stringify(result).length <= 12000)
+    seen.push(...result.messages.map(row => row.id))
+    args = result.next
+  } while (args)
+  assert.deepEqual(seen, Array.from({ length: 45 }, (_, n) => String(44 - n)))
+  const empty = await h.query({ before: h.store.get(meta, '0').seq })
+  assert.equal(empty.partial, false)
+  assert.deepEqual(empty.messages, [])
+})
+
+test('连续多条长消息只跟随next即可遍历，时间相同也不重复遗漏', async t => {
+  const h = fixture(t)
+  const bodies = ['最早消息', '中间长消息'.repeat(5000), '最新长消息'.repeat(5000)]
+  for (let n = 0; n < bodies.length; n++) incoming(h.store, meta, String(n), bodies[n], 100)
+  let args = {}, calls = 0
+  const collected = new Map()
+  do {
+    assert.ok(++calls < 30, '分页必须终止')
+    const result = await h.query({ ...args, limit: 1 })
+    assert.ok(JSON.stringify(result).length <= 12000)
+    for (const row of result.messages) collected.set(row.id, (collected.get(row.id) ?? '') + row.text)
+    assert.equal(result.partial, result.next !== null)
+    args = result.next
+  } while (args)
+  assert.deepEqual([...collected], bodies.map((body, n) => [String(n), body]).reverse())
+})
+
+test('单条定位后的历史游标遵循日期与聊天范围，已无更早记录时结束', async t => {
+  const h = fixture(t), now = Date.now()
+  incoming(h.store, meta, 'expired', '日期范围外的消息', now - 2 * 86400000)
+  incoming(h.store, meta, 'older', '范围内的较早消息', now - 2000)
+  incoming(h.store, meta, 'newer', '范围内的最新消息', now - 1000)
+  incoming(h.store, { ...meta, peerId: '10002' }, 'other', '其他聊天的消息', now - 3000)
+  const row = h.store.get(meta, 'newer')
+  const first = await h.query({ seq: row.seq, days: 1 })
+  assert.deepEqual(first.messages.map(row => row.id), ['newer'])
+  assert.deepEqual(first.next, { before: row.seq })
+  const last = await h.query({ ...first.next, days: 1 })
+  assert.deepEqual(last.messages.map(row => row.id), ['older'])
+  assert.equal(last.next, null)
+  const oldest = await h.query({ seq: last.messages[0].seq, days: 1 })
+  assert.equal(oldest.partial, false)
+  assert.equal(oldest.next, null)
+})

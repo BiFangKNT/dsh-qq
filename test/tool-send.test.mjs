@@ -156,8 +156,7 @@ for (const name of ['qq_send', 'qq_send_voice']) {
     const responses = [{}, ...[null, '', ' ', false, true, 1.5, Number.MAX_SAFE_INTEGER + 1].map(message_id => ({ message_id })), new Error('模拟回执丢失')]
     for (const response of responses) {
       h.response = response
-      if (name === 'qq_send_voice' && response instanceof Error) await assert.rejects(h.send(name, 'group:70001'), /回执丢失/)
-      else assert.equal((await h.send(name, 'group:70001')).ok, false)
+      await assert.rejects(h.send(name, 'group:70001'), /未确认/)
     }
     assert.equal(h.calls.length, responses.length)
     assert.equal(h.notes.length, 0)
@@ -295,7 +294,7 @@ test('表情直发等待期间关闭使用，不再进入 CDN 发送路径', asy
   const h = fixture(t)
   h.response = new Error('模拟协议拒绝')
   h.beforeReply = () => { h.config.stickerEnabled = false }
-  await assert.rejects(h.tools.get('qq_mface').execute({ emoji_id: '100', emoji_package_id: '200' }, exec), /不可用/)
+  await assert.rejects(h.tools.get('qq_mface').execute({ emoji_id: '100', emoji_package_id: '200' }, exec), /未确认/)
   assert.equal(h.calls.length, 1)
   assert.equal(h.calls[0].params.message[0].type, 'mface')
   assert.equal(h.notes.length, 0)
@@ -314,4 +313,100 @@ test('工具说明区分资料检索与记忆，并明确语音平台限制', t 
   const h = fixture(t)
   assert.match(h.tools.get('qq_search').description, /来源|记忆/)
   assert.match(h.tools.get('qq_send_voice').description, /仅 Windows|其他平台/)
+})
+
+for (const name of ['qq_send', 'qq_send_voice', 'qq_send_image', 'qq_face', 'qq_mface', 'qq_poke', 'qq_react', 'qq_like', 'qq_recall', 'qq_send_file']) {
+  test(`${name}：拒绝、未发送、超时均走失败通道，不隐式重试或记成功`, async t => {
+    const h = fixture(t)
+    Object.assign(h.source, { lastSenderId: '10001', lastMessageId: 7 })
+    const args = { qq_send: { text: '测试' }, qq_send_voice: { text: '测试' }, qq_send_image: { file: 'test.png' },
+      qq_face: { id: '1' }, qq_mface: { emoji_id: '100', emoji_package_id: '200' }, qq_poke: {},
+      qq_react: { emoji_id: '1' }, qq_like: {}, qq_recall: {}, qq_send_file: { file: 'test.txt' } }[name]
+    for (const [delivery, expected] of [['rejected', /协议拒绝/], ['not-sent', /未发送/], [undefined, /未确认/]]) {
+      h.response = Object.assign(new Error('private diagnosis'), delivery ? { onebotDelivery: delivery } : {})
+      await assert.rejects(h.tools.get(name).execute(args, exec), expected)
+    }
+    assert.equal(h.calls.length, 3)
+    assert.equal(h.notes.length, 0)
+    assert.equal(h.source.lastSentMessageId, 11)
+  })
+}
+
+for (const name of ['qq_send_image', 'qq_face', 'qq_mface']) {
+  test(`${name}：消息ID缺失不冒充失败，合法负数和零值均确认并记账`, async t => {
+    const h = fixture(t)
+    const args = name === 'qq_send_image' ? { file: 'test.png' } : name === 'qq_face' ? { id: '1' } : { emoji_id: '100', emoji_package_id: '200' }
+    h.response = {}
+    await assert.rejects(h.tools.get(name).execute(args, exec), /未确认/)
+    assert.equal(h.notes.length, 0)
+    for (const id of [-71, 0]) {
+      h.response = { message_id: id }
+      assert.equal((await h.tools.get(name).execute(args, exec)).ok, true)
+      assert.equal(h.source.lastSentMessageId, id)
+      assert.equal(h.memories.at(-1)[2], id)
+    }
+    assert.equal(h.calls.length, 3)
+  })
+}
+
+test('表情收藏分页包含真实总数、无名称数和续读位置；改动后拒绝旧页', async t => {
+  const h = fixture(t)
+  const input = Array.from({ length: 125 }, (_, n) => ({ emojiId: String(n + 1), packageId: '200', summary: n === 124 ? '' : '名称' + n }))
+  rememberFaces(h.config, input)
+  const tool = h.tools.get('qq_faces')
+  const names = []
+  let args = {}, first
+  do {
+    const page = await tool.execute(args, exec)
+    assert.ok(JSON.stringify(page).length <= 12000)
+    assert.equal(page.total, 125)
+    assert.equal(page.unnamed, 1)
+    assert.equal(page.matched, 124)
+    names.push(...page.names)
+    first ??= page
+    args = page.next
+  } while (args)
+  assert.deepEqual(names, input.slice(0, 124).map(f => f.summary))
+  assert.equal((await tool.execute({ keyword: '不存在' }, exec)).ok, true)
+  rememberFaces(h.config, [{ emojiId: '999', packageId: '200', summary: '新增' }])
+  await assert.rejects(tool.execute(first.next, exec), /STALE_PAGE/)
+})
+
+test('超长收藏名称按完整JSON预算续读，不丢失转义字符或emoji', async t => {
+  const h = fixture(t)
+  const summary = '\n"\\😀'.repeat(5000)
+  rememberFaces(h.config, [{ emojiId: '1', packageId: '200', summary }])
+  const tool = h.tools.get('qq_faces')
+  let args = {}, rebuilt = ''
+  do {
+    const result = await tool.execute(args, exec)
+    assert.ok(JSON.stringify(result).length <= 12000)
+    rebuilt += result.names.join('')
+    args = result.next
+  } while (args)
+  assert.equal(rebuilt, summary.trim())
+})
+
+test('空收藏是正常查询，收藏失败走失败通道，取图空结果与查询失败可区分', async t => {
+  const h = fixture(t)
+  assert.equal((await h.tools.get('qq_faces').execute({}, exec)).ok, true)
+  await assert.rejects(h.tools.get('qq_keep_face').execute({ path: join(h.config.cwd, 'missing.png'), mode: 'requested' }, exec), /不存在/)
+  h.source.lastMessageId = 7
+  h.quoted = { message: [] }
+  const empty = await h.tools.get('qq_images').execute({}, exec)
+  assert.equal(empty.ok, true)
+  assert.deepEqual(empty.paths, [])
+  h.beforeReply = () => { throw new Error('private diagnosis') }
+  await assert.rejects(h.tools.get('qq_images').execute({}, exec), /取消息失败/)
+})
+
+test('历史取图不把无效回执当空消息，有符号ID可取图和表态', async t => {
+  const h = fixture(t)
+  for (const message_id of [-71, 0]) {
+    h.quoted = {}
+    await assert.rejects(h.tools.get('qq_images').execute({ message_id }, exec), /缺少正文/)
+    h.quoted = { message: '' }
+    assert.equal((await h.tools.get('qq_images').execute({ message_id }, exec)).ok, true)
+    assert.equal((await h.tools.get('qq_react').execute({ message_id, emoji_id: '1' }, exec)).messageId, message_id)
+  }
 })

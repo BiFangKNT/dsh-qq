@@ -15,6 +15,7 @@ import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { createContextBudget } from '../src/context-budget.js'
 import { createMessageStore } from '../src/message-store.js'
 import { createKnowledge } from '../src/knowledge.js'
+import { createMemory } from '../src/memory.js'
 
 const require = createRequire(import.meta.resolve('@deepseek-ai/dsh-agent-loop'))
 const load = name => import(pathToFileURL(require.resolve(name)).href)
@@ -443,4 +444,96 @@ test('真实 rc.2 资料工具调用：搜索后可读取原文，结果进入�
   assert.equal(read.partial, false)
   assert.equal(read.nextOffset, null)
   assert.doesNotMatch(JSON.stringify(h.requests[0].messages.filter(message => message.role === 'system')), /GPT 娘/)
+})
+
+for (const [name, args] of [
+  ['qq_poke', {}], ['qq_react', { emoji_id: '1' }], ['qq_like', {}],
+  ['qq_send', { text: '测试' }], ['qq_send_voice', { text: '测试' }], ['qq_send_image', { file: 'test.png' }],
+  ['qq_face', { id: '1' }], ['qq_mface', { emoji_id: '100', emoji_package_id: '200' }],
+  ['qq_send_file', { file: 'test.txt' }], ['qq_recall', {}], ['qq_images', {}],
+  ['qq_keep_face', { path: 'missing-fixture.png', mode: 'requested' }],
+]) {
+  test(`原生rc.2执行器：${name}失败标记进入后续模型请求`, async t => {
+    const h = await harness(t, { respond: (_options, requests) => requests.length > 1 ? textResponse('ok') : toolResponse.map(frame => {
+      if (frame.type === 'tool-call-delta') return { ...frame, name, argumentsDelta: JSON.stringify(args) }
+      if (frame.type === 'block-end') return { ...frame, block: { ...frame.block, name, arguments: JSON.stringify(args) } }
+      return frame
+    }) })
+    Object.assign(h.config, { replyToPrivate: true, privateMode: 'open', voiceEnabled: true })
+    const { agent } = await h.attach()
+    const record = { selfId: '10001', scope: 'private', peerId: '11001', lastSenderId: '11001', lastMessageId: 7, lastSentMessageId: 8 }
+    registerTools(h.ctx, { config: h.config, manager: { selfId: '10001', find: id => id === agent.session.id ? record : null },
+      platform: 'win32', synthesize: async () => Buffer.from('audio'), logger: { info() {}, warn() {} },
+      client: { call: async () => { throw Object.assign(new Error('private protocol detail'), { onebotDelivery: 'rejected' }) } } })
+    await h.send(agent)
+    assert.equal(h.requests.length, 2)
+    const result = h.requests[1].messages.filter(message => message.role === 'tool').at(-1)
+    assert.equal(result.isError, true)
+    assert.match(JSON.stringify(result.content), /协议拒绝|取消息失败|收藏文件不存在/)
+    assert.doesNotMatch(JSON.stringify(result.content), /private protocol detail/)
+    assert.equal(record.lastSentMessageId, 8)
+  })
+}
+
+test('原生rc.2执行器：空收藏和无图片均是成功空结果，动态状态仍在末尾', async t => {
+  const h = await harness(t, { respond: (_options, requests) => {
+    if (requests.length > 2) return textResponse('ok')
+    const name = requests.length === 1 ? 'qq_faces' : 'qq_images'
+    return toolResponse.map(frame => {
+      if (frame.type === 'tool-call-delta') return { ...frame, name, argumentsDelta: '{}' }
+      if (frame.type === 'block-end') return { ...frame, block: { ...frame.block, name, arguments: '{}' } }
+      return frame
+    })
+  } })
+  const home = await mkdtemp(join(tmpdir(), 'qq-host-empty-tools-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  Object.assign(h.config, { replyToPrivate: true, privateMode: 'open', cwd: home })
+  const { agent } = await h.attach()
+  const record = { selfId: '10001', scope: 'private', peerId: '11001', lastMessageId: 7 }
+  registerTools(h.ctx, { config: h.config, manager: { selfId: '10001', find: () => record }, home,
+    logger: { info() {}, warn() {} }, client: { call: async () => ({ message: [] }) } })
+  await h.send(agent)
+  assert.equal(h.requests.length, 3)
+  const results = h.requests.at(-1).messages.filter(message => message.role === 'tool')
+  assert.equal(results.length, 2)
+  assert.ok(results.every(message => !message.isError))
+  assert.equal(JSON.parse(results[0].content[0].text).total, 0)
+  assert.deepEqual(JSON.parse(results[1].content[0].text).paths, [])
+  assert.equal(h.requests.at(-1).messages.at(-1).source.kind, 'runtime-context')
+})
+
+test('原生rc.2执行器：记忆列表和版本续读通过输出校验，不携带整段历史', async t => {
+  let entry, offset = 0, snapshot
+  const h = await harness(t, { respond: (_options, requests) => {
+    if (requests.length > 1) {
+      const prior = JSON.parse(requests.at(-1).messages.filter(message => message.role === 'tool').at(-1).content[0].text)
+      if (requests.length > 2) {
+        if (prior.nextOffset === null) return textResponse('ok')
+        offset = prior.nextOffset
+        snapshot = prior.snapshot
+      }
+    }
+    const args = requests.length === 1 ? { action: 'list' } : { action: 'read', id: entry.id, version: 1, offset, ...(snapshot ? { snapshot } : {}) }
+    return toolResponse.map(frame => {
+      if (frame.type === 'tool-call-delta') return { ...frame, id: llm.ToolCallId(`mem-${requests.length}`), name: 'qq_memory', argumentsDelta: JSON.stringify(args) }
+      if (frame.type === 'block-end') return { ...frame, block: { ...frame.block, id: llm.ToolCallId(`mem-${requests.length}`), name: 'qq_memory', arguments: JSON.stringify(args) } }
+      return frame
+    })
+  } })
+  const home = await mkdtemp(join(tmpdir(), 'qq-host-memory-tool-'))
+  const memory = createMemory({ home, config: {} })
+  t.after(async () => { memory.stop(); await rm(home, { recursive: true, force: true }) })
+  Object.assign(h.config, { replyToPrivate: true, privateMode: 'open' })
+  const { agent } = await h.attach()
+  const record = { selfId: '10001', scope: 'private', peerId: '11001' }
+  const body = '"\\\n😀'.repeat(2500)
+  entry = await memory.update(record, { kind: 'fact', text: body })
+  registerTools(h.ctx, { config: h.config, manager: { selfId: '10001', find: () => record, memory }, home,
+    logger: { info() {}, warn() {} }, client: {} })
+  await h.send(agent)
+  const results = h.requests.at(-1).messages.filter(message => message.role === 'tool')
+  assert.ok(results.every(message => !message.isError))
+  const pages = results.map(message => { assert.ok(message.content[0].text.length <= 12000); return JSON.parse(message.content[0].text) })
+  assert.equal(pages[0].entries[0].partial, true)
+  assert.equal(JSON.parse(pages.slice(1).map(page => page.text).join('')).text, body)
 })

@@ -221,7 +221,7 @@ export function faceSendState(config) {
       return {
         allowed: false,
         sentLastHour,
-        reason: `刚发过一张了，${waitSec} 秒后才能再发（表情是点缀，不是刷屏用的）`,
+        reason: `发送间隔限制，等待 ${waitSec} 秒`,
       }
     }
   }
@@ -229,7 +229,7 @@ export function faceSendState(config) {
     return {
       allowed: false,
       sentLastHour,
-      reason: `这一小时已经发了 ${sentLastHour} 张，歇会儿 —— 这次先用文字说`,
+      reason: `每小时发送限额已用完，等待 ${Math.ceil((sentAt[sentAt.length - Math.ceil(maxPerHour)] + 3600000 - now) / 1000)} 秒`,
     }
   }
   return { allowed: true, sentLastHour }

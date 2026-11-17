@@ -147,7 +147,10 @@ export function createMockDsh({ home, webServer, autoReply = true, verbose = fal
       await event(agent, 'tool/result', { name, callId: id, result })
       return result
     } catch (err) {
-      await event(agent, 'tool/result', { name, callId: id, error: { message: err.message, code: err.code } }); throw err
+      const error = { message: err.message, ...(err.code ? { code: err.code } : {}) }
+      agent.results.push({ name, error, isError: true })
+      await event(agent, 'tool/result', { name, callId: id, error })
+      return { isError: true, error }
     }
   }
   async function run(agent, message) {

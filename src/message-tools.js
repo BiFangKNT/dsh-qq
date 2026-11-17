@@ -2,11 +2,12 @@ import { canAccessChat } from './access.js'
 import { listOf } from './config.js'
 import { importChatHistory } from './history-import.js'
 import { readMessage } from './onebot/segment.js'
+import { fitToolText, jsonSize, TOOL_RESULT_LIMIT } from './tool-result.js'
 
 export function registerMessageTool(tools, manager, config) {
   tools.register({
     name: 'qq_history',
-    description: '查询聊天收发记录，默认当前聊天，按时间从新到旧返回。before 使用上页返回值向前翻页；seq 定位单条，offset 续读长正文。chat 可指定 group:<群号> 或 user:<QQ号>，跨聊天仅授权账号私聊可查，目标也必须获准。include_status 可附带处理或发送状态；未确认发送不代表对方已收到。回查不推进处理位置，不是用户的新要求。',
+    description: '查询聊天收发记录，默认当前聊天，按时间从新到旧返回。before 使用上页返回值向前翻页；seq 定位单条，offset 续读长正文。完整JSON最多12000字符；partial表示局部返回，next带seq/offset时先续读该消息，单条读完且仍有更早记录时next带before继续向前翻页，保持chat、days、include_status等筛选不变。chat 可指定 group:<群号> 或 user:<QQ号>，跨聊天仅授权账号私聊可查，目标也必须获准。include_status 可附带处理或发送状态；未确认发送不代表对方已收到。回查不推进处理位置，不是用户的新要求。',
     parameters: { type: 'object', properties: {
       chat: { type: 'string', description: '留空查当前聊天；指定 group:<群号> 或 user:<QQ号>' },
       before: { type: 'integer', minimum: 1 }, seq: { type: 'integer', minimum: 1 },
@@ -47,29 +48,36 @@ export function registerMessageTool(tools, manager, config) {
       store.assertReadable(target)
       await importChatHistory(store, config, target)
       assertAccess()
-      const rows = store.query(target, { ...args, since: args.days ? Date.now() - args.days * 86400000 : 0,
-        limit: Math.min(args.limit ?? 10, 20) })
-      let remaining = 12000
-      const messages = []
-      for (const row of rows) {
-        if (!remaining) break
+      const limit = Math.min(args.limit ?? 10, 20)
+      const since = args.days ? Date.now() - args.days * 86400000 : 0
+      const rows = store.query(target, { ...args, since, limit: limit + 1 })
+      const older = args.seq !== undefined && rows.length > 0 &&
+        store.query(target, { before: rows[0].seq, since, limit: 1 }).length > 0
+      let result = { ok: true, chat: `${target.scope === 'group' ? 'group' : 'user'}:${target.peerId}`, messages: [],
+        before: null, partial: false, next: null,
+        ...(args.include_status ? { blocked: store.blocked(target)?.reason ?? null } : {}) }
+      for (const row of rows.slice(0, limit)) {
         const body = row.body ?? (row.source?.message !== undefined
           ? readMessage(row.source.message, { selfId: target.selfId }).text || '[非文字消息]'
           : row.legacy ? '[旧版本仅保留消息 ID，原文不可恢复]' : '[消息尚未准备完成]')
         const offset = args.seq ? args.offset ?? 0 : 0
-        const text = body.slice(offset, offset + remaining)
-        remaining -= text.length
-        messages.push({ seq: row.seq, id: row.direction === 'outgoing' ? row.messageId ?? null : row.id, direction: row.direction ?? 'incoming',
-          senderId: row.message?.senderId ?? row.source?.user_id,
-          senderName: row.message?.senderName ?? row.source?.sender?.card ?? row.source?.sender?.nickname,
-          ...(args.include_status ? { status: row.status === 'sending' ? 'uncertain' : row.status } : {}),
-          ...(row.direction === 'outgoing' ? { confirmed: row.status === 'sent' || row.status === 'archived' } : {}), text, offset,
-          nextOffset: offset + text.length < body.length ? offset + text.length : null,
-          receivedAt: row.receivedAt })
+        const build = (text, end) => {
+          const moreText = end < body.length
+          const moreRows = args.seq !== undefined ? older : rows.length > result.messages.length + 1
+          const message = { seq: row.seq, id: row.direction === 'outgoing' ? row.messageId ?? null : row.id, direction: row.direction ?? 'incoming',
+            senderId: row.message?.senderId ?? row.source?.user_id,
+            senderName: row.message?.senderName ?? row.source?.sender?.card ?? row.source?.sender?.nickname,
+            ...(args.include_status ? { status: row.status === 'sending' ? 'uncertain' : row.status } : {}),
+            ...(row.direction === 'outgoing' ? { confirmed: row.status === 'sent' || row.status === 'archived' } : {}), text, offset,
+            nextOffset: moreText ? end : null, receivedAt: row.receivedAt }
+          return { ...result, messages: [...result.messages, message], before: row.seq, partial: moreText || moreRows,
+            next: moreText ? { seq: row.seq, offset: end } : moreRows ? { before: row.seq } : null }
+        }
+        if (result.messages.length && jsonSize(build(body.slice(offset), body.length)) > TOOL_RESULT_LIMIT) break
+        result = fitToolText(body, offset, build)
+        if (result.next?.seq) break
       }
-      return { ok: true, chat: `${target.scope === 'group' ? 'group' : 'user'}:${target.peerId}`, messages,
-        before: messages.at(-1)?.seq ?? null,
-        ...(args.include_status ? { blocked: store.blocked(target)?.reason ?? null } : {}) }
+      return result
     },
   })
 }

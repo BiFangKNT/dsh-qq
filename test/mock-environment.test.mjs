@@ -121,7 +121,8 @@ test('真实工具调用、预设文件读写和发图下载夹具，失败不�
   env.host.queueTurn([{ type: 'tool', name: 'read', args: { path: '../不能越界.md' } }])
   env.emitMessage({ text: '越界测试' })
   await waitFor(() => agent.received.length === 2); await idle(env)
-  assert.match(JSON.stringify(agent.session.events.at(-1)), /路径超出/)
+  assert.match(agent.results.at(-1).error.message, /路径超出/)
+  assert.equal(agent.results.at(-1).isError, true)
 })
 
 test('屏蔽图片仍让模型知道发过图，不请求图片文件', async t => {
@@ -278,7 +279,7 @@ test('跨聊天发送失败记录在目标聊天，不记为已送达，不自�
   ] })
   await waitFor(() => [...env.host.agents.values()][0]?.results.length === 3); await idle(env)
   const agent = [...env.host.agents.values()][0]
-  assert.equal(agent.results[0].result.ok, false)
+  assert.equal(agent.results[0].isError, true)
   const target = agent.results[1].result.messages
   assert.equal(target.length, 1)
   assert.equal(target[0].text, '未送达的目标内容')
@@ -318,8 +319,8 @@ test('消息实际发出但回执缺少消息 ID 时，工具和历史均标为�
   ] })
   await waitFor(() => [...env.host.agents.values()][0]?.results.length === 2); await idle(env)
   const agent = [...env.host.agents.values()][0]
-  assert.equal(agent.results[0].result.ok, false)
-  assert.match(agent.results[0].result.reason, /未确认|不自动重发/)
+  assert.equal(agent.results[0].isError, true)
+  assert.match(agent.results[0].error.message, /未确认/)
   assert.equal(agent.results[1].result.messages[0].status, 'uncertain')
   assert.equal(agent.results[1].result.messages[0].confirmed, false)
   assert.equal(env.napcat.calls.filter(call => call.action === 'send_group_msg').length, 1)

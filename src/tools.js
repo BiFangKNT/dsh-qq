@@ -8,6 +8,7 @@
  * 不让插件因为缺服务而启动失败。
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -24,6 +25,8 @@ import { createKnowledge } from './knowledge.js'
 import { registerKnowledgeTools } from './knowledge-tools.js'
 import { resolveSendTarget, assertSendAccess, parseMessageId } from './tool-send.js'
 import { createToolPolicy } from './tool-policy.js'
+import { parseCQString } from './onebot/segment.js'
+import { callToolAction, sendToolMessage, EXTERNAL_ACTION_RULE, fitToolText, jsonSize, TOOL_RESULT_LIMIT } from './tool-result.js'
 
 const POKE_DESC =
   '戳一戳当前对话里的对方（私聊戳好友，群聊戳那位发言的人）。用来提醒对方注意、' +
@@ -39,7 +42,7 @@ const IMAGES_DESC =
   '消息正文里只会出现一个 `[图片]` 占位——那一刻没被叫醒、或者当时没顾上看，' +
   '事后用这个工具还能把那张图捞回来。' +
   '聊天流水里每行末尾有 `#msg=123456`，那就是这条消息的 id；不填 id 就是最近收到的这一条。' +
-  '拿回来的是本机文件路径，接着用 read_image 打开就能看见。一次最多四张。'
+  '返回本机文件路径，用 read_image 打开。每次最多四张；nextOffset非空时用offset继续取图，failed列出本批下载失败的序号（从0开始）。无图片是正常结果。'
 
 const LIKE_DESC =
   '给对方的 QQ 名片点赞（就是资料页的那个赞）。每天每人最多 10 次，' +
@@ -136,7 +139,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
 
   tools.register({
     name: 'qq_poke',
-    description: POKE_DESC,
+    description: POKE_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -155,7 +158,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `戳了戳 ${value.target}` : `没戳到 ${value.target}` },
+        { type: 'text', text: `戳了戳 ${value.target}` },
       ],
     },
     async execute(args, exec) {
@@ -164,23 +167,18 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (!Number.isFinite(targetUser) || targetUser <= 0) {
         throw new Error('qq_poke: 不知道要戳谁（拿不到对方的 QQ 号）')
       }
-      try {
-        if (record.scope === 'group') {
-          await client.call('group_poke', { group_id: Number(record.peerId), user_id: targetUser })
-        } else {
-          await client.call('friend_poke', { user_id: targetUser })
-        }
-        return { ok: true, target: String(targetUser) }
-      } catch (err) {
-        logger.warn?.(`qq_poke 失败: ${err?.message ?? err}`)
-        return { ok: false, target: String(targetUser) }
+      if (record.scope === 'group') {
+        await callToolAction(client, 'group_poke', { group_id: Number(record.peerId), user_id: targetUser }, logger)
+      } else {
+        await callToolAction(client, 'friend_poke', { user_id: targetUser }, logger)
       }
+      return { ok: true, target: String(targetUser) }
     },
   })
 
   tools.register({
     name: 'qq_react',
-    description: REACT_DESC,
+    description: REACT_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -198,26 +196,21 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `给消息 ${value.messageId} 贴了表情` : '贴表情失败' },
+        { type: 'text', text: `给消息 ${value.messageId} 贴了表情` },
       ],
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
-      const messageId = Number(args?.message_id ?? record.lastMessageId ?? 0)
-      if (!Number.isFinite(messageId) || messageId <= 0) {
+      const messageId = parseMessageId(args?.message_id ?? record.lastMessageId)
+      if (messageId === null) {
         throw new Error('qq_react: 找不到可表态的消息')
       }
-      try {
-        await client.call('set_msg_emoji_like', {
-          message_id: messageId,
-          emoji_id: String(args.emoji_id),
-          set: true,
-        })
-        return { ok: true, messageId }
-      } catch (err) {
-        logger.warn?.(`qq_react 失败: ${err?.message ?? err}`)
-        return { ok: false, messageId }
-      }
+      await callToolAction(client, 'set_msg_emoji_like', {
+        message_id: messageId,
+        emoji_id: String(args.emoji_id),
+        set: true,
+      }, logger)
+      return { ok: true, messageId }
     },
   })
 
@@ -227,6 +220,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     parameters: {
       type: 'object',
       properties: {
+        offset: { type: 'integer', minimum: 0, description: '图片序号，默认0；续读取nextOffset' },
         message_id: {
           type: 'integer',
           description: '可选：要看哪条消息里的图（流水里 `#msg=` 后面那串）。不填就是最近收到的这一条。',
@@ -242,75 +236,69 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
           messageId: { type: 'integer' },
           paths: { type: 'array', items: { type: 'string' } },
           message: { type: 'string' },
+          partial: { type: 'boolean' }, total: { type: 'integer' },
+          nextOffset: { oneOf: [{ type: 'integer' }, { type: 'null' }] }, failed: { type: 'array', items: { type: 'integer' } },
         },
         required: ['ok', 'messageId', 'paths', 'message'],
         additionalProperties: false,
       },
-      render: (_args, value) => [
-        {
-          type: 'text',
-          text: value.paths.length
-            ? `${value.message}：\n${value.paths.map((p) => `  ${p}`).join('\n')}\n（用 read_image 打开）`
-            : value.message,
-        },
-      ],
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
-      const messageId = Number(args?.message_id ?? record.lastMessageId ?? 0)
-      if (!Number.isFinite(messageId) || messageId <= 0) {
+      const messageId = parseMessageId(args?.message_id ?? record.lastMessageId)
+      if (messageId === null) {
         throw new Error('qq_images: 不知道要看哪条消息')
       }
 
+      const offset = args.offset ?? 0
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('图片位置无效')
       let data
       try {
         data = await client.call('get_msg', { message_id: messageId })
       } catch (err) {
         logger.warn?.(`qq_images 取消息失败: ${err?.message ?? err}`)
-        return { ok: false, messageId, paths: [], message: `取不到这条消息：${err?.message ?? err}` }
+        throw new Error('取消息失败')
       }
 
-      const segs = Array.isArray(data?.message)
-        ? data.message
-        : Array.isArray(data?.data?.message)
-          ? data.data.message
-          : []
+      const message = data?.message ?? data?.data?.message
+      if (!Array.isArray(message) && typeof message !== 'string') throw new Error('消息回执缺少正文')
+      const segs = Array.isArray(message) ? message : parseCQString(message)
       const urls = []
       for (const seg of segs) {
         if (seg?.type !== 'image') continue
         const d = seg.data ?? {}
         const src = String(d.url ?? '') || String(d.file ?? '') || String(d.path ?? '')
         if (src) urls.push(src)
-        if (urls.length >= 4) break
       }
       if (urls.length === 0) {
         return {
           ok: true,
           messageId,
           paths: [],
-          message: '这条消息里没有图片（表情包和合并转发里的图不算在这一条里）',
+          message: '无图片', total: 0, partial: false, nextOffset: null, failed: [],
         }
       }
 
+      if (offset >= urls.length) throw new Error('图片位置无效')
       const cacheDir = record.dir
         ? join(record.dir, '图片缓存')
         : join(String(config?.cwd ?? '').trim() || process.cwd(), '图片缓存')
       await mkdir(cacheDir, { recursive: true }).catch(() => {})
       const maxMB = Number(config?.imageMaxMB) || 8
-      const paths = (
-        await Promise.all(urls.map((u) => downloadImage(u, cacheDir, maxMB)))
-      ).filter(Boolean)
-
-      if (paths.length === 0) {
-        return { ok: false, messageId, paths: [], message: '图找到了但拿不下来（链接可能过期了）' }
-      }
-      return { ok: true, messageId, paths, message: `拿到 ${paths.length} 张图` }
+      const downloaded = await Promise.all(urls.slice(offset, offset + 4).map(u => downloadImage(u, cacheDir, maxMB)))
+      const paths = downloaded.filter(Boolean)
+      if (!paths.length) throw new Error('图片下载失败：链接可能已过期')
+      const failed = downloaded.flatMap((value, index) => value ? [] : [offset + index])
+      const nextOffset = offset + downloaded.length < urls.length ? offset + downloaded.length : null
+      return { ok: true, messageId, paths, message: '', total: urls.length,
+        partial: failed.length > 0 || nextOffset !== null, nextOffset, failed }
     },
   })
 
   tools.register({
     name: 'qq_like',
-    description: LIKE_DESC,
+    description: LIKE_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -327,7 +315,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `给 ${value.target} 点了赞` : `给 ${value.target} 点赞失败` },
+        { type: 'text', text: `给 ${value.target} 点了赞` },
       ],
     },
     async execute(args, exec) {
@@ -337,19 +325,14 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (!Number.isFinite(target) || target <= 0) {
         throw new Error('qq_like: 不知道给谁点赞')
       }
-      try {
-        await client.call('send_like', { user_id: target, times })
-        return { ok: true, target: String(target) }
-      } catch (err) {
-        logger.warn?.(`qq_like 失败: ${err?.message ?? err}`)
-        return { ok: false, target: String(target) }
-      }
+      await callToolAction(client, 'send_like', { user_id: target, times }, logger)
+      return { ok: true, target: String(target) }
     },
   })
 
   tools.register({
     name: 'qq_send_image',
-    description: IMAGE_DESC,
+    description: IMAGE_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -361,14 +344,14 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
     output: {
       schema: {
         type: 'object',
-        properties: { ok: { type: 'boolean' }, target: { type: 'string' }, reason: { type: 'string' } },
+        properties: { ok: { type: 'boolean' }, target: { type: 'string' } },
         required: ['ok', 'target'],
         additionalProperties: false,
       },
       render: (_args, value) => [
         {
           type: 'text',
-          text: value.ok ? `图片已发到 ${value.target}` : `图片没发出去${value.reason ? `：${value.reason}` : ''}`,
+          text: `图片已发到 ${value.target}`,
         },
       ],
     },
@@ -378,26 +361,18 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (!file) throw new Error('qq_send_image: file 不能为空')
       // 图片也算「发图」，跟表情包共用同一个节奏闸
       const gate = faceSendState(config)
-      if (!gate.allowed) return { ok: false, target: record.label, reason: gate.reason }
+      if (!gate.allowed) throw new Error(gate.reason)
       const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
-      try {
-        await client.call(action, {
-          ...peerOf(record),
-          message: [{ type: 'image', data: { file } }],
-        })
-        markFaceSent()
-        noteToolSent(record, '[图片]')
-        return { ok: true, target: record.label }
-      } catch (err) {
-        logger.warn?.(`qq_send_image 失败: ${err?.message ?? err}`)
-        return { ok: false, target: record.label }
-      }
+      const messageId = await sendToolMessage(client, action, { ...peerOf(record), message: [{ type: 'image', data: { file } }] }, logger)
+      markFaceSent()
+      noteToolSent(record, '[图片]', record, messageId)
+      return { ok: true, target: record.label }
     },
   })
 
   tools.register({
     name: 'qq_face',
-    description: FACE_DESC,
+    description: FACE_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -414,7 +389,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `发了个表情 ${value.id}` : `表情 ${value.id} 没发出去` },
+        { type: 'text', text: `发了个表情 ${value.id}` },
       ],
     },
     async execute(args, exec) {
@@ -422,23 +397,15 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const id = String(args?.id ?? '').trim()
       if (!id) throw new Error('qq_face: id 不能为空')
       const action = record.scope === 'group' ? 'send_group_msg' : 'send_private_msg'
-      try {
-        await client.call(action, {
-          ...peerOf(record),
-          message: [{ type: 'face', data: { id } }],
-        })
-        noteToolSent(record, `[表情 ${id}]`)
-        return { ok: true, id }
-      } catch (err) {
-        logger.warn?.(`qq_face 失败: ${err?.message ?? err}`)
-        return { ok: false, id }
-      }
+      const messageId = await sendToolMessage(client, action, { ...peerOf(record), message: [{ type: 'face', data: { id } }] }, logger)
+      noteToolSent(record, `[表情 ${id}]`, record, messageId)
+      return { ok: true, id }
     },
   })
 
   tools.register({
     name: 'qq_send_file',
-    description: FILE_DESC,
+    description: FILE_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -456,7 +423,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `文件已发到 ${value.target}` : `文件没发出去（${value.target}）` },
+        { type: 'text', text: `文件已发到 ${value.target}` },
       ],
     },
     async execute(args, exec) {
@@ -464,32 +431,17 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const file = String(args?.file ?? '').trim()
       if (!file) throw new Error('qq_send_file: file 不能为空')
       const name = String(args?.name ?? '').trim() || file.split(/[\\/]/).pop()
-      try {
-        if (record.scope === 'group') {
-          await client.call('upload_group_file', {
-            group_id: Number(record.peerId),
-            file,
-            name,
-          })
-        } else {
-          await client.call('upload_private_file', {
-            user_id: Number(record.peerId),
-            file,
-            name,
-          })
-        }
-        noteToolSent(record, `[文件] ${name}`)
-        return { ok: true, target: record.label }
-      } catch (err) {
-        logger.warn?.(`qq_send_file 失败: ${err?.message ?? err}`)
-        return { ok: false, target: record.label }
-      }
+      await callToolAction(client, record.scope === 'group' ? 'upload_group_file' : 'upload_private_file', {
+        ...peerOf(record), file, name,
+      }, logger)
+      noteToolSent(record, `[文件] ${name}`)
+      return { ok: true, target: record.label }
     },
   })
 
   tools.register({
     name: 'qq_recall',
-    description: RECALL_DESC,
+    description: RECALL_DESC + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -505,7 +457,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `已撤回消息 ${value.messageId}` : '撤回失败（可能超过两分钟了）' },
+        { type: 'text', text: `已撤回消息 ${value.messageId}` },
       ],
     },
     async execute(args, exec) {
@@ -514,13 +466,8 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       if (messageId === null) {
         throw new Error('qq_recall: 找不到要撤回的消息')
       }
-      try {
-        await client.call('delete_msg', { message_id: messageId })
-        return { ok: true, messageId }
-      } catch (err) {
-        logger.warn?.(`qq_recall 失败: ${err?.message ?? err}`)
-        return { ok: false, messageId }
-      }
+      await callToolAction(client, 'delete_msg', { message_id: messageId }, logger)
+      return { ok: true, messageId }
     },
   })
 
@@ -530,7 +477,7 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       '发送文字；可用 message_id 引用目标聊天中的消息。普通回复直接输出正文即可。' +
       '不填 to 就发给「当前正在跟你说话的人/群」；' +
       'to 可指定 `user:<QQ号>` 或 `group:<群号>`；跨聊天发送仅授权账号私聊可用，当前聊天和目标均须获准。' +
-      '引用消息须经聊天记录或协议端确认属于目标聊天；无法确认时不发送。发送结果不确定时先检查目标聊天，不自动重发。',
+      '引用消息须经聊天记录或协议端确认属于目标聊天；无法确认时不发送。' + EXTERNAL_ACTION_RULE,
     parameters: {
       type: 'object',
       properties: {
@@ -548,13 +495,12 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
           ok: { type: 'boolean' },
           messageId: { type: 'integer' },
           target: { type: 'string' },
-          reason: { type: 'string' },
         },
         required: ['ok'],
         additionalProperties: false,
       },
       render: (_args, value) => [
-        { type: 'text', text: value.ok ? `已发到 ${value.target}` : value.reason || '发送未确认，请先检查目标聊天，不自动重发。' },
+        { type: 'text', text: `已发到 ${value.target}` },
       ],
     },
     async execute(args, exec) {
@@ -580,21 +526,12 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
       const target = peerOf(destination)
       const targetLabel = `${destination.scope === 'group' ? 'group' : 'user'}:${destination.peerId}`
 
-      try {
-        const result = await client.call(action, {
-          ...target,
-          message: [...(quoted === null ? [] : [{ type: 'reply', data: { id: String(quoted) } }]), { type: 'text', data: { text } }],
-        })
-        const sentId = parseMessageId(result?.message_id ?? result?.data?.message_id)
-        if (sentId !== null) noteToolSent(record, text, destination, sentId)
-        else return { ok: false, messageId: 0, target: targetLabel, reason: '回执缺少有效消息 ID，发送未确认。请先检查目标聊天，不自动重发。' }
-        return { ok: true, messageId: sentId, target: targetLabel }
-      } catch (err) {
-        logger.warn?.(`qq_send 失败: ${err?.message ?? err}`)
-        return { ok: false, messageId: 0, target: targetLabel, reason: ['rejected', 'not-sent'].includes(err.onebotDelivery)
-          ? '发送未成功，请检查目标聊天和连接后再决定是否重试。'
-          : '发送未确认，可能已经送达。请先检查目标聊天，不自动重发。' }
-      }
+      const sentId = await sendToolMessage(client, action, {
+        ...target,
+        message: [...(quoted === null ? [] : [{ type: 'reply', data: { id: String(quoted) } }]), { type: 'text', data: { text } }],
+      }, logger)
+      noteToolSent(record, text, destination, sentId)
+      return { ok: true, messageId: sentId, target: targetLabel }
     },
   })
 
@@ -625,240 +562,96 @@ export function registerTools(ctx, { client, manager, config, logger, wake, note
           ok: { type: 'boolean' },
           added: { type: 'boolean' },
           total: { type: 'integer' },
-          reason: { type: 'string' },
         },
         required: ['ok'],
         additionalProperties: false,
       },
-      render: (_args, value) => [
-        {
-          type: 'text',
-          text: value.ok
-            ? value.added
-              ? `收好了，现在一共 ${value.total} 个`
-              : `这个之前就收过了，一共还是 ${value.total} 个`
-            : `没收进去：${value.reason ?? '未知原因'}`,
-        },
-      ],
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args) {
       if (!['requested', 'automatic'].includes(args?.mode)) throw new Error('请说明收藏来源：requested（用户明确要求）或 automatic（按自动收藏规则）')
       if (args.mode === 'automatic' && !String(config.faceCollectHint ?? '').trim()) throw new Error('未设置普通图片自动收藏规则，只能按用户明确要求收藏')
       const result = keepFace(config, { path: args?.path, summary: args?.summary })
-      return result
+      if (!result.ok) {
+        logger.warn?.(`qq_keep_face 失败：${result.reason}`)
+        throw new Error(existsSync(String(args.path)) ? '收藏写入失败' : '收藏文件不存在')
+      }
+      return { ok: true, added: result.added, total: result.total }
     },
   })
 
   tools.register({
     name: 'qq_faces',
-    description:
-      '看「表情包收藏」里都有哪些图（名字 + 数量）。挑图之前先看一眼，别凭印象猜名字。' +
-      '可以带 keyword 过滤，例如「问号」会把名字里带「问号」的挑出来。',
-    parameters: {
-      type: 'object',
-      properties: {
-        keyword: { type: 'string', description: '按名字里的字过滤，可空' },
-      },
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          total: { type: 'integer' },
-          matched: { type: 'integer' },
-          names: { type: 'array', items: { type: 'string' } },
-        },
-        required: ['ok', 'total'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [
-        {
-          type: 'text',
-          text: value.ok
-            ? `一共 ${value.total} 张，匹配 ${value.matched} 张：${
-                value.names?.length ? value.names.join('、') : '（没有名字对得上的）'
-              }`
-            : '收藏里一张图都没有',
-        },
-      ],
-    },
+    description: '查询表情收藏名称。total 是全部收藏数，unnamed 是无名称数，matched 是关键词命中的有名称数；空收藏或无命中是正常结果。最多返回50个名称，完整JSON最多12000字符。partial=true 时保持keyword，携带next中的offset、textOffset和snapshot续读；textOffset非零时names第一项是上个名称的后续文字，拼接后才是完整名称。收藏变化导致STALE_PAGE时从头查询。',
+    parameters: { type: 'object', properties: {
+      keyword: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, textOffset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1, maximum: 50 }, snapshot: { type: 'string' },
+    }, additionalProperties: false },
+    output: { schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(args) {
-      const all = listFaces(config, 500)
+      const all = listFaces(config, Number.MAX_SAFE_INTEGER)
       const kw = String(args?.keyword ?? '').trim()
-      const names = all
-        .map((f) => String(f.summary ?? '').trim())
-        .filter((n) => n && (!kw || n.includes(kw)))
-      return { ok: all.length > 0, total: all.length, matched: names.length, names: names.slice(0, 50) }
+      const named = all.map(f => String(f.summary ?? '').trim()).filter(Boolean)
+      const names = named.filter(n => !kw || n.includes(kw))
+      const snapshot = createHash('sha256').update(JSON.stringify([kw, all])).digest('hex')
+      const offset = args.offset ?? 0, textOffset = args.textOffset ?? 0, limit = args.limit ?? 50
+      if (![offset, textOffset, limit].every(Number.isSafeInteger) || offset < 0 || offset > names.length || textOffset < 0 || limit < 1 || limit > 50 ||
+        textOffset && offset === names.length) throw new Error('分页参数无效')
+      if ((offset || textOffset) && args.snapshot !== snapshot || args.snapshot !== undefined && args.snapshot !== snapshot) throw new Error('STALE_PAGE')
+      let result = { ok: true, total: all.length, unnamed: all.length - named.length, matched: names.length,
+        offset, textOffset, snapshot, names: [], partial: false, next: null }
+      for (let index = offset; index < names.length && result.names.length < limit; index++) {
+        const from = index === offset ? textOffset : 0
+        const build = (text, end) => {
+          const nextIndex = end < names[index].length ? index : index + 1
+          const next = nextIndex < names.length ? { offset: nextIndex, textOffset: end < names[index].length ? end : 0, snapshot } : null
+          return { ...result, names: [...result.names, text], partial: next !== null, next }
+        }
+        if (result.names.length && jsonSize(build(names[index].slice(from), names[index].length)) > TOOL_RESULT_LIMIT) break
+        result = fitToolText(names[index], from, build)
+        if (result.next?.textOffset) break
+      }
+      return result
     },
   })
 
   tools.register({
     name: 'qq_mface',
-    description:
-      '发一张表情包（收藏里的图，或 QQ 商城表情）。' +
-      '一般只写 summary —— 用收藏那张的名字，比如「抱着小人偶一脸问号」「哼！」「求求了」；' +
-      '不知道有哪些名字就先调 qq_faces 看一眼，别瞎猜。不写 summary 就从收藏里随机挑一张。' +
-      '也可以给 emoji_id + emoji_package_id 指定某个商城表情。' +
-      '⚠️ 有节奏限制：两张之间至少隔一会儿、一小时有上限，超了会被直接拒绝。' +
-      '表情是点缀，不是标点符号 —— 正经说话就好好说，别每句都配一张。',
-    parameters: {
-      type: 'object',
-      properties: {
-        emoji_id: { type: 'string', description: '表情 id（指定商城表情时才用），例如 96e2cc34b1a4d3ee6b2b' },
-        emoji_package_id: { type: 'string', description: '表情包 id（可空，兜底 CDN 要用）' },
-        key: { type: 'string', description: '有些版本需要 key，可空' },
-        summary: { type: 'string', description: '要哪张：收藏那张的名字，例如「抱着小人偶一脸问号」；收藏里有对得上的就发它' },
-      },
-      additionalProperties: false,
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          mode: { type: 'string' },
-          messageId: { type: 'integer' },
-          reason: { type: 'string' },
-        },
-        required: ['ok'],
-        additionalProperties: false,
-      },
-      render: (_args, value) => [
-        {
-          type: 'text',
-          text: value.ok
-            ? `已发出（${value.mode}${value.reason ? ` · ${value.reason}` : ''}）`
-            : `没发出去：${value.reason ?? '未知原因'}`,
-        },
-      ],
-    },
+    description: '发送收藏图片或 QQ 商城表情。summary 按 qq_faces 返回的名称选择，留空随机；也可用 emoji_id、emoji_package_id、key 指定商城表情。受图片发送间隔和每小时限额限制；不会自动改用 CDN 重发。' + EXTERNAL_ACTION_RULE,
+    parameters: { type: 'object', properties: {
+      emoji_id: { type: 'string' }, emoji_package_id: { type: 'string' }, key: { type: 'string' },
+      summary: { type: 'string', description: '收藏名称；省略则随机选择' },
+    }, additionalProperties: false },
+    output: { schema: { type: 'object', properties: {
+      ok: { type: 'boolean' }, mode: { type: 'string' }, messageId: { type: 'integer' },
+    }, required: ['ok', 'mode', 'messageId'], additionalProperties: false },
+    render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(args, exec) {
       const record = needRecord(manager, exec)
-
-      // 节奏闸：表情是点缀，不是标点符号（姐姐原话「不能频繁使用，偶尔用用」）
       const gate = faceSendState(config)
-      if (!gate.allowed) {
-        return { ok: false, mode: 'throttled', messageId: 0, reason: gate.reason }
-      }
-
-      // 没给 id 就从收藏里挑一个；收藏空着就直接说清楚，别硬发
-      let face
+      if (!gate.allowed) throw new Error(gate.reason)
       const explicit = String(args?.emoji_id ?? '').trim()
-      if (explicit) {
-        face = {
-          kind: 'mface',
-          emojiId: explicit,
-          packageId: String(args?.emoji_package_id ?? '').trim(),
-          key: String(args?.key ?? '').trim(),
-          summary: String(args?.summary ?? '').trim() || '[表情]',
-        }
-      } else {
-        face = pickFace(config, args?.summary)
-        if (!face) {
-          return {
-            ok: false,
-            mode: 'none',
-            messageId: 0,
-            reason: `收藏夹是空的（0 个）。等对方先发几个表情包，插件会自动攒起来；攒到之前先别发表情，或者说句话代替`,
-          }
-        }
+      const face = explicit ? { kind: 'mface', emojiId: explicit, packageId: String(args?.emoji_package_id ?? '').trim(),
+        key: String(args?.key ?? '').trim(), summary: String(args?.summary ?? '').trim() } : pickFace(config, args?.summary)
+      if (!face) throw new Error('收藏为空')
+      if (face.kind === 'image' && !existsSync(face.path)) throw new Error('收藏图片不存在')
+      const segment = face.kind === 'image' ? { type: 'image', data: { file: face.path } } : {
+        type: 'mface', data: { emoji_id: face.emojiId, emoji_package_id: face.packageId || '1',
+          key: face.key || face.emojiId, summary: face.summary || '[表情]' },
       }
-
-      const isGroup = record.scope === 'group'
-      const action = isGroup ? 'send_group_msg' : 'send_private_msg'
-      const target = isGroup
-        ? { group_id: Number(record.peerId) }
-        : { user_id: Number(record.peerId) }
-
-      // 收藏里也可能是一张本地图片 —— 直接按图片发
-      if (face.kind === 'image') {
-        if (!existsSync(face.path)) {
-          return {
-            ok: false,
-            mode: 'none',
-            messageId: 0,
-            reason: `收藏的图片文件不见了：${face.path}（可换一张，或请用户重新收藏）`,
-          }
-        }
-        try {
-          const result = await client.call(action, {
-            ...target,
-            message: [{ type: 'image', data: { file: face.path } }],
-          })
-          const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
-          if (sentId > 0) {
-            record.lastSentMessageId = sentId
-            markFaceSent()
-            noteToolSent(record, `[表情包] ${face.summary || '图片'}`)
-            return { ok: true, mode: 'image', messageId: sentId, reason: face.summary || '' }
-          }
-        } catch (err) {
-          logger.warn?.(`qq_mface 发收藏图片失败: ${err?.message ?? err}`)
-        }
-        return { ok: false, mode: 'none', messageId: 0, reason: `收藏的图片发不出去：${face.path}` }
-      }
-
-      const { emojiId, packageId, key } = face
-      const summary = face.summary || '[表情]'
-
-      // ① 先正经发 mface 段
-      try {
-        const seg = {
-          type: 'mface',
-          data: {
-            emoji_id: emojiId,
-            emoji_package_id: packageId || '1',
-            key: key || emojiId,
-            summary,
-          },
-        }
-        const result = await client.call(action, { ...target, message: [seg] })
-        const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
-        if (sentId > 0) {
-          record.lastSentMessageId = sentId
-          markFaceSent()
-          noteToolSent(record, `[表情包] ${summary}`)
-          return { ok: true, mode: 'mface', messageId: sentId }
-        }
-      } catch (err) {
-        logger.debug?.(`qq_mface 直发失败，走 CDN 兜底: ${err?.message ?? err}`)
-      }
-
-      // ② 兜底：官方 CDN 的 raw300.gif
-      if (packageId) {
-        policy.assertAvailable('qq_mface', record)
-        try {
-          const url = `https://gxh.vip.qq.com/club/item/parcel/item/${packageId}/${emojiId}/raw300.gif`
-          const result = await client.call(action, {
-            ...target,
-            message: [{ type: 'image', data: { file: url } }],
-          })
-          const sentId = Number(result?.message_id ?? result?.data?.message_id ?? 0)
-          if (sentId > 0) {
-            record.lastSentMessageId = sentId
-            markFaceSent()
-            noteToolSent(record, `[表情包] ${summary}`)
-            return { ok: true, mode: 'cdn', messageId: sentId }
-          }
-        } catch (err) {
-          logger.warn?.(`qq_mface CDN 兜底也失败: ${err?.message ?? err}`)
-        }
-      }
-
-      return {
-        ok: false,
-        mode: 'none',
-        messageId: 0,
-        reason: `这个表情发不出去（id ${packageId || '?'}/${emojiId}），CDN 兜底也没成功`,
-      }
+      const messageId = await sendToolMessage(client, record.scope === 'group' ? 'send_group_msg' : 'send_private_msg', {
+        ...peerOf(record), message: [segment],
+      }, logger)
+      markFaceSent()
+      noteToolSent(record, `[表情包] ${face.summary || '图片'}`, record, messageId)
+      return { ok: true, mode: face.kind, messageId }
     },
   })
 
   registerExtraTools(tools, {
     client, manager, config, home: home ?? homeDirOf(ctx, logger),
-    needRecord, assertText: assertOutboundText, noteToolSent, synthesize, assertAvailable: policy.assertAvailable,
+    needRecord, assertText: assertOutboundText, noteToolSent, synthesize, assertAvailable: policy.assertAvailable, logger,
   })
 
   logger.info?.(

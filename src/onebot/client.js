@@ -77,6 +77,8 @@ export class OneBotClient extends EventEmitter {
     })
     ws.on('close', (code, reason) => {
       this.#ws = null
+      for (const [, pending] of this.#pending) pending.reject(new Error('onebot 连接已断开，结果未确认'))
+      this.#pending.clear()
       this.emit('close', code, String(reason ?? ''))
       this.#scheduleReconnect()
     })
