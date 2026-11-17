@@ -21,7 +21,8 @@ async function harness(t, { config: extra = {}, home = '', answers = [] } = {}) 
     yield { type: 'text-delta', index: 0, text: answers.shift() ?? 'yes' }
     yield { type: 'finish', reason: { kind: 'stop' } }
   } } })
-  const manager = { selfId: '9', selfName: '测试机器人', findByPeer: (scope, peerId) => records.get(scope + ':' + peerId),
+  const manager = { selfId: '9', selfName: '测试机器人', find: id => [...records.values()].find(record => record.sessionId === id),
+    findByPeer: (scope, peerId) => records.get(scope + ':' + peerId),
     async obtain(meta) {
       const key = meta.scope + ':' + meta.peerId
       if (!records.has(key)) records.set(key, { ...meta, sessionId: key, history: [], recent: [], busy: 0,

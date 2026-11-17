@@ -344,6 +344,10 @@ export const ConfigSchema = Schema.object({
   // ── 上下文管理 ──
   contextTokenizerFamily: Schema.union(['v4', 'v41']).default('v41')
     .description('DeepSeek 文本分词系列；v41 用于 V4.1，v4 用于 V4。同系列日期版本共用。须与实际模型匹配；不表示完整请求的精确计费'),
+  backlogSummaryEnabled: Schema.boolean().default(false)
+    .description('积压仍超窗时分批摘要旧消息；默认关闭，开启会增加模型调用和等待；失败保留进度，不改回左截断'),
+  backlogSummaryTimeoutMs: Schema.number().min(1).default(60000)
+    .description('每批积压摘要最长等待毫秒数，群聊和私聊共用'),
   contextGuard: Schema.boolean()
     .default(true)
     .description('记录上下文使用与压缩情况；正常长聊由 DSH 自动压缩，不主动换会话'),

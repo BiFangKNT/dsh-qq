@@ -5,6 +5,7 @@ import { assembleContextFor } from '@deepseek-ai/dsh-agent'
 import { renderPrompt, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
 import { clearRuntimeContext } from './runtime-context.js'
 import { runtimeContextName } from './session-view.js'
+import { createBacklogSummary } from './backlog-summary.js'
 
 const sources = JSON.parse(readFileSync(new URL('../assets/tokenizers/sources.json', import.meta.url), 'utf8'))
 let worker, sequence = 0
@@ -132,7 +133,16 @@ export function createContextBudget({ ctx, config, store, logger, encode = token
   const api = {
     textCount, measure, route, inputBudget,
     fingerprint(record) { return JSON.stringify([conversationConfig(record), ctx.get('compaction')?.config]) },
-    async select(record, manager, messageStore, end, render) {
+    async select(record, manager, messageStore, end, render, { validate = () => {} } = {}) {
+      const fingerprint = api.fingerprint(record)
+      const settings = JSON.stringify([config.backlogSummaryEnabled, config.backlogSummaryTimeoutMs, config.contextTokenizerFamily])
+      const assertCurrent = async () => {
+        await validate()
+        if (api.fingerprint(record) !== fingerprint ||
+          JSON.stringify([config.backlogSummaryEnabled, config.backlogSummaryTimeoutMs, config.contextTokenizerFamily]) !== settings) {
+          throw Object.assign(new Error('摘要期间模型或容量设置已改变，等待按新设置处理'), { code: 'QQ_DELIVERY_CHANGED' })
+        }
+      }
       const choose = async () => {
         const base = await envelope(record, manager), budget = await inputBudget(base)
         const selected = [], costs = []
@@ -170,9 +180,38 @@ export function createContextBudget({ ctx, config, store, logger, encode = token
         const body = render(selected, omitted)
         const total = await measure({ ...plan.base, messages: [...plan.base.messages,
           { role: 'user', content: [{ type: 'text', text: body }] }, ...(plan.base.tail ? [plan.base.tail] : [])] })
-        if (total <= plan.budget.limit) return { selected, omitted, body, tokens: total, limit: plan.budget.limit }
+        if (total <= plan.budget.limit) {
+          if (!omitted.length || !config.backlogSummaryEnabled) return { selected, omitted, body, tokens: total, limit: plan.budget.limit }
+          break
+        }
         if (selected.length <= 1) throw new Error('触发消息和必要说明超出输入预算，原文已保留')
         selected = selected.slice(1)
+      }
+      // 先为完整触发消息和摘要说明留空间，再决定可保留多少近期原文。
+      const measureBody = (base, body) => measure({ ...base, messages: [...base.messages,
+        { role: 'user', content: [{ type: 'text', text: body }] }, ...(base.tail ? [base.tail] : [])] })
+      const placeholder = { text: '', firstSeq: all[0], lastSeq: all.at(-2) }
+      const trigger = selected.at(-1)
+      const spare = plan.budget.limit - await measureBody(plan.base, render([trigger], [], placeholder))
+      const target = Math.min(4096, plan.budget.output, Math.floor(spare / 3))
+      if (target < 32) throw new Error('触发消息之外没有足够的摘要空间，原文已保留')
+      for (;;) {
+        while (selected.length > 1 && await measureBody(plan.base, render(selected, [], placeholder)) + target > plan.budget.limit) {
+          selected = selected.slice(1)
+        }
+        const cutoff = all.filter(seq => seq < selected[0].seq).at(-1)
+        const summary = await summarizer.run(record, { end: cutoff, triggerSeq: trigger.seq,
+          route: conversationConfig(record), target, validate: assertCurrent })
+        selected = selected.filter(item => item.seq > summary.lastSeq)
+        await assertCurrent()
+        // 摘要可能耗时；末尾状态和其他宿主辅助输入重新取当前值。
+        const base = await envelope(record, manager), budget = await inputBudget(base)
+        const body = render(selected, [], summary), total = await measureBody(base, body)
+        await assertCurrent()
+        if (total <= budget.limit) return { selected, omitted: [], summary, body, tokens: total, limit: budget.limit }
+        if (selected.length <= 1) throw new Error('摘要与触发消息超出当前输入预算，原文和摘要进度已保留')
+        selected = selected.slice(1)
+        plan = { ...plan, base, budget }
       }
     },
     async classifierPending(messageStore, meta, input, options) {
@@ -252,6 +291,8 @@ export function createContextBudget({ ctx, config, store, logger, encode = token
         yield* next()
       }, { prepend: true })
     },
+    stop() { summarizer.stop() },
   }
+  const summarizer = createBacklogSummary({ llm, capacity: api, store, config })
   return api
 }

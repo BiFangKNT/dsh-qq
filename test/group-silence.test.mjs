@@ -16,7 +16,7 @@ for (const [i, scenario] of cases.entries()) {
     const record = { scope: 'group', peerId: String(73001 + i), sessionId: `silence-${i}`,
       history: [], recent: [], queue: Promise.resolve(), initialContextDelivered: true,
       agent: { followup: message => delivered.push(message), whenIdle: async () => {} } }
-    const manager = { selfId: '9', selfName: '测试机器人', findByPeer: () => record,
+    const manager = { selfId: '9', selfName: '测试机器人', find: id => record.sessionId === id ? record : null, findByPeer: () => record,
       obtain: async () => record, enqueue: (_record, task) => { record.queue = record.queue.then(task); return record.queue } }
     const config = { groupMode: 'open', requireMention: false, groupMessageIntervalMs: 20,
       groupWakeQuestion: false, mergeWindowMs: 0, historyLimit: 0, chatLog: false,

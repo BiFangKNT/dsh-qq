@@ -51,6 +51,7 @@ function inboundHarness(t, gate, extra = {}) {
     requireMention: false, groupWakeMs: 0, groupReplyGapMs: 0, mergeWindowMs: 0,
     chatLog: false, historyLimit: 0, ...extra.config }
   const manager = { selfId: '9',
+    find: id => [...records.values()].find(record => record.sessionId === id),
     findByPeer: (scope, peerId) => records.get(`${scope}:${peerId}`),
     async obtain(meta) {
       const key = `${meta.scope}:${meta.peerId}`

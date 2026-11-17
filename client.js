@@ -621,6 +621,11 @@ window.__ModuleLoader__.load({
           textField('rateLimitPerMin', '每分钟最多发几条', { hint: '默认 12。0 = 不限。被风控往往不是说了什么，是回得太多。', type: 'number' }),
           textField('contextTokenizerFamily', 'DeepSeek 分词系列', { hint: 'v41 或 v4，按实际模型选择。同系列日期版本共用；文本计量加结构预留，不等于完整请求的精确计费。' })),
 
+        h('div', { 'data-qq-sec': '' },
+          h('div', { 'data-qq-h': '' }, '积压消息'),
+          boolField('backlogSummaryEnabled', '超窗积压分批摘要', '默认关闭。群聊、私聊积压先等待已有历史压缩；仍装不下时，沿用当前模型分批摘要较早消息，保留本次触发原文。会增加调用和延迟；失败保留原文与进度，不改回左截断。'),
+          textField('backlogSummaryTimeoutMs', '每批摘要最长等待（毫秒）', { type: 'number', hint: '默认 60000。已完成批次保存到本地，重启后继续；摘要不发消息、不执行工具。' })),
+
         /* ── 谁能跟它说话 ── */
         h('div', { 'data-qq-sec': '' },
           h('div', { 'data-qq-h': '' }, '访问与工具授权'),

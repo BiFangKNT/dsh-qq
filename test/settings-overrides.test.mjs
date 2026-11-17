@@ -64,7 +64,8 @@ test('页面 null 清除与文件空覆盖一致；同时返回重连、重启�
   t.after(() => cleanups.reverse().forEach(cleanup => cleanup()))
   let handler
   const ctx = { get: () => () => home, effect: setup => { const cleanup = setup(); if (cleanup) cleanups.push(cleanup) } }
-  const config = { localApiPort: 0, debug: false, accessToken: 'initial', workspaceRoot: '', preset: '', asrPython: '' }
+  const config = { localApiPort: 0, debug: false, accessToken: 'initial', workspaceRoot: '', preset: '', asrPython: '',
+    backlogSummaryEnabled: false, backlogSummaryTimeoutMs: 60000 }
   const overridesRef = { current: {} }
   installSettingsApi({ ctx, config, overridesRef, logger: {},
     webServer: { register: route => { handler = route.handler; return () => {} } } })
@@ -103,6 +104,20 @@ test('页面 null 清除与文件空覆盖一致；同时返回重连、重启�
   result = await post({ splitDelayMeanMs: -1 })
   assert.equal(result.status, 400)
   assert.equal(config.splitDelayMeanMs, 0)
+  result = await post({ backlogSummaryEnabled: true, backlogSummaryTimeoutMs: 90000 })
+  assert.equal(result.status, 200)
+  assert.equal(result.values.backlogSummaryEnabled, true)
+  assert.equal(result.values.backlogSummaryTimeoutMs, 90000)
+  assert.equal(result.systemChanged, false)
+  const saved = loadOverrides(ctx, {}, { strict: true })
+  assert.equal(saved.backlogSummaryEnabled, true)
+  assert.equal(saved.backlogSummaryTimeoutMs, 90000)
+  for (const patch of [{ backlogSummaryEnabled: 'true' }, { backlogSummaryTimeoutMs: 0 }, { backlogSummaryTimeoutMs: -1 }]) {
+    assert.equal((await post(patch)).status, 400)
+  }
+  result = await post({ backlogSummaryEnabled: null, backlogSummaryTimeoutMs: null })
+  assert.equal(result.values.backlogSummaryEnabled, false)
+  assert.equal(result.values.backlogSummaryTimeoutMs, 60000)
   writeFileSync(join(home, 'settings.json'), '{')
   assert.throws(() => loadOverrides(ctx, {}, { strict: true }))
 })

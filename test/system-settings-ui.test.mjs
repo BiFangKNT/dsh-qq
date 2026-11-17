@@ -147,6 +147,22 @@ test('设置页提供 Agent 工具预设，保存 preset 并说明新会话生�
   assert.deepEqual(h.calls.find(call => call.url.endsWith('/settings')).body, { patch: { preset: 'images' } })
 })
 
+test('设置页可保存积压摘要开关和单批超时，说明额外调用与失败保留', async () => {
+  const h = await panel()
+  const tree = h.render()
+  const at = tree.findIndex(element => element.children.includes('超窗积压分批摘要'))
+  assert.ok(at >= 0)
+  await tree.slice(at).find(element => typeof element.props.onToggle === 'function').props.onToggle(true)
+  assert.deepEqual(h.calls.findLast(call => call.url.endsWith('/settings')).body,
+    { patch: { backlogSummaryEnabled: true } })
+  const label = tree.findIndex(element => element.children.includes('每批摘要最长等待（毫秒）'))
+  await tree.slice(label).find(element => element.type === 'input').props.onBlur({ target: { value: '90000' } })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(h.calls.findLast(call => call.url.endsWith('/settings')).body,
+    { patch: { backlogSummaryTimeoutMs: 90000 } })
+  assert.match(JSON.stringify(tree), /默认关闭|增加调用和延迟|失败保留/)
+})
+
 test('设置页提供工具分组开关和普通图片收藏规则，保存配置并说明生效时机', async () => {
   const h = await panel()
   for (const [label, key] of [['QQ 互动', 'qqInteractionEnabled'], ['表情包使用', 'stickerEnabled'], ['合成语音', 'voiceEnabled'], ['发布空间', 'qzoneEnabled']]) {

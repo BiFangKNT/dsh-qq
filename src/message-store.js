@@ -44,6 +44,7 @@ export function createMessageStore(home = '', logger) {
       tokens INTEGER NOT NULL, PRIMARY KEY(version,hash));
     CREATE TABLE IF NOT EXISTS blocked_deliveries (chat TEXT PRIMARY KEY, signature TEXT NOT NULL, reason TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS migration_errors (name TEXT PRIMARY KEY, reason TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS backlog_summaries (chat TEXT PRIMARY KEY, state TEXT NOT NULL);
   `))
   function ensure(db, meta) {
     const key = keyOf(meta)
@@ -145,6 +146,16 @@ export function createMessageStore(home = '', logger) {
       return use(db => db.prepare('SELECT * FROM messages WHERE chat=? AND status=? AND seq<=? AND seq<? ORDER BY seq DESC LIMIT ?')
         .all(keyOf(meta), status, end, before, limit).map(decode))
     },
+    summaryPage(meta, { end, after = 0, limit = 64 }) {
+      return use(db => db.prepare("SELECT * FROM messages WHERE chat=? AND status='pending' AND seq<=? AND seq>? ORDER BY seq LIMIT ?")
+        .all(keyOf(meta), end, after, limit).map(decode))
+    },
+    readBacklogSummary(meta) {
+      return use(db => { const row = db.prepare('SELECT state FROM backlog_summaries WHERE chat=?').get(keyOf(meta)); return row ? JSON.parse(row.state) : null })
+    },
+    saveBacklogSummary(meta, state) {
+      transaction(db => db.prepare('INSERT OR REPLACE INTO backlog_summaries VALUES (?,?)').run(ensure(db, meta), JSON.stringify(state)))
+    },
     chats() { return use(db => db.prepare("SELECT DISTINCT chats.meta FROM chats JOIN messages ON messages.chat=chats.key WHERE messages.status IN ('pending','reserved','admitted')").all().map(row => JSON.parse(row.meta))) },
     unprepared(meta) {
       return use(db => db.prepare(`SELECT messages.*,chats.meta FROM messages JOIN chats ON chats.key=messages.chat
@@ -153,15 +164,15 @@ export function createMessageStore(home = '', logger) {
     },
     discard(meta, id) { use(db => db.prepare("UPDATE messages SET status='control' WHERE chat=? AND id=? AND prepared=0 AND status='pending'").run(keyOf(meta), id)) },
     protectedPaths() {
-      return use(db => new Set(db.prepare("SELECT item FROM messages WHERE status IN ('pending','reserved','admitted','failed','omitted')").all()
+      return use(db => new Set(db.prepare("SELECT item FROM messages WHERE status IN ('pending','reserved','admitted','failed','omitted','summarized')").all()
         .flatMap(row => JSON.parse(row.item).attachmentPaths ?? [])))
     },
-    begin(meta, session, selected, omitted = []) {
+    begin(meta, session, selected, omitted = [], summary = null) {
       return transaction(db => {
         const id = randomUUID(), key = ensure(db, meta)
         const seqs = selected.map(item => item.seq)
-        db.prepare('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?)').run(id, key, session, 'prepared', JSON.stringify(seqs), JSON.stringify(omitted), '{}')
-        for (const seq of seqs) {
+        db.prepare('INSERT INTO deliveries VALUES (?,?,?,?,?,?,?)').run(id, key, session, 'prepared', JSON.stringify(seqs), JSON.stringify(omitted), JSON.stringify({ summary }))
+        for (const seq of [...seqs, ...(summary?.sequences ?? [])]) {
           const result = db.prepare("UPDATE messages SET status='reserved',delivery=? WHERE chat=? AND seq=? AND status='pending'").run(id, key, seq)
           if (result.changes !== 1) throw new Error('消息范围已改变，拒绝重复投递')
         }
@@ -177,6 +188,9 @@ export function createMessageStore(home = '', logger) {
         db.prepare("UPDATE messages SET status=? WHERE delivery=? AND status!='omitted'").run(messageStatus, id)
         if (['processed', 'admitted', 'failed'].includes(status)) {
           for (const seq of JSON.parse(row.omitted)) db.prepare("UPDATE messages SET status='omitted',delivery=? WHERE seq=? AND chat=? AND status='pending'").run(id, seq, row.chat)
+          for (const seq of JSON.parse(row.detail).summary?.sequences ?? []) {
+            db.prepare("UPDATE messages SET status='summarized' WHERE seq=? AND chat=? AND delivery=?").run(seq, row.chat, id)
+          }
         }
       })
     },

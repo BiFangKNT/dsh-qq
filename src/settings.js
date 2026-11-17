@@ -75,6 +75,8 @@ export const OVERRIDABLE = [
   'groupMinGapMs',
   'rateLimitPerMin',
   'contextTokenizerFamily',
+  'backlogSummaryEnabled',
+  'backlogSummaryTimeoutMs',
   'groupMode',
   'groupAllow',
   'addressedMaySilent',
@@ -253,6 +255,9 @@ function validateOverrides(patch) {
   if (patch.addressClassifierEnabled != null && typeof patch.addressClassifierEnabled !== 'boolean') {
     throw new Error('addressClassifierEnabled 必须为布尔值')
   }
+  if (patch.backlogSummaryEnabled != null && typeof patch.backlogSummaryEnabled !== 'boolean') {
+    throw new Error('backlogSummaryEnabled 必须为布尔值')
+  }
   if (patch.requireMention != null && typeof patch.requireMention !== 'boolean') {
     throw new Error('requireMention 必须为布尔值')
   }
@@ -269,7 +274,7 @@ function validateOverrides(patch) {
   if (patch.addressClassifierTimeoutMs != null && (!Number.isFinite(patch.addressClassifierTimeoutMs) || patch.addressClassifierTimeoutMs <= 0)) {
     throw new Error('addressClassifierTimeoutMs 必须为正数')
   }
-  for (const key of ['memoryTimeoutMs', 'memoryTaskTtlHours']) {
+  for (const key of ['memoryTimeoutMs', 'memoryTaskTtlHours', 'backlogSummaryTimeoutMs']) {
     if (patch[key] != null && (!Number.isFinite(patch[key]) || patch[key] <= 0)) throw new Error(`${key} 必须为正数`)
   }
   for (const key of ['memoryProvider', 'memoryModel', 'memoryRoot']) {

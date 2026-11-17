@@ -41,6 +41,24 @@ try {
       (selected, omitted) => `未提供 ${omitted.length} 条\n${selected.map(row => row.body).join('\n')}`)
     return plan.tokens
   })
+  let summaryCalls = 0
+  llm.stream = async function* () {
+    summaryCalls++
+    yield { type: 'text-delta', index: 0, text: '模拟合并摘要：此前讨论了事情的进展，后来确认已完成。' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+  config.backlogSummaryEnabled = true
+  const renderSummary = (selected, omitted, summary) => [summary?.text ?? '', ...selected.map(row => row.body)].join('\n')
+  await measure('summarize3mCharsWithMockModel', async () => {
+    const plan = await capacity.select(record, {}, store, store.summary(record).end, renderSummary)
+    return { requests: summaryCalls, summarized: plan.summary.sequences.length,
+      selected: plan.selected.length, tokens: plan.tokens, limit: plan.limit }
+  })
+  await measure('reuseCompletedSummary', async () => {
+    const before = summaryCalls
+    await capacity.select(record, {}, store, store.summary(record).end, renderSummary)
+    return { extraRequests: summaryCalls - before }
+  })
   config.contextTokenizerFamily = 'v4'
   await measure('switchTokenizerFamily', () => capacity.textCount(body))
   console.log(JSON.stringify({ node: process.version, ...results }, null, 2))

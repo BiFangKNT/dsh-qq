@@ -22,7 +22,7 @@ for (const toolName of ['qq_history', 'qq_messages', 'qq_group_history', 'qq_pri
     try {
       messages.put(record, { id: 'new-1', body: '这件事已经完成了', source: {}, receivedAt: 1 })
       const events = [
-        { seq: 0, type: 'user/message', data: { content: [{ type: 'text', text: '遗漏范围说明，不是用户原话' }],
+        { seq: 0, type: 'user/message', data: { content: [{ type: 'text', text: '遗漏范围说明；旧积压摘要中的旧事实，不是新用户原话' }],
           source: { kind: 'user', qqMessages: [{ id: 'new-1' }] } } },
         { seq: 1, type: 'tool/call', data: { name: toolName, callId: 'read-old', arguments: toolName === 'qq_memory' ? '{"action":"read","id":"old","version":1}' : '{}' } },
         { seq: 2, type: 'tool/result', data: { message: { toolCallId: 'read-old', content: [{ type: 'text', text: '旧事项早就结束了' }] } } },
@@ -34,7 +34,7 @@ for (const toolName of ['qq_history', 'qq_messages', 'qq_group_history', 'qq_pri
       assert.equal(checks, 1)
       assert.equal(inputs[0].evidence.length, 1)
       assert.match(JSON.stringify(inputs[0].evidence), /这件事已经完成了/)
-      assert.doesNotMatch(JSON.stringify(inputs[0].evidence), /遗漏范围说明|旧事项早就结束/)
+      assert.doesNotMatch(JSON.stringify(inputs[0].evidence), /遗漏范围说明|旧积压摘要|旧事项早就结束/)
     } finally { memory.stop(); messages.close() }
   })
 }

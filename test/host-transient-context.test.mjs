@@ -43,6 +43,45 @@ const hasState = message => message.source?.kind === 'runtime-context' &&
   message.source.sections?.some(section => section.name === runtimeContextName)
 const text = value => JSON.stringify(value)
 
+test('原生宿主独立摘要旧积压，无工具和用户事件；主轮只接纳摘要与近期原文', async t => {
+  const h = await harness(t, { budget: true, compact: { headroomTokens: 100, thresholdRatio: 0.8 },
+    modelInfo: { context: { contextWindow: 24000 }, defaultMaxTokens: 512 },
+    async *respond(options) { yield* textResponse(options.purpose === 'qq-backlog-summary' ? '旧聊天已有事项已完成，来源序号1。' : '正常回复') },
+  })
+  h.config.backlogSummaryEnabled = true
+  const { agent } = await h.attach()
+  const record = { selfId: '10001', scope: 'private', peerId: '11001', sessionId: agent.session.id, agent }
+  await h.send(agent, '先前已经处理过的一轮。'.repeat(200))
+  const old = '旧消息：甲说之前约定的事情已经完成，乙确认收到。'.repeat(4000)
+  h.messages.put(record, { id: 'old', body: old, source: {}, receivedAt: 1 })
+  h.messages.put(record, { id: 'current', body: '本次触发消息需要保持原文', source: {}, receivedAt: 2 })
+  const render = (rows, omitted, summary) => [summary ? `旧积压摘要：${summary.text}` : '', ...rows.map(row => row.body)].join('\n')
+  const userEvents = () => agent.session.snapshotEvents().filter(event => event.type === 'user/message' &&
+    (event.data.message ?? event.data).source?.kind === 'user').length
+  const before = userEvents()
+  const plan = await h.capacity.select(record, { runtimeContext: () => 'STATE-V1' }, h.messages, h.messages.summary(record).end, render)
+  const auxiliary = h.requests.filter(request => request.purpose === 'qq-backlog-summary')
+  assert.ok(auxiliary.length > 1)
+  assert.equal(userEvents(), before)
+  for (const request of auxiliary) {
+    assert.deepEqual(request.tools, [])
+    assert.doesNotMatch(text(request), /本次触发消息|STATE-V1|先前已经处理过/)
+    assert.ok(await h.capacity.measure(request) <= (await h.capacity.inputBudget(request)).limit)
+  }
+  const compact = h.requests.find(request => request.purpose === 'compaction')
+  assert.ok(compact)
+  assert.doesNotMatch(text(compact), /本次触发消息|旧消息：|旧积压摘要|STATE-V1/)
+  const id = h.messages.begin(record, record.sessionId, plan.selected, [], plan.summary)
+  await h.send(agent, plan.body, { kind: 'user', qqDeliveryId: id, qqMessages: plan.selected.map(row => ({ id: row.id, seq: row.seq })) })
+  h.messages.finish(id, 'processed')
+  const main = h.requests.at(-1)
+  assert.notEqual(main.purpose, 'qq-backlog-summary')
+  assert.match(text(main.messages), /旧积压摘要|本次触发消息/)
+  assert.doesNotMatch(main.system ?? '', /旧积压摘要|旧消息：/)
+  assert.equal(h.messages.get(record, 'old').status, 'summarized')
+  assert.equal(h.messages.get(record, 'current').status, 'processed')
+})
+
 async function harness(t, { root, respond, compact = false, budget = false, modelInfo = {}, agentOptions = {} } = {}) {
   const ctx = new Context(), requests = [], errors = [], handles = []
   for (const plugin of [llm.default, sessionApi.default, Projections, SystemPrompt, tools.default, Native, AgentRegistry, TokenMeter]) await ctx.plugin(plugin)

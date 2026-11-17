@@ -51,6 +51,7 @@ export class SessionManager {
 
   stop() {
     this.closed = true
+    this.capacity?.stop?.()
     if (this.#sweeper) clearInterval(this.#sweeper)
     this.#sweeper = null
     for (const record of this.#records.values()) {

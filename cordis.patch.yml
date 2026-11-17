@@ -34,6 +34,8 @@
         groupPrompt: ''
         memberLabels: {}
         contextTokenizerFamily: v41
+        backlogSummaryEnabled: false
+        backlogSummaryTimeoutMs: 60000
 
         # ── 触发 ──
         addressClassifierEnabled: false

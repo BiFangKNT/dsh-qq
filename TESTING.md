@@ -9,6 +9,7 @@
 ```powershell
 node --test test/automation-state.test.mjs test/sleep.test.mjs test/sleep-delivery.test.mjs test/knowledge.test.mjs
 node --test test/workspace.test.mjs test/system-prompt.test.mjs test/prompts.test.mjs test/memory.test.mjs
+node --test test/backlog-summary.test.mjs test/message-pipeline.test.mjs test/context-budget.test.mjs test/host-transient-context.test.mjs
 pnpm test
 pnpm test:e2e
 node test/context-budget-benchmark.mjs
@@ -34,7 +35,9 @@ node test/context-budget-benchmark.mjs
 
 群消息第三批：`message-store`、`context-budget`、`message-pipeline` 覆盖 SQLite 原文、迁移、跨账号、接纳证据、沉默完成、失败不重做工具、未提供位置、回查权限与长消息续读、附件保护、先 compact 后交付、单条超限只反馈一次、分类器只读裁剪和图片对应、完整发送计划及失败进度。`host-transient-context` 使用未修改的 rc.2 宿主组件与模拟模型适配器，额外验证真正 `llm/stream` 组装边界及工具续调会计入状态和宿主辅助输入；这不等于实测真实模型服务或 QQ。
 
-真实部署还需核对模型提供了上下文窗口与输出上限、分词系列与主/辅助模型匹配、图片计量接口正常、压缩时本次消息与旧状态均不进入摘要，以及 QQ 回执丢失时没有自动重发。默认旧消息左截断会丢失本轮可见背景，原文保留供回查；分批摘要尚未实现。存储与附件保留范围见[消息设计](docs/group-message-design.md#第-3-批实际实现)。
+分批摘要专项：`backlog-summary` 覆盖默认关闭、不超窗零调用、先压缩已有历史、每批和最终预算、单条旧消息连续分片、保留触发原文、输出异常与超时、成功批次和片段位置恢复、原文变更失效、账号隔离、卸载及权限/配置变化停止、摘要来源接纳证据和附件保护。`message-pipeline` 通过模拟 OneBot 入站验证失败只通知一次、新触发续接、卸载重载续接、开关变化不阻塞新交付和已接纳不重放；`memory-message-evidence` 验证摘要不算新增用户依据。`host-transient-context` 使用未修改的 rc.2 原生宿主与模拟适配器，验证独立摘要无工具、不新增主会话用户事件，已有历史 compact 不含待交付积压或动态状态，最后主轮接收摘要和触发原文。设置专项覆盖页面保存、参数校验、落盘重读和默认恢复。
+
+真实部署还需核对模型提供了上下文窗口与输出上限、分词系列与主/辅助模型匹配、图片计量接口正常、压缩时本次消息与旧状态均不进入摘要，以及 QQ 回执丢失时没有自动重发。默认旧消息左截断会丢失本轮可见背景；可选分批摘要也不能保证保留全部细节，原文保留供回查。未验证真实模型的摘要质量、网络调用延迟或服务端计费，须结合实际配置验收；不能把本地模拟结果当作真实模型或 QQ 兼容性结论。存储与附件保留范围见[消息设计](docs/group-message-design.md#第-3-批实际实现)。
 
 工作目录专项覆盖完整旧模板识别、原字节备份、重复执行、手工修改保留、备份失败及重试、目录链接和硬链接保护；会话专项验证固定说明接入 system 后继续锁定，更新可被现有待同步判断发现，成功压缩或强制同步后才更新。mock 没有模拟官方工作目录指令加载；真实部署仍需核对下方升级清单。
 

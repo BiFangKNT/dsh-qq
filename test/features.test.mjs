@@ -34,6 +34,7 @@ function inboundHarness(extra = {}, sleep) {
   }
   const manager = {
     selfId: '9',
+    find: id => [...records.values()].find(record => record.sessionId === id),
     async obtain(info) {
       const key = info.scope + ':' + info.peerId
       if (!records.has(key)) records.set(key, {
